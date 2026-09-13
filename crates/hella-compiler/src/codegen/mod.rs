@@ -3895,16 +3895,93 @@ impl<'ctx> Codegen<'ctx> {
             Type::Generic(n, _, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
             _ => return None,
         };
-        if self.class_destructors.contains_key(&name) { Some(name) } else { None }
+        if self.class_destructors.contains_key(&name) {
+            Some(name)
+        } else if self.trait_names.contains(&name)
+            && self
+                .implementors_of(&name)
+                .iter()
+                .any(|c| self.class_destructors.contains_key(c))
+        {
+            // Trait-typed slot: destroy via tag dispatch as long as at
+            // least one implementor has a destructor. (The name stored is
+            // the trait; `emit_dtor_call` dispatches on it.)
+            Some(name)
+        } else {
+            None
+        }
     }
 
     fn emit_dtor_call(&mut self, alloca: PointerValue<'ctx>, class_name: &str) {
+        if self.trait_names.contains(class_name) {
+            self.emit_trait_dtor_call(alloca, class_name);
+            return;
+        }
         if let Some(dtors) = self.class_destructors.get(class_name).cloned() {
             for (func, _) in dtors {
                 let arg: inkwell::values::BasicMetadataValueEnum = alloca.into();
                 let _ = self.builder.build_call(func, &[arg], "dtor.call");
             }
         }
+    }
+
+    /// Destroy a trait-typed slot: load the `{data, tag}` pair and switch
+    /// over implementors that declare destructors. Implementors without
+    /// one take the (safe, empty) default branch.
+    fn emit_trait_dtor_call(&mut self, pair_slot: PointerValue<'ctx>, tname: &str) {
+        let Some(pair_ty) = self.trait_obj_types.get(tname).cloned() else {
+            return;
+        };
+        let Some(func) = self.cur_fn else {
+            return;
+        };
+        let pair = self
+            .builder
+            .build_load(pair_ty.as_basic_type_enum(), pair_slot, "trait.dtor.pair")
+            .unwrap();
+        let data = self
+            .builder
+            .build_extract_value(pair.into_struct_value(), 0, "trait.dtor.data")
+            .unwrap()
+            .into_pointer_value();
+        let tag = self
+            .builder
+            .build_extract_value(pair.into_struct_value(), 1, "trait.dtor.tag")
+            .unwrap()
+            .into_int_value();
+        let cur_bb = self.builder.get_insert_block().unwrap();
+        let merge_bb = self.context.append_basic_block(func, "trait.dtor.merge");
+        let default_bb = self
+            .context
+            .append_basic_block(func, "trait.dtor.skip");
+        let mut cases = Vec::new();
+        for cls in self.implementors_of(tname) {
+            let Some(dtors) = self.class_destructors.get(&cls).cloned() else {
+                continue;
+            };
+            let Some(tag_const) = self.class_tags.get(&cls).cloned() else {
+                continue;
+            };
+            let arm_bb = self.context.append_basic_block(func, "trait.dtor.arm");
+            cases.push((
+                self.context.i64_type().const_int(tag_const, false),
+                arm_bb,
+            ));
+            self.builder.position_at_end(arm_bb);
+            for (dtor_fn, _) in &dtors {
+                let _ = self.builder.build_call(
+                    *dtor_fn,
+                    &[data.into()],
+                    "trait.dtor.call",
+                );
+            }
+            self.builder.build_unconditional_branch(merge_bb).unwrap();
+        }
+        self.builder.position_at_end(default_bb);
+        self.builder.build_unconditional_branch(merge_bb).unwrap();
+        self.builder.position_at_end(cur_bb);
+        self.builder.build_switch(tag, default_bb, &cases).unwrap();
+        self.builder.position_at_end(merge_bb);
     }
 
     /// Emit destructor calls for the innermost scope (reverse declaration order).
@@ -7289,6 +7366,16 @@ mod tests {
             .expect("codegen failed");
     }
 
+    fn compile_ir(src: &str) -> String {
+        let lexed = crate::lexer::lex(src);
+        assert!(lexed.errors.is_empty(), "lex errors: {:?}", lexed.errors);
+        let prog = crate::parse::parse(lexed.tokens, src.to_string()).unwrap();
+        let ctx = inkwell::context::Context::create();
+        let mut cg = Codegen::new(&ctx, "test");
+        cg.compile_program(&prog).expect("codegen failed");
+        cg.get_module_ir()
+    }
+
     /// Regression: `void` extension methods used to emit `ret i64 0`,
     /// failing module verification (`extension U::ex verify failed`).
     #[test]
@@ -7327,6 +7414,31 @@ mod tests {
     fn trait_field_access_and_return_verifies() {
         compile_src(
             "trait Named has\n  string label()\nend\nopen class User implements Named has\n  public string name\n  User(string name) initialize\n  public string label() do\n    return this.name\n  end\nend\nNamed make() do\n  return User(\"a\")\nend\nvoid main() do\n  Named u = make()\n  u.name = \"b\"\nend\n",
+        );
+    }
+
+    /// Trait-typed locals register for destruction: the IR must call the
+    /// implementor's destructor through the tag switch at scope exit.
+    #[test]
+    fn trait_local_destructor_called() {
+        let ir = compile_ir(
+            "trait Talker has\n  void f()\nend\nopen class Bot implements Talker has\n  Bot() initialize\n  public void f() do\n    return\n  end\n  ~Bot() do\n    return\n  end\nend\nvoid main() do\n  Talker t = Bot()\nend\n",
+        );
+        assert!(
+            ir.contains("Bot__dtor") && ir.contains("trait.dtor"),
+            "expected tag-dispatched dtor call, got:\n{ir}"
+        );
+    }
+
+    /// A trait with no destructors anywhere emits no dtor machinery.
+    #[test]
+    fn trait_without_destructor_no_call() {
+        let ir = compile_ir(
+            "trait Talker has\n  void f()\nend\nopen class Bot implements Talker has\n  Bot() initialize\n  public void f() do\n    return\n  end\nend\nvoid main() do\n  Talker t = Bot()\nend\n",
+        );
+        assert!(
+            !ir.contains("trait.dtor"),
+            "unexpected dtor dispatch, got:\n{ir}"
         );
     }
 }
