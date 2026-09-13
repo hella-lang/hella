@@ -1,0 +1,46 @@
+// trait_objects.hll — trait objects: class-to-trait upcasts with
+// closed-world dynamic dispatch over the known implementors.
+// `Raf` values lower to `{data ptr, type tag}` pairs; calls and field
+// access through them switch on the tag. Anything beyond the trait's own
+// methods requires every implementor to agree (identical public
+// signature), else a compile error.
+
+import std::io
+
+trait Speaker has
+    string speak()
+end
+
+open class Cat implements Speaker has
+    public string name
+
+    Cat(string name) initialize
+
+    public string speak() do
+        return "meow"
+    end
+end
+
+open class Dog implements Speaker has
+    public string name
+
+    Dog(string name) initialize
+
+    public string speak() do
+        return "woof"
+    end
+end
+
+string pick(Speaker s) do
+    return s.speak()
+end
+
+void main() do
+    Speaker a = Cat("tom")
+    Speaker b = Dog("spike")
+    println(pick(a))
+    println(pick(b))
+    println(a.speak())
+    a.name = "tommy"
+    println(a.name)
+end

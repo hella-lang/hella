@@ -68,6 +68,18 @@ pub struct Codegen<'ctx> {
     /// tracked so `len()`/`is_empty()` lower instead of falling through to
     /// class-method resolution.
     string_vars: HashSet<String>,
+    /// Trait names declared in the program. Trait-typed slots lower to a
+    /// `{data ptr, type tag}` pair (trait objects, closed-world dispatch).
+    trait_names: HashSet<String>,
+    /// Pair struct type per trait, created in the declare phase.
+    trait_obj_types: HashMap<String, StructType<'ctx>>,
+    /// Dynamic-type tag per class (assigned on demand, stable within a build).
+    class_tags: HashMap<String, u64>,
+    next_class_tag: u64,
+    /// Direct `extends` parent per class (for transitive implementors).
+    class_extends: HashMap<String, String>,
+    /// Directly implemented traits per class.
+    class_implements: HashMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -117,6 +129,12 @@ impl<'ctx> Codegen<'ctx> {
             vec_vars: HashSet::new(),
             map_vars: HashSet::new(),
             string_vars: HashSet::new(),
+            trait_names: HashSet::new(),
+            trait_obj_types: HashMap::new(),
+            class_tags: HashMap::new(),
+            next_class_tag: 1,
+            class_extends: HashMap::new(),
+            class_implements: HashMap::new(),
         }
     }
 
@@ -150,6 +168,7 @@ impl<'ctx> Codegen<'ctx> {
             match it {
                 Item::Struct(s) => self.declare_struct(s)?,
                 Item::Class(c) => self.declare_class(c)?,
+                Item::Trait(t) => self.declare_trait(t),
                 Item::Enum(e) => self.declare_enum(e)?,
                 Item::Typedef(td) => self.declare_typedef(td)?,
                 Item::Distinct(dd) => self.declare_distinct(dd)?,
@@ -167,6 +186,8 @@ impl<'ctx> Codegen<'ctx> {
             };
             if let Item::Function(f) = it { self.declare_function(f)?; }
         }
+        // Dynamic-type tags for trait objects (needs all classes declared).
+        self.assign_class_tags();
         for item in &prog.items {
             let it: &Item = match item {
                 Item::Attributed{attrs: _, item} => item.as_ref(),
@@ -195,6 +216,192 @@ impl<'ctx> Codegen<'ctx> {
             });
         }
         Ok(())
+    }
+
+    /// Assign dynamic-type tags to every class implementing ≥1 trait
+    /// (directly or via `extends`), in sorted order for deterministic
+    /// modules. Runs once after the declare phase, before any body
+    /// codegen, so forward references resolve.
+    fn assign_class_tags(&mut self) {
+        let mut names: Vec<String> = self.class_methods.keys().cloned().collect();
+        names.sort();
+        for name in names {
+            if self.class_tags.contains_key(&name) {
+                continue;
+            }
+            if self.class_transitively_implements_any(&name) {
+                let t = self.next_class_tag;
+                self.next_class_tag += 1;
+                self.class_tags.insert(name, t);
+            }
+        }
+    }
+
+    /// True when `class` implements any known trait (directly or through
+    /// its `extends` chain; cycle-guarded).
+    fn class_transitively_implements_any(&self, class: &str) -> bool {
+        let mut seen = HashSet::new();
+        let mut cur = Some(class.to_string());
+        while let Some(name) = cur {
+            if !seen.insert(name.clone()) {
+                break;
+            }
+            if let Some(impls) = self.class_implements.get(&name) {
+                if impls.iter().any(|t| self.trait_names.contains(t)) {
+                    return true;
+                }
+            }
+            cur = self.class_extends.get(&name).cloned();
+        }
+        false
+    }
+
+    /// All classes implementing `trait_name` (directly or via `extends`),
+    /// sorted for deterministic dispatch. Cycle-guarded.
+    fn implementors_of(&self, trait_name: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .class_methods
+            .keys()
+            .filter(|c| {
+                let mut seen = HashSet::new();
+                let mut cur = Some((*c).clone());
+                while let Some(name) = cur {
+                    if !seen.insert(name.clone()) {
+                        break;
+                    }
+                    if let Some(impls) = self.class_implements.get(&name) {
+                        if impls.iter().any(|t| t == trait_name) {
+                            return true;
+                        }
+                    }
+                    cur = self.class_extends.get(&name).cloned();
+                }
+                false
+            })
+            .cloned()
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Declared function for `method` on a concrete class (includes
+    /// inherited parent methods, merged by `declare_class`).
+    fn method_func_of(
+        &self,
+        class: &str,
+        method: &str,
+    ) -> Option<(FunctionValue<'ctx>, TyInfo)> {
+        self.class_methods
+            .get(class)?
+            .get(method)
+            .cloned()
+    }
+
+    /// Which trait (if any) owns this pair struct type?
+    fn trait_name_of_pair(&self, st: StructType<'ctx>) -> Option<String> {
+        self.trait_obj_types
+            .iter()
+            .find(|(_, v)| **v == st)
+            .map(|(k, _)| k.clone())
+    }
+
+    /// Box a class-typed VALUE into a trait-pair value for a trait-typed
+    /// destination: materialize it into a hidden slot and build `{slot ptr,
+    /// tag}`. Everything else passes through untouched (callers keep their
+    /// own coercion). A trait value flowing into `any` (opaque pointer)
+    /// erases to its data pointer.
+    fn box_trait_value(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        dest: BasicTypeEnum<'ctx>,
+        span: Span,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        if val.get_type() == dest {
+            return Ok(val);
+        }
+        // Erasure into `any`/opaque pointer: keep the data pointer.
+        if let BasicTypeEnum::PointerType(_) = dest {
+            if let BasicValueEnum::StructValue(sv) = val {
+                if self.trait_name_of_pair(sv.get_type()).is_some() {
+                    let data = self
+                        .builder
+                        .build_extract_value(sv, 0, "trait.erase")
+                        .unwrap()
+                        .into_pointer_value();
+                    return Ok(data.into());
+                }
+            }
+        }
+        let BasicTypeEnum::StructType(dest_st) = dest else {
+            return Ok(val);
+        };
+        let Some(trait_name) = self.trait_name_of_pair(dest_st) else {
+            return Ok(val);
+        };
+        let BasicValueEnum::StructValue(val_st) = val else {
+            return Err(CodegenError {
+                message: format!("cannot convert value to trait `{trait_name}`"),
+                span,
+            });
+        };
+        if self.trait_name_of_pair(val_st.get_type()).is_some() {
+            return Err(CodegenError {
+                message: format!("cannot convert trait value to trait `{trait_name}`"),
+                span,
+            });
+        }
+        let class_name = self.ty_to_struct_name(&val.get_type())?;
+        if !self.class_transitively_implements_any(&class_name)
+            || !self.implementors_of(&trait_name).contains(&class_name)
+        {
+            return Err(CodegenError {
+                message: format!("`{class_name}` does not implement trait `{trait_name}`"),
+                span,
+            });
+        }
+        let tag = *self.class_tags.get(&class_name).ok_or(CodegenError {
+            message: format!("no dynamic tag for `{class_name}`"),
+            span,
+        })?;
+        let class_st = *self.struct_types.get(&class_name).ok_or(CodegenError {
+            message: format!("unknown class `{class_name}`"),
+            span,
+        })?;
+        let slot = self
+            .builder
+            .build_alloca(class_st.as_basic_type_enum(), "trait.box")
+            .unwrap();
+        self.builder.build_store(slot, val).unwrap();
+        let pair_slot = self.builder.build_alloca(dest, "trait.pair").unwrap();
+        let data_ptr = self
+            .builder
+            .build_struct_gep(dest_st, pair_slot, 0, "trait.data.ptr")
+            .unwrap();
+        self.builder.build_store(data_ptr, slot).unwrap();
+        let tag_ptr = self
+            .builder
+            .build_struct_gep(dest_st, pair_slot, 1, "trait.tag.ptr")
+            .unwrap();
+        self.builder.build_store(
+            tag_ptr,
+            self.context.i64_type().const_int(tag, false),
+        )
+        .unwrap();
+        Ok(self.builder.build_load(dest, pair_slot, "trait.pair").unwrap())
+    }
+
+    /// Record a trait for trait-object lowering: its `{data ptr, type tag}`
+    /// pair type is pre-created so value lowering stays `&self`.
+    fn declare_trait(&mut self, t: &TraitDecl) {
+        self.trait_names.insert(t.name.clone());
+        if !self.trait_obj_types.contains_key(&t.name) {
+            let pair = self
+                .context
+                .opaque_struct_type(&format!("__trait_obj_{}", t.name));
+            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+            pair.set_body(&[ptr_ty.into(), self.context.i64_type().into()], false);
+            self.trait_obj_types.insert(t.name.clone(), pair);
+        }
     }
 
     fn declare_struct(&mut self, s: &StructDecl) -> Result<(), CodegenError> {
@@ -276,6 +483,22 @@ impl<'ctx> Codegen<'ctx> {
         opaque.set_body(&field_tys, false);
         self.struct_fields.insert(c.name.clone(), field_map);
         self.struct_field_defaults.insert(c.name.clone(), field_defaults);
+        // Record heritage for trait-object dispatch (transitive implementors
+        // are computed on demand from these direct edges).
+        if let Some(ref parent_ty) = c.extends {
+            if let Type::Named(pname, _) = parent_ty {
+                self.class_extends.insert(c.name.clone(), pname.clone());
+            }
+        }
+        let mut direct_impls = Vec::new();
+        for imp in &c.implements {
+            if let Type::Named(n, _) = imp {
+                direct_impls.push(n.clone());
+            }
+        }
+        if !direct_impls.is_empty() {
+            self.class_implements.insert(c.name.clone(), direct_impls);
+        }
         // Declare methods
         let mut methods = HashMap::new();
         for m in &c.methods {
@@ -333,8 +556,12 @@ impl<'ctx> Codegen<'ctx> {
                 crate::sema::Ty::Char => self.context.i32_type().fn_type(&param_llvm, false),
                 crate::sema::Ty::String => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, false),
                 crate::sema::Ty::Struct(ref n) => {
-                    let st = self.struct_types.get(n).unwrap();
-                    st.fn_type(&param_llvm, false)
+                    if let Some(pair) = self.trait_obj_types.get(n) {
+                        pair.fn_type(&param_llvm, false)
+                    } else {
+                        let st = self.struct_types.get(n).unwrap();
+                        st.fn_type(&param_llvm, false)
+                    }
                 }
                 crate::sema::Ty::Array(_) => self.context.i64_type().array_type(16).fn_type(&param_llvm, false),
                 crate::sema::Ty::FixedArray { elem: ref elem, size: ref size } => {
@@ -721,8 +948,12 @@ impl<'ctx> Codegen<'ctx> {
                         crate::sema::Ty::Float => self.context.f32_type().fn_type(&param_llvm, false),
                         crate::sema::Ty::Double => self.context.f64_type().fn_type(&param_llvm, false),
                         crate::sema::Ty::Struct(ref n) => {
-                            let st = self.struct_types.get(n).unwrap();
-                            st.fn_type(&param_llvm, false)
+                            if let Some(pair) = self.trait_obj_types.get(n) {
+                                pair.fn_type(&param_llvm, false)
+                            } else {
+                                let st = self.struct_types.get(n).unwrap();
+                                st.fn_type(&param_llvm, false)
+                            }
                         }
                         crate::sema::Ty::Enum(ref n) => {
                             let et = self.enum_types.get(n).unwrap();
@@ -2386,6 +2617,9 @@ impl<'ctx> Codegen<'ctx> {
                     st.as_basic_type_enum().into()
                 } else if let Some(et) = self.enum_types.get(lookup) {
                     et.as_basic_type_enum().into()
+                } else if let Some(pair) = self.trait_obj_types.get(lookup) {
+                    // Trait-typed slots lower to `{data ptr, type tag}` pairs.
+                    pair.as_basic_type_enum().into()
                 } else {
                     panic!("unknown struct/enum type {n}")
                 }
@@ -2498,6 +2732,9 @@ impl<'ctx> Codegen<'ctx> {
                     Some(st.as_basic_type_enum().into())
                 } else if let Some(et) = self.enum_types.get(lookup) {
                     Some(et.as_basic_type_enum().into())
+                } else if let Some(pair) = self.trait_obj_types.get(lookup) {
+                    // Trait-typed slots lower to `{data ptr, type tag}` pairs.
+                    Some(pair.as_basic_type_enum().into())
                 } else {
                     panic!("unknown struct {n} in llvm_ty_for_sema")
                 }
@@ -2708,11 +2945,15 @@ impl<'ctx> Codegen<'ctx> {
                     self.context.i64_type().fn_type(&param_types, is_c_varargs)
                 }
                 crate::sema::Ty::Struct(ref n) => {
-                    let st = self.struct_types.get(n).ok_or(CodegenError {
-                        message: format!("unknown struct {n}"),
-                        span: f.ret_ty.span(),
-                    })?;
-                    st.fn_type(&param_types, is_c_varargs)
+                    if let Some(pair) = self.trait_obj_types.get(n) {
+                        pair.fn_type(&param_types, is_c_varargs)
+                    } else {
+                        let st = self.struct_types.get(n).ok_or(CodegenError {
+                            message: format!("unknown struct {n}"),
+                            span: f.ret_ty.span(),
+                        })?;
+                        st.fn_type(&param_types, is_c_varargs)
+                    }
                 }
                 crate::sema::Ty::Array(ref el) => {
                     // arrays as fixed [16 x elem] return — rarely used but support
@@ -2863,6 +3104,377 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    /// Box a call argument into its declared parameter type when that
+    /// type is a trait object; pass through otherwise.
+    fn box_arg_for_param(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        info: &TyInfo,
+        param_idx: usize,
+        span: Span,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let Some(pt) = info.params.get(param_idx) else {
+            return Ok(val);
+        };
+        let Some(dest) = self.llvm_ty_for_sema(pt) else {
+            return Ok(val);
+        };
+        self.box_trait_value(val, dest, span)
+    }
+
+    /// Pack method-call arguments: `this` first, then fixed/variadic/tail
+    /// params (with `this` offset), boxing trait arguments. Shared by
+    /// static and trait dispatch.
+    fn codegen_method_call_args(
+        &mut self,
+        args: &[CallArg],
+        info: &TyInfo,
+        this_ptr: PointerValue<'ctx>,
+        span: Span,
+    ) -> Result<Vec<inkwell::values::BasicMetadataValueEnum<'ctx>>, CodegenError> {
+        let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
+            vec![this_ptr.into()];
+        // Variadic handling for method `...T vda` (with `this` offset)
+        let variadic_idx = info.param_is_variadic.iter().position(|&v| v);
+        if let Some(vidx) = variadic_idx {
+            // vidx includes `this` at 0, so real fixed before variadic = vidx -1
+            let fixed_real = if vidx == 0 { 0 } else { vidx - 1 };
+            // push fixed real params
+            for (i, a) in args.iter().take(fixed_real).enumerate() {
+                let v = self.codegen_call_arg(a)?;
+                let v = self.box_arg_for_param(v, info, i + 1, a.span())?;
+                arg_vals.push(v.into());
+            }
+            // variadic element type
+            let elem_ty = info.params.get(vidx).and_then(|t| if let crate::sema::Ty::Array(el) = t { Some(&**el) } else { None }).cloned().unwrap_or(crate::sema::Ty::Int);
+            let arr_llvm_ty: BasicTypeEnum = if let Some(bt) = self.llvm_ty_for_sema(&elem_ty) {
+                match bt {
+                    BasicTypeEnum::PointerType(pt) => pt.array_type(16).into(),
+                    BasicTypeEnum::IntType(it) => it.array_type(16).into(),
+                    BasicTypeEnum::FloatType(ft) => ft.array_type(16).into(),
+                    BasicTypeEnum::StructType(st) => st.array_type(16).into(),
+                    BasicTypeEnum::ArrayType(at) => at.array_type(16).into(),
+                    _ => self.context.i64_type().array_type(16).into(),
+                }
+            } else {
+                self.context.i64_type().array_type(16).into()
+            };
+            let total_real_params = info.params.len() - 1; // excluding this
+            let remaining_after = total_real_params - (vidx - 1) - 1; // params after variadic
+            let vda_count = if remaining_after == 0 {
+                args.len() - fixed_real
+            } else {
+                if args.len() >= total_real_params { args.len() - total_real_params + 1 } else { 0 }
+            };
+            let elem_dest: Option<BasicTypeEnum> = self.llvm_ty_for_sema(&elem_ty);
+            let mut arr_val: BasicValueEnum = arr_llvm_ty.into_array_type().get_undef().into();
+            if args.len() <= fixed_real {
+                arr_val = arr_llvm_ty.const_zero().into();
+            } else {
+                for (j, arg) in args.iter().skip(fixed_real).take(vda_count).enumerate() {
+                    let v = self.codegen_call_arg(arg)?;
+                    let v = match elem_dest {
+                        Some(dest) => self.box_trait_value(v, dest, arg.span())?,
+                        None => v,
+                    };
+                    if arr_val.is_array_value() {
+                        let tmp = self.builder.build_insert_value(arr_val.into_array_value(), v, j as u32, &format!("vararg.{}", j)).unwrap();
+                        arr_val = tmp.as_basic_value_enum();
+                    }
+                }
+                if vda_count == 0 {
+                    arr_val = arr_llvm_ty.const_zero().into();
+                }
+            }
+            arg_vals.push(arr_val.into());
+            for (j, arg) in args.iter().skip(fixed_real + vda_count).enumerate() {
+                let v = self.codegen_call_arg(arg)?;
+                // tail real-param index = fixed + vda(1) + j → params idx +1 for `this`
+                let v = if let Some(pt) = info.params.get(fixed_real + j + 2) {
+                    if let Some(dest) = self.llvm_ty_for_sema(pt) {
+                        self.box_trait_value(v, dest, arg.span())?
+                    } else {
+                        v
+                    }
+                } else {
+                    v
+                };
+                arg_vals.push(v.into());
+            }
+        } else {
+            for (i, a) in args.iter().enumerate() {
+                let v = self.codegen_call_arg(a)?;
+                let v = self.box_arg_for_param(v, info, i + 1, a.span())?;
+                arg_vals.push(v.into());
+            }
+        }
+        Ok(arg_vals)
+    }
+
+    /// Closed-world dynamic dispatch for a method call on a trait-typed
+    /// receiver: evaluate the `{data, tag}` pair and args once, switch on
+    /// the tag over the known implementors, call each concrete method with
+    /// the shared args, and PHI the results. Sema guaranteed identical
+    /// signatures (and public visibility) across implementors.
+    fn codegen_trait_method_call(
+        &mut self,
+        object: &Expr,
+        trait_name: &str,
+        method: &str,
+        args: &[CallArg],
+        span: Span,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let pair_val = self.codegen_expr(object)?;
+        let pair_st = match pair_val.get_type() {
+            BasicTypeEnum::StructType(st) => st,
+            _ => {
+                return Err(CodegenError {
+                    message: format!("trait receiver did not lower to a pair"),
+                    span,
+                })
+            }
+        };
+        if self.trait_name_of_pair(pair_st).as_deref() != Some(trait_name) {
+            return Err(CodegenError {
+                message: format!("trait receiver type mismatch for `{trait_name}`"),
+                span,
+            });
+        }
+        let data = self
+            .builder
+            .build_extract_value(pair_val.into_struct_value(), 0, "trait.data")
+            .unwrap()
+            .into_pointer_value();
+        let tag = self
+            .builder
+            .build_extract_value(pair_val.into_struct_value(), 1, "trait.tag")
+            .unwrap()
+            .into_int_value();
+        let impls = self.implementors_of(trait_name);
+        if impls.is_empty() {
+            return Err(CodegenError {
+                message: format!("trait `{trait_name}` has no implementors"),
+                span,
+            });
+        }
+        // First implementor drives arg packing + result type (identical
+        // conventions across all of them, per sema).
+        let first_info = self
+            .method_func_of(&impls[0], method)
+            .map(|(_, info)| info)
+            .ok_or(CodegenError {
+                message: format!("unknown method `{method}` for trait `{trait_name}`"),
+                span,
+            })?;
+        let arg_vals = self.codegen_method_call_args(args, &first_info, data, span)?;
+        let ret_llvm: Option<BasicTypeEnum> = self.llvm_ty_for_sema(&first_info.ret);
+        // Single implementor: direct call, no switch needed.
+        if impls.len() == 1 {
+            let (callee, _) = self.method_func_of(&impls[0], method).ok_or(CodegenError {
+                message: format!("unknown method `{method}` for trait `{trait_name}`"),
+                span,
+            })?;
+            let call = self.builder.build_call(callee, &arg_vals, "trait.call").unwrap();
+            let vk = call.try_as_basic_value();
+            if vk.is_basic() {
+                return Ok(vk.basic().unwrap());
+            }
+            return Ok(self.context.i64_type().const_int(0, false).into());
+        }
+        let func = self.cur_fn.ok_or(CodegenError {
+            message: "trait dispatch outside function".into(),
+            span,
+        })?;
+        let cur_bb = self.builder.get_insert_block().unwrap();
+        let merge_bb = self.context.append_basic_block(func, "trait.merge");
+        let default_bb = self.context.append_basic_block(func, "trait.unreachable");
+        let mut cases: Vec<(
+            inkwell::values::IntValue<'ctx>,
+            inkwell::basic_block::BasicBlock<'ctx>,
+        )> = Vec::new();
+        let mut incoming: Vec<(
+            BasicValueEnum<'ctx>,
+            inkwell::basic_block::BasicBlock<'ctx>,
+        )> = Vec::new();
+        for cls in &impls {
+            let (callee, _) = self.method_func_of(cls, method).ok_or(CodegenError {
+                message: format!("unknown method `{method}` for trait `{trait_name}`"),
+                span,
+            })?;
+            let tag_const = *self.class_tags.get(cls).ok_or(CodegenError {
+                message: format!("no dynamic tag for `{cls}`"),
+                span,
+            })?;
+            let arm_bb = self.context.append_basic_block(func, "trait.arm");
+            cases.push((
+                self.context.i64_type().const_int(tag_const, false),
+                arm_bb,
+            ));
+            self.builder.position_at_end(arm_bb);
+            let call = self.builder.build_call(callee, &arg_vals, "trait.call").unwrap();
+            if ret_llvm.is_some() {
+                let vk = call.try_as_basic_value();
+                if vk.is_basic() {
+                    incoming.push((vk.basic().unwrap(), arm_bb));
+                }
+            }
+            self.builder.build_unconditional_branch(merge_bb).unwrap();
+        }
+        self.builder.position_at_end(default_bb);
+        self.builder.build_unreachable().unwrap();
+        self.builder.position_at_end(cur_bb);
+        self.builder.build_switch(tag, default_bb, &cases).unwrap();
+        self.builder.position_at_end(merge_bb);
+        match ret_llvm {
+            Some(rt) => {
+                let phi = self.builder.build_phi(rt, "trait.result").unwrap();
+                let refs: Vec<(&dyn inkwell::values::BasicValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+                    incoming.iter().map(|(v, bb)| (v as &dyn inkwell::values::BasicValue<'ctx>, *bb)).collect();
+                phi.add_incoming(&refs);
+                Ok(phi.as_basic_value())
+            }
+            None => Ok(self.context.i64_type().const_int(0, false).into()),
+        }
+    }
+
+    /// Load a field through a trait-typed receiver: switch over
+    /// implementors for the field pointer, load the agreed field type.
+    fn codegen_trait_field_load(
+        &mut self,
+        object: &Expr,
+        tname: &str,
+        field: &str,
+        span: Span,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let field_ptr = self.codegen_trait_field_ptr(object, tname, field, span)?;
+        let first = self.implementors_of(tname).into_iter().next().ok_or(CodegenError {
+            message: format!("trait `{tname}` has no implementors"),
+            span,
+        })?;
+        let field_ty = self.class_field_llvm_ty(&first, field, span)?;
+        Ok(self.builder.build_load(field_ty, field_ptr, field).unwrap())
+    }
+
+    /// Field LLVM type for a concrete class (first-implementor layouts are
+    /// representative: sema validated identical types across implementors).
+    fn class_field_llvm_ty(
+        &self,
+        class: &str,
+        field: &str,
+        span: Span,
+    ) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+        let fields = self.struct_fields.get(class).ok_or(CodegenError {
+            message: format!("unknown class `{class}`"),
+            span,
+        })?;
+        let idx = fields.get(field).ok_or(CodegenError {
+            message: format!("trait dispatch: `{class}` has no field `{field}`"),
+            span,
+        })?;
+        let st = self.struct_types.get(class).ok_or(CodegenError {
+            message: format!("unknown class `{class}`"),
+            span,
+        })?;
+        Ok(st.get_field_type_at_index(*idx).unwrap())
+    }
+
+    /// GEP pointer to `field` through a trait-typed receiver: switch over
+    /// implementors (layouts may differ per class), GEP per layout, PHI the
+    /// pointers. Serves both field reads and writes.
+    fn codegen_trait_field_ptr(
+        &mut self,
+        object: &Expr,
+        tname: &str,
+        field: &str,
+        span: Span,
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
+        let pair_val = self.codegen_expr(object)?;
+        let data = match pair_val.get_type() {
+            BasicTypeEnum::StructType(st)
+                if self.trait_name_of_pair(st).as_deref() == Some(tname) =>
+            {
+                self.builder
+                    .build_extract_value(pair_val.into_struct_value(), 0, "trait.data")
+                    .unwrap()
+                    .into_pointer_value()
+            }
+            _ => {
+                return Err(CodegenError {
+                    message: format!("trait receiver type mismatch for `{tname}`"),
+                    span,
+                })
+            }
+        };
+        let tag = self
+            .builder
+            .build_extract_value(pair_val.into_struct_value(), 1, "trait.tag")
+            .unwrap()
+            .into_int_value();
+        let impls = self.implementors_of(tname);
+        if impls.is_empty() {
+            return Err(CodegenError {
+                message: format!("trait `{tname}` has no implementors"),
+                span,
+            });
+        }
+        let func = self.cur_fn.ok_or(CodegenError {
+            message: "trait field access outside function".into(),
+            span,
+        })?;
+        let cur_bb = self.builder.get_insert_block().unwrap();
+        let merge_bb = self.context.append_basic_block(func, "trait.fmerge");
+        let default_bb = self.context.append_basic_block(func, "trait.funreachable");
+        let mut cases: Vec<(
+            inkwell::values::IntValue<'ctx>,
+            inkwell::basic_block::BasicBlock<'ctx>,
+        )> = Vec::new();
+        let mut incoming: Vec<(
+            BasicValueEnum<'ctx>,
+            inkwell::basic_block::BasicBlock<'ctx>,
+        )> = Vec::new();
+        for cls in &impls {
+            let tag_const = *self.class_tags.get(cls).ok_or(CodegenError {
+                message: format!("no dynamic tag for `{cls}`"),
+                span,
+            })?;
+            let fields = self.struct_fields.get(cls).ok_or(CodegenError {
+                message: format!("unknown class `{cls}`"),
+                span,
+            })?;
+            let idx = fields.get(field).ok_or(CodegenError {
+                message: format!("trait dispatch: `{cls}` has no field `{field}`"),
+                span,
+            })?;
+            let st = self.struct_types.get(cls).ok_or(CodegenError {
+                message: format!("unknown class `{cls}`"),
+                span,
+            })?;
+            let arm_bb = self.context.append_basic_block(func, "trait.farm");
+            cases.push((
+                self.context.i64_type().const_int(tag_const, false),
+                arm_bb,
+            ));
+            self.builder.position_at_end(arm_bb);
+            let fptr = self
+                .builder
+                .build_struct_gep(*st, data, *idx, "trait.field")
+                .unwrap();
+            incoming.push((fptr.into(), arm_bb));
+            self.builder.build_unconditional_branch(merge_bb).unwrap();
+        }
+        self.builder.position_at_end(default_bb);
+        self.builder.build_unreachable().unwrap();
+        self.builder.position_at_end(cur_bb);
+        self.builder.build_switch(tag, default_bb, &cases).unwrap();
+        self.builder.position_at_end(merge_bb);
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let phi = self.builder.build_phi(ptr_ty, "trait.field.ptr").unwrap();
+        let refs: Vec<(&dyn inkwell::values::BasicValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+            incoming.iter().map(|(v, bb)| (v as &dyn inkwell::values::BasicValue<'ctx>, *bb)).collect();
+        phi.add_incoming(&refs);
+        Ok(phi.as_basic_value().into_pointer_value())
+    }
+
     fn codegen_function(&mut self, f: &Function) -> Result<(), CodegenError> {
         let (func, info) =
             self.funcs.get(&f.name).cloned().ok_or(CodegenError {
@@ -2966,7 +3578,11 @@ impl<'ctx> Codegen<'ctx> {
                         .const_null()
                         .into(),
                     crate::sema::Ty::Struct(ref n) => {
-                        self.struct_types.get(n).unwrap().const_zero().into()
+                        if let Some(pair) = self.trait_obj_types.get(n) {
+                            pair.const_zero().into()
+                        } else {
+                            self.struct_types.get(n).unwrap().const_zero().into()
+                        }
                     }
                     crate::sema::Ty::Array(_) => self
                         .context
@@ -3058,7 +3674,12 @@ impl<'ctx> Codegen<'ctx> {
             crate::sema::Ty::Bool => Some(self.context.bool_type().const_int(0, false).into()),
             crate::sema::Ty::Char => Some(self.context.i32_type().const_int(0, false).into()),
             crate::sema::Ty::String => Some(self.context.ptr_type(inkwell::AddressSpace::default()).const_null().into()),
-            crate::sema::Ty::Struct(n) => Some(self.struct_types.get(n).unwrap().const_zero().into()),
+            crate::sema::Ty::Struct(n) => Some(
+                self.trait_obj_types
+                    .get(n)
+                    .map(|pair| pair.const_zero().into())
+                    .unwrap_or_else(|| self.struct_types.get(n).unwrap().const_zero().into()),
+            ),
             crate::sema::Ty::Array(_) => Some(self.context.i64_type().array_type(16).const_zero().into()),
             crate::sema::Ty::FixedArray { elem, size } => {
                 let n = size.unwrap_or(16) as u32;
@@ -3732,6 +4353,8 @@ impl<'ctx> Codegen<'ctx> {
                         self.store_map_entries(alloca, map_st, dest_key_ty, dest_val_ty, map_entries)?;
                     } else {
                         let val = self.codegen_expr(init)?;
+                        // Box class values flowing into trait-typed slots.
+                        let val = self.box_trait_value(val, ty, d.span)?;
                         let coerced = self.coerce_to_ty(val, ty);
                         self.builder.build_store(alloca, coerced).unwrap();
                     }
@@ -4039,6 +4662,14 @@ impl<'ctx> Codegen<'ctx> {
                     let val = self.codegen_expr(expr)?;
                     // Coerce int return to the function's declared return width
                     // (e.g. `i32 foo() do return 5 end` — literal is i64).
+                    // Class values returning through a trait-typed slot are
+                    // boxed into `{data, tag}` pairs first.
+                    let mut val = val;
+                    if let Some(cur) = self.cur_fn {
+                        if let Some(ret_ty) = cur.get_type().get_return_type() {
+                            val = self.box_trait_value(val, ret_ty, r.span)?;
+                        }
+                    }
                     let coerced = if val.is_int_value() {
                         if let Some(cur) = self.cur_fn {
                             if let Some(ret_ty) = cur.get_type().get_return_type() {
@@ -4503,70 +5134,20 @@ impl<'ctx> Codegen<'ctx> {
                     }
                 };
                 let obj_ty = self.infer_expr_ty(object)?;
+                // Trait-typed receiver: closed-world dynamic dispatch over
+                // the known implementors (see `codegen_trait_method_call`).
+                if let crate::sema::Ty::Struct(ref n) = obj_ty {
+                    if self.trait_names.contains(n) {
+                        return self.codegen_trait_method_call(object, n, method, args, expr.span);
+                    }
+                }
                 let cls_name = match obj_ty {
                     crate::sema::Ty::Struct(ref n) => n.clone(),
                     _ => return Err(CodegenError{message: format!("method call on non-class"), span: expr.span}),
                 };
                 let methods = self.class_methods.get(&cls_name).ok_or(CodegenError{message: format!("unknown class {cls_name}"), span: expr.span})?;
                 let (func, info) = methods.get(method).cloned().ok_or(CodegenError{message: format!("unknown method {method} for class {cls_name}"), span: expr.span})?;
-                let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = vec![this_ptr.into()];
-                // Variadic handling for method `...T vda` (with `this` offset)
-                let variadic_idx = info.param_is_variadic.iter().position(|&v| v);
-                if let Some(vidx) = variadic_idx {
-                    // vidx includes `this` at 0, so real fixed before variadic = vidx -1
-                    let fixed_real = if vidx == 0 { 0 } else { vidx - 1 };
-                    // push fixed real params
-                    for (i, a) in args.iter().take(fixed_real).enumerate() {
-                        let v = self.codegen_call_arg(a)?;
-                        arg_vals.push(v.into());
-                    }
-                    // variadic element type
-                    let elem_ty = info.params.get(vidx).and_then(|t| if let crate::sema::Ty::Array(el) = t { Some(&**el) } else { None }).cloned().unwrap_or(crate::sema::Ty::Int);
-                    let arr_llvm_ty: BasicTypeEnum = if let Some(bt) = self.llvm_ty_for_sema(&elem_ty) {
-                        match bt {
-                            BasicTypeEnum::PointerType(pt) => pt.array_type(16).into(),
-                            BasicTypeEnum::IntType(it) => it.array_type(16).into(),
-                            BasicTypeEnum::FloatType(ft) => ft.array_type(16).into(),
-                            BasicTypeEnum::StructType(st) => st.array_type(16).into(),
-                            BasicTypeEnum::ArrayType(at) => at.array_type(16).into(),
-                            _ => self.context.i64_type().array_type(16).into(),
-                        }
-                    } else {
-                        self.context.i64_type().array_type(16).into()
-                    };
-                    let total_real_params = info.params.len() - 1; // excluding this
-                    let remaining_after = total_real_params - (vidx - 1) - 1; // params after variadic
-                    let vda_count = if remaining_after == 0 {
-                        args.len() - fixed_real
-                    } else {
-                        if args.len() >= total_real_params { args.len() - total_real_params + 1 } else { 0 }
-                    };
-                    let mut arr_val: BasicValueEnum = arr_llvm_ty.into_array_type().get_undef().into();
-                    if args.len() <= fixed_real {
-                        arr_val = arr_llvm_ty.const_zero().into();
-                    } else {
-                        for (j, arg) in args.iter().skip(fixed_real).take(vda_count).enumerate() {
-                            let v = self.codegen_call_arg(arg)?;
-                            if arr_val.is_array_value() {
-                                let tmp = self.builder.build_insert_value(arr_val.into_array_value(), v, j as u32, &format!("vararg.{}", j)).unwrap();
-                                arr_val = tmp.as_basic_value_enum();
-                            }
-                        }
-                        if vda_count == 0 {
-                            arr_val = arr_llvm_ty.const_zero().into();
-                        }
-                    }
-                    arg_vals.push(arr_val.into());
-                    for arg in args.iter().skip(fixed_real + vda_count) {
-                        let v = self.codegen_call_arg(arg)?;
-                        arg_vals.push(v.into());
-                    }
-                } else {
-                    for a in args {
-                        let v = self.codegen_call_arg(a)?;
-                        arg_vals.push(v.into());
-                    }
-                }
+                let arg_vals = self.codegen_method_call_args(args, &info, this_ptr, expr.span)?;
                 let call = self.builder.build_call(func, &arg_vals, "call").unwrap();
                 let vk = call.try_as_basic_value();
                 if vk.is_basic() { Ok(vk.basic().unwrap()) } else { Ok(self.context.i64_type().const_int(0,false).into()) }
@@ -4917,6 +5498,17 @@ impl<'ctx> Codegen<'ctx> {
                     phi.add_incoming(&[(&field_val, then_bb), (&null_val, else_bb)]);
                     Ok(phi.as_basic_value())
                 } else {
+                    // Trait-typed receiver: same switch dispatch as `.`
+                    // (pairs are never null in this representation).
+                    if let Ok(obj_ty) = self.infer_expr_ty(object) {
+                        if let crate::sema::Ty::Struct(ref sname) = obj_ty {
+                            if self.trait_names.contains(sname) {
+                                return self.codegen_trait_field_load(
+                                    object, sname, field, expr.span,
+                                );
+                            }
+                        }
+                    }
                     // For non-pointer, just normal access
                     let field_ptr = self.codegen_field_ptr(object, field)?;
                     Ok(self.builder.build_load(self.context.i64_type(), field_ptr, field).unwrap())
@@ -4931,6 +5523,7 @@ impl<'ctx> Codegen<'ctx> {
                                 message: format!("undefined var {name}"),
                                 span: lhs.span,
                             })?;
+                        let val = self.box_trait_value(val, dest_ty, expr.span)?;
                         let coerced = self.coerce_to_ty(val, dest_ty);
                         self.builder.build_store(ptr, coerced).unwrap();
                         Ok(coerced)
@@ -4947,6 +5540,31 @@ impl<'ctx> Codegen<'ctx> {
                                             return Ok(val);
                                         }
                                     }
+                                }
+                                // Trait-typed base: switch over implementors
+                                // for the field pointer, boxing into the
+                                // agreed field type.
+                                if self.trait_names.contains(sname) {
+                                    let field_ptr = self.codegen_trait_field_ptr(
+                                        object, sname, field, expr.span,
+                                    )?;
+                                    let first = self
+                                        .implementors_of(sname)
+                                        .into_iter()
+                                        .next()
+                                        .ok_or(CodegenError {
+                                            message: format!(
+                                                "trait `{sname}` has no implementors"
+                                            ),
+                                            span: expr.span,
+                                        })?;
+                                    let field_ty = self.class_field_llvm_ty(
+                                        &first, field, expr.span,
+                                    )?;
+                                    let val =
+                                        self.box_trait_value(val, field_ty, expr.span)?;
+                                    self.builder.build_store(field_ptr, val).unwrap();
+                                    return Ok(val);
                                 }
                             }
                         }
@@ -5129,11 +5747,21 @@ impl<'ctx> Codegen<'ctx> {
                         }
                     }
                     let ctor_func = chosen.or_else(|| ctors.first().map(|(f,_)| *f)).unwrap();
+                    let ctor_info = ctors.iter().find(|(f, _)| *f == ctor_func).map(|(_, i)| i.clone());
                     let st = *self.struct_types.get(callee).unwrap();
                     let tmp = self.builder.build_alloca(st, "ctor.tmp").unwrap();
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = vec![tmp.into()];
-                    for a in args {
+                    for (i, a) in args.iter().enumerate() {
                         let v = self.codegen_call_arg(a)?;
+                        // Box class values into trait-typed parameters
+                        // (`params[0]` is `this`).
+                        let v = match ctor_info.as_ref().and_then(|info| info.params.get(i + 1)) {
+                            Some(pt) => match self.llvm_ty_for_sema(pt) {
+                                Some(dest) => self.box_trait_value(v, dest, a.span())?,
+                                None => v,
+                            },
+                            None => v,
+                        };
                         arg_vals.push(v.into());
                     }
                     self.builder.build_call(ctor_func, &arg_vals, "ctor.call").unwrap();
@@ -5156,6 +5784,7 @@ impl<'ctx> Codegen<'ctx> {
                             for (i, a) in args.iter().take(fixed).enumerate() {
                                 // handle named if any? For variadic with named, assume positional for fixed
                                 let v = self.codegen_call_arg(a)?;
+                                let v = self.box_arg_for_param(v, &info, i, a.span())?;
                                 arg_vals.push(v.into());
                             }
                             // variadic tail: `vda` as `T[]` array
@@ -5174,8 +5803,13 @@ impl<'ctx> Codegen<'ctx> {
                             };
                             let mut arr_val: BasicValueEnum = arr_llvm_ty.into_array_type().get_undef().into();
                             // Fill array with variadic args
+                            let elem_dest: Option<BasicTypeEnum> = self.llvm_ty_for_sema(&elem_ty);
                             for (j, arg) in args.iter().skip(fixed).enumerate() {
                                 let v = self.codegen_call_arg(arg)?;
+                                let v = match elem_dest {
+                                    Some(dest) => self.box_trait_value(v, dest, arg.span())?,
+                                    None => v,
+                                };
                                 let idx = self.context.i32_type().const_int(j as u64, false);
                                 // For array, use insert_value
                                 if arr_val.is_array_value() {
@@ -5217,8 +5851,13 @@ impl<'ctx> Codegen<'ctx> {
                                 arg_vals.pop();
                                 // Rebuild vda with correct count
                                 let mut arr_val2: BasicValueEnum = arr_llvm_ty.const_zero().into();
+                                let elem_dest2: Option<BasicTypeEnum> = self.llvm_ty_for_sema(&elem_ty);
                                 for (j, arg) in args.iter().skip(fixed).take(vda_count).enumerate() {
                                     let v = self.codegen_call_arg(arg)?;
+                                    let v = match elem_dest2 {
+                                        Some(dest) => self.box_trait_value(v, dest, arg.span())?,
+                                        None => v,
+                                    };
                                     if arr_val2.is_array_value() {
                                         let tmp = self.builder.build_insert_value(arr_val2.into_array_value(), v, j as u32, &format!("vararg.fix.{}", j)).unwrap();
                                         arr_val2 = tmp.as_basic_value_enum();
@@ -5226,8 +5865,9 @@ impl<'ctx> Codegen<'ctx> {
                                 }
                                 arg_vals.push(arr_val2.into());
                                 // Push remaining fixed after variadic
-                                for arg in args.iter().skip(fixed + vda_count) {
+                                for (j, arg) in args.iter().skip(fixed + vda_count).enumerate() {
                                     let v = self.codegen_call_arg(arg)?;
+                                    let v = self.box_arg_for_param(v, &info, vidx + 1 + j, arg.span())?;
                                     arg_vals.push(v.into());
                                 }
                             }
@@ -5241,9 +5881,10 @@ impl<'ctx> Codegen<'ctx> {
                                     map.insert(name.clone(), a);
                                 }
                             }
-                            for pname in &info.param_names {
+                            for (idx, pname) in info.param_names.iter().enumerate() {
                                 if let Some(arg) = map.get(pname) {
                                     let v = self.codegen_call_arg(arg)?;
+                                    let v = self.box_arg_for_param(v, &info, idx, arg.span())?;
                                     arg_vals.push(v.into());
                                 } else {
                                     arg_vals.push(self.context.i64_type().const_int(0,false).into());
@@ -5252,6 +5893,7 @@ impl<'ctx> Codegen<'ctx> {
                         } else {
                             for (i, a) in args.iter().enumerate() {
                                 let v = self.codegen_call_arg(a)?;
+                                let v = self.box_arg_for_param(v, &info, i, a.span())?;
                                 // Coerce int args to the declared param width
                                 // (e.g. `add32(100, 200)` literals are i64 → i32 params).
                                 let coerced = if let Some(param_ty) = info.params.get(i) {
@@ -5332,6 +5974,13 @@ impl<'ctx> Codegen<'ctx> {
                                 }
                             }
                         }
+                    }
+                }
+                // Trait-typed receiver: switch over implementors (layouts
+                // may differ), GEP per layout, load the agreed field type.
+                if let crate::sema::Ty::Struct(ref sname) = obj_ty {
+                    if self.trait_names.contains(sname) {
+                        return self.codegen_trait_field_load(object, sname, field, expr.span);
                     }
                 }
                 // rvalue field load: need field pointer then load
@@ -5531,6 +6180,8 @@ impl<'ctx> Codegen<'ctx> {
                         .builder
                         .build_struct_gep(st, tmp, idx, &format!("s.{}", fname))
                         .unwrap();
+                    let dest = st.get_field_type_at_index(idx).unwrap();
+                    let val = self.box_trait_value(val, dest, fexpr.span)?;
                     self.builder.build_store(field_ptr, val).unwrap();
                 }
                 // Fill missing fields with defaults if any
@@ -6346,6 +6997,64 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    /// Map an LLVM field type back to a sema type (int widths, structs
+    /// including trait pairs).
+    fn llvm_field_to_sema(
+        &self,
+        fty: BasicTypeEnum<'ctx>,
+        span: Span,
+    ) -> Result<crate::sema::Ty, CodegenError> {
+        if fty.is_int_type() {
+            let bw = fty.into_int_type().get_bit_width();
+            if bw == 1 {
+                Ok(crate::sema::Ty::Bool)
+            } else {
+                Ok(crate::sema::Ty::Int)
+            }
+        } else if fty.is_struct_type() {
+            let st = fty.into_struct_type();
+            if let Some(tn) = self.trait_name_of_pair(st) {
+                return Ok(crate::sema::Ty::Struct(tn));
+            }
+            let sname2 = self.ty_to_struct_name(&fty)?;
+            Ok(crate::sema::Ty::Struct(sname2))
+        } else {
+            Err(CodegenError {
+                message: "unsupported field type inference".into(),
+                span,
+            })
+        }
+    }
+
+    /// Field type through a trait-typed receiver: from the first
+    /// implementor (sema validated agreement across all of them).
+    fn infer_trait_field(
+        &self,
+        tname: &str,
+        field: &str,
+        span: Span,
+    ) -> Result<crate::sema::Ty, CodegenError> {
+        let impls = self.implementors_of(tname);
+        let first = impls.first().ok_or(CodegenError {
+            message: format!("trait `{tname}` has no implementors"),
+            span,
+        })?;
+        let fields = self.struct_fields.get(first).ok_or(CodegenError {
+            message: format!("unknown class `{first}`"),
+            span,
+        })?;
+        let idx = fields.get(field).ok_or(CodegenError {
+            message: format!("trait `{tname}` has no field `{field}`"),
+            span,
+        })?;
+        let st = self.struct_types.get(first).ok_or(CodegenError {
+            message: format!("unknown class `{first}`"),
+            span,
+        })?;
+        let fty = st.get_field_type_at_index(*idx).unwrap();
+        self.llvm_field_to_sema(fty, span)
+    }
+
     fn infer_expr_ty(
         &self,
         expr: &Expr,
@@ -6369,6 +7078,11 @@ impl<'ctx> Codegen<'ctx> {
                 for scope in self.vars.iter().rev() {
                     if let Some((_, ty)) = scope.get(name).or_else(|| scope.get(lookup)) {
                         if ty.is_struct_type() {
+                            // Trait-object pair: report the trait name so
+                            // member/method resolution takes the trait path.
+                            if let Some(tn) = self.trait_name_of_pair(ty.into_struct_type()) {
+                                return Ok(crate::sema::Ty::Struct(tn));
+                            }
                             let sname = self.ty_to_struct_name(ty).unwrap();
                             if self.enum_types.contains_key(&sname) {
                                 return Ok(crate::sema::Ty::Enum(sname));
@@ -6407,18 +7121,16 @@ impl<'ctx> Codegen<'ctx> {
             ExprKind::MemberAccess { object, field, .. } => {
                 let obj_ty = self.infer_expr_ty(object)?;
                 if let crate::sema::Ty::Struct(ref sname) = obj_ty {
+                    // Trait-typed receiver: field type from the first
+                    // implementor (sema validated agreement across all).
+                    if self.trait_names.contains(sname) {
+                        return self.infer_trait_field(sname, field, expr.span);
+                    }
                     let fields = self.struct_fields.get(sname).unwrap();
                     let idx = fields.get(field).unwrap();
                     let st = self.struct_types.get(sname).unwrap();
                     let fty = st.get_field_type_at_index(*idx).unwrap();
-                    if fty.is_int_type() {
-                        let bw = fty.into_int_type().get_bit_width();
-                        if bw == 1 { return Ok(crate::sema::Ty::Bool); } else { return Ok(crate::sema::Ty::Int); }
-                    } else if fty.is_struct_type() {
-                        let sname2 = self.ty_to_struct_name(&fty).unwrap();
-                        return Ok(crate::sema::Ty::Struct(sname2));
-                    }
-                    return Err(CodegenError{message: "unsupported field type inference".into(), span: expr.span});
+                    return self.llvm_field_to_sema(fty, expr.span);
                 } else if let crate::sema::Ty::Enum(ref ename) = obj_ty {
                     if let Some(einfo) = self.enum_variant_tags.get(ename) {
                         if einfo.contains_key(field) {
@@ -6592,5 +7304,29 @@ mod tests {
     #[test]
     fn int_extension_method_verifies() {
         compile_src("class U has\nend\nextend U do\nint ex() do\nreturn 1\nend\nend\n");
+    }
+
+    /// Trait objects: `{data ptr, type tag}` pair lowering with switch
+    /// dispatch over implementors (single + multi), field access, and
+    /// trait-typed params/returns.
+    #[test]
+    fn trait_single_implementor_verifies() {
+        compile_src(
+            "trait Raf has\n  string nnn()\nend\nopen class User implements Raf has\n  public string name\n  User(string name) initialize\n  public string nnn() do\n    return this.name\n  end\nend\nvoid main() do\n  Raf u = User(\"a\")\n  string s = u.nnn()\nend\n",
+        );
+    }
+
+    #[test]
+    fn trait_multi_implementor_dispatch_verifies() {
+        compile_src(
+            "trait Speaker has\n  string speak()\nend\nopen class Cat implements Speaker has\n  Cat() initialize\n  public string speak() do\n    return \"meow\"\n  end\nend\nopen class Dog implements Speaker has\n  Dog() initialize\n  public string speak() do\n    return \"woof\"\n  end\nend\nstring pick(Speaker s) do\n  return s.speak()\nend\nvoid main() do\n  Speaker a = Cat()\n  Speaker b = Dog()\n  string x = pick(a)\n  string y = pick(b)\nend\n",
+        );
+    }
+
+    #[test]
+    fn trait_field_access_and_return_verifies() {
+        compile_src(
+            "trait Named has\n  string label()\nend\nopen class User implements Named has\n  public string name\n  User(string name) initialize\n  public string label() do\n    return this.name\n  end\nend\nNamed make() do\n  return User(\"a\")\nend\nvoid main() do\n  Named u = make()\n  u.name = \"b\"\nend\n",
+        );
     }
 }

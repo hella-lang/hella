@@ -454,18 +454,36 @@ fn collect_item(&mut self, item: &Item) {
                 self.push_top(sym, e.name_span);
             }
 Item::Trait(t) => {
+                let mut children = Vec::new();
+                for m in &t.methods {
+                    let detail = format!(
+                        "fn {}({}) -> {}",
+                        m.name,
+                        format_params(&m.params),
+                        m.ret_ty.name()
+                    );
+                    children.push(
+                        make_symbol(
+                            &m.name,
+                            SymKind::Method,
+                            m.name_span,
+                            m.span,
+                            detail,
+                            Vec::new(),
+                        )
+                        .with_params(&param_pairs(&m.params)),
+                    );
+                    self.collect_params(&m.params, m.span);
+                }
                 let sym = make_symbol(
                     &t.name,
                     SymKind::Trait,
                     t.name_span,
                     t.span,
                     format!("trait {}", t.name),
-                    Vec::new(),
+                    children,
                 );
                 self.push_top(sym, t.name_span);
-                for m in &t.methods {
-                    self.collect_params(&m.params, m.span);
-                }
             }
             Item::Typedef(t) => {
                 let sym = make_symbol(
@@ -1191,6 +1209,8 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
                     out.extend(self.unlinked_members(ty));
                     out
                 }
+                // Trait-typed value: the interface methods are the members.
+                SymKind::Trait => resolved.children.iter().collect(),
                 // Variants belong to the enum *type* (`Status.Ok`), not a value.
                 _ => return None,
             }
@@ -1309,6 +1329,7 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
 
     /// Resolve a type name to its declaration (own file first, then
     /// imports), following `typedef`/`distinct` aliases (depth-capped).
+    /// Traits resolve too, so trait-typed locals complete their methods.
     fn resolve_named_type(&self, name: &str) -> Option<&Symbol> {
         let mut current = name;
         for _ in 0..8 {
@@ -1323,6 +1344,7 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
                             SymKind::Struct
                                 | SymKind::Class
                                 | SymKind::Enum
+                                | SymKind::Trait
                                 | SymKind::Typedef
                                 | SymKind::Distinct
                         )
@@ -2295,6 +2317,50 @@ mod tests {
             .collect();
         assert!(kids.contains(&"doubled"), "outline merged: {kids:?}");
     }
+
+    #[test]
+    fn trait_methods_collected() {
+        let src = "trait Drawable has\n  void draw()\n  int area(int scale)\nend";
+        let a = analyze(src);
+        let t = a.top_symbols().iter().find(|s| s.name == "Drawable").unwrap();
+        let names: Vec<_> = t.children.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"draw"), "trait methods: {names:?}");
+        assert!(names.contains(&"area"), "trait methods: {names:?}");
+        // outline + hover/goto resolve through the child symbol
+        let symbols = a.document_symbols(src);
+        let t_sym = symbols.iter().find(|s| s.name == "Drawable").unwrap();
+        #[allow(deprecated)]
+        let kids: Vec<_> = t_sym
+            .children
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert!(kids.contains(&"draw"), "outline: {kids:?}");
+        let draw_off = src.find("draw").unwrap() + 1;
+        assert_eq!(
+            a.symbol_at(draw_off).map(|s| s.name.as_str()),
+            Some("draw")
+        );
+        // call snippet from trait method params (fresh line: empty prefix)
+        let src2 = format!("{src}\n  ");
+        let items = Analysis::complete(&src2, src2.len(), true);
+        let area = items.iter().find(|i| i.label == "area").unwrap();
+        assert_eq!(
+            area.insert_text.as_deref(),
+            Some("area(${1:int scale})$0")
+        );
+    }
+
+    #[test]
+    fn completion_trait_typed_local() {
+        let src = "trait Raf has\n  string nnn()\nend\nopen class User implements Raf has\n  public string nnn() do\n    return \"x\"\n  end\nend\nvoid taker(Raf r) do\n  r.\nend";
+        let off = src.find("r.").unwrap() + 2;
+        let items = Analysis::complete(src, off, false);
+        assert_eq!(labels(&items), vec!["nnn"]);
+    }
+
 
     #[test]
     fn definition_resolves_local_and_toppub() {

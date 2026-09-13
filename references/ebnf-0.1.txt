@@ -1038,6 +1038,14 @@ struct-member =
 (* 25. Traits                                                        *)
 (* ---------------------------------------------------------------- *)
 
+(* A class value flows into a trait-typed slot when the class        *)
+(* `implements` the trait (directly or through `extends`). Calls and   *)
+(* field access through a trait-typed receiver dispatch over the known *)
+(* implementors (closed world): trait-declared methods resolve via the *)
+(* trait; anything else requires every implementor to expose it with   *)
+(* an identical public signature, else a compile error. Trait values   *)
+(* lower to `{data ptr, type tag}` pairs; there are no `extends`       *)
+(* vtables — `open`/`override`/`sealed` remain validation only.        *)
 trait-declaration =
     [ visibility-modifier ] ,
     "trait" , identifier ,

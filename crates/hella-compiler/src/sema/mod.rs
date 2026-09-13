@@ -393,6 +393,233 @@ impl Checker {
         None
     }
 
+    /// Assignment compatibility with class→trait upcasts: a class value
+    /// flows into a trait-typed slot when the class implements the trait
+    /// (directly or through its `extends` chain). Falls back to the
+    /// structural rules otherwise.
+    fn ty_assignable(&self, from: &Ty, to: &Ty) -> bool {
+        if let (Ty::Struct(f), Ty::Struct(t)) = (from, to) {
+            if f != t && self.class_implements_trait(f, t) {
+                return true;
+            }
+        }
+        Ty::assignable(from, to)
+    }
+
+    /// Trait type (if any) hiding inside a type, for rejecting trait types
+    /// at the FFI boundary (trait pairs have no C representation).
+    fn extern_trait_name(&self, ty: &Ty) -> Option<String> {
+        match ty {
+            Ty::Struct(n) if self.traits.contains_key(n) => Some(n.clone()),
+            Ty::Array(e) | Ty::Vec(e) | Ty::Pointer(e) | Ty::Optional(e) => {
+                self.extern_trait_name(e)
+            }
+            Ty::FixedArray { elem, .. } => self.extern_trait_name(elem),
+            Ty::Map { key, value } => self
+                .extern_trait_name(key)
+                .or_else(|| self.extern_trait_name(value)),
+            Ty::Generic(_, args) | Ty::Tuple(args) => {
+                args.iter().find_map(|a| self.extern_trait_name(a))
+            }
+            Ty::Function(ret, params) => std::iter::once(ret.as_ref())
+                .chain(params.iter())
+                .find_map(|a| self.extern_trait_name(a)),
+            _ => None,
+        }
+    }
+
+    /// True when class `class_name` implements trait `trait_name`, directly
+    /// or via its `extends` chain (cycle-guarded).
+    fn class_implements_trait(&self, class_name: &str, trait_name: &str) -> bool {
+        let mut seen = HashSet::new();
+        let mut cur = Some(class_name.to_string());
+        while let Some(name) = cur {
+            if !seen.insert(name.clone()) {
+                break;
+            }
+            let Some(info) = self.classes.get(&name) else {
+                break;
+            };
+            if info.implements.iter().any(|t| t == trait_name) {
+                return true;
+            }
+            cur = info.extends.clone();
+        }
+        false
+    }
+
+    /// Arity + per-argument checking against a method signature, shared by
+    /// class and trait method calls.
+    fn check_method_call_args(
+        &mut self,
+        args: &[CallArg],
+        sig: &FuncSig,
+        method: &str,
+        method_span: &Span,
+    ) {
+        if sig.param_is_variadic.iter().any(|&v| v) {
+            self.check_call_with_sig(args, sig, *method_span, method);
+        } else {
+            if sig.params.len() != args.len() {
+                self.errors.push(SemError{message: format!("method `{}` expects {} args, found {}", method, sig.params.len(), args.len()), span: *method_span});
+            }
+            for (i, a) in args.iter().enumerate() {
+                let aty = self.check_call_arg(a);
+                let pidx = if let CallArg::Named { name, .. } = a {
+                    sig.param_names.iter().position(|n| n == name).unwrap_or(i)
+                } else { i };
+                if let Some(pt) = sig.params.get(pidx) {
+                    if !self.ty_assignable(&aty, pt) { self.errors.push(SemError{message: format!("arg {} of `{}`: expected `{}`, found `{}`", i+1, method, pt, aty), span: a.span()}); }
+                }
+            }
+        }
+    }
+
+    /// Method call on a trait-typed receiver (closed-world interface
+    /// dispatch). Resolves against the trait's own methods first; otherwise
+    /// requires every known implementor to provide the method with an
+    /// identical calling convention (return + params + modes + variadic)
+    /// and public visibility — which is what codegen's tag-switch
+    /// dispatches over. Returns the method's return type.
+    fn check_trait_method_call(
+        &mut self,
+        tname: &str,
+        method: &str,
+        method_span: &Span,
+        args: &[CallArg],
+        obj_span: Span,
+    ) -> Ty {
+        if let Some(sig) = self
+            .traits
+            .get(tname)
+            .and_then(|t| t.methods.get(method))
+            .cloned()
+        {
+            self.check_method_call_args(args, &sig, method, method_span);
+            return sig.ret;
+        }
+        let implementors: Vec<String> = self
+            .classes
+            .keys()
+            .filter(|c| self.class_implements_trait(c, tname))
+            .cloned()
+            .collect();
+        if implementors.is_empty() {
+            self.errors.push(SemError{message: format!("unknown method `{method}` on trait `{tname}` (no known implementors)"), span: *method_span});
+            for a in args {
+                let _ = self.check_call_arg(a);
+            }
+            return Ty::Int;
+        }
+        let mut common: Option<FuncSig> = None;
+        for cname in &implementors {
+            let entry: Option<(FuncSig, crate::ast::Visibility)> = self
+                .classes
+                .get(cname)
+                .and_then(|cls| {
+                    cls.methods.get(method).map(|sig| {
+                        let vis = cls.method_vis.get(method).cloned().unwrap_or(crate::ast::Visibility::Default);
+                        (sig.clone(), vis)
+                    })
+                });
+            match entry {
+                None => {
+                    self.errors.push(SemError{message: format!("class `{cname}` does not provide method `{method}` (called on trait `{tname}` receiver)"), span: *method_span});
+                    for a in args {
+                        let _ = self.check_call_arg(a);
+                    }
+                    return Ty::Int;
+                }
+                Some((sig, vis)) => {
+                    // Trait receivers are always "outside": the method must
+                    // be public on every implementor.
+                    if vis != crate::ast::Visibility::Public {
+                        self.errors.push(SemError{message: format!("method `{method}` is not public on all implementors of `{tname}` (via `{cname}`)"), span: *method_span});
+                        for a in args {
+                            let _ = self.check_call_arg(a);
+                        }
+                        return Ty::Int;
+                    }
+                    if let Some(prev) = &common {
+                        if prev.ret != sig.ret
+                            || prev.params != sig.params
+                            || prev.param_modes != sig.param_modes
+                            || prev.param_is_variadic != sig.param_is_variadic
+                        {
+                            self.errors.push(SemError{message: format!("method `{method}` has mismatched signatures across implementors of `{tname}`"), span: *method_span});
+                            for a in args {
+                                let _ = self.check_call_arg(a);
+                            }
+                            return Ty::Int;
+                        }
+                    } else {
+                        common = Some(sig);
+                    }
+                }
+            }
+        }
+        match common {
+            Some(sig) => {
+                self.check_method_call_args(args, &sig, method, method_span);
+                sig.ret
+            }
+            None => {
+                self.errors.push(SemError{message: format!("unknown method `{method}` on trait `{tname}`"), span: obj_span});
+                for a in args {
+                    let _ = self.check_call_arg(a);
+                }
+                Ty::Int
+            }
+        }
+    }
+
+    /// Field read/write through a trait-typed receiver (closed-world
+    /// structural dispatch): every known implementor must expose the field
+    /// with an identical public type. Returns the agreed type.
+    fn check_trait_field(&mut self, tname: &str, field: &str, field_span: &Span) -> Ty {
+        let implementors: Vec<String> = self
+            .classes
+            .keys()
+            .filter(|c| self.class_implements_trait(c, tname))
+            .cloned()
+            .collect();
+        if implementors.is_empty() {
+            self.errors.push(SemError{message: format!("trait `{tname}` has no field `{field}` (no known implementors)"), span: *field_span});
+            return Ty::Int;
+        }
+        let mut common: Option<Ty> = None;
+        for cname in &implementors {
+            let fty = self
+                .structs
+                .get(cname)
+                .and_then(|s| s.field_map.get(field).map(|(_, t)| t.clone()));
+            let Some(fty) = fty else {
+                self.errors.push(SemError{message: format!("class `{cname}` does not expose field `{field}` (via trait `{tname}`)"), span: *field_span});
+                return Ty::Int;
+            };
+            let vis_ok = self
+                .classes
+                .get(cname)
+                .and_then(|c| c.field_vis.get(field))
+                .is_some_and(|v| *v == crate::ast::Visibility::Public);
+            if !vis_ok {
+                self.errors.push(SemError{message: format!("field `{field}` is not public on all implementors of `{tname}` (via `{cname}`)"), span: *field_span});
+                return Ty::Int;
+            }
+            match &common {
+                Some(t) if *t == fty => {}
+                Some(t) => {
+                    self.errors.push(SemError{message: format!("field `{field}` has mismatched types across implementors of `{tname}` (`{t}` vs `{fty}`)"), span: *field_span});
+                    return Ty::Int;
+                }
+                None => {
+                    common = Some(fty);
+                }
+            }
+        }
+        common.unwrap_or(Ty::Int)
+    }
+
     /// Update an existing variable's type in the nearest scope holding it.
     /// Used for `vec[]` element-type establishment on the first `push`.
     fn set_var_ty(&mut self, name: &str, ty: Ty) -> bool {
@@ -1169,7 +1396,7 @@ impl Checker {
                 }
                 let init_ty = self.check_expr(&c.init);
                 let is_null = matches!(c.init.kind, ExprKind::Null);
-                if !is_null && !Ty::assignable(&init_ty, &decl_ty) && decl_ty != Ty::Any {
+                if !is_null && !self.ty_assignable(&init_ty, &decl_ty) && decl_ty != Ty::Any {
                     self.errors.push(SemError{message: format!("const initializer mismatch: expected `{}`, found `{}`", decl_ty, init_ty), span: c.init.span});
                 }
                 if self.scopes.last().map(|s| s.contains_key(&c.name)).unwrap_or(false) {
@@ -1222,7 +1449,7 @@ impl Checker {
                                     Ty::FixedArray { elem: de, .. },
                                     Ty::FixedArray { elem: ie, .. },
                                 ) => Ty::assignable(ie, de),
-                                _ => Ty::assignable(&init_ty, &decl_ty),
+                                _ => self.ty_assignable(&init_ty, &decl_ty),
                             };
                             if !compatible {
                                 // Allow int literal for any?
@@ -1253,7 +1480,16 @@ impl Checker {
                     match mem {
                         crate::ast::ExternMember::Function{ty, name, name_span, params, ..} => {
                             let ret = self.resolve_type(ty);
-                            let param_tys: Vec<Ty> = params.iter().map(|p| self.resolve_type(&p.ty)).collect();
+                            if let Some(tn) = self.extern_trait_name(&ret) {
+                                self.errors.push(SemError{message: format!("extern function `{name}` cannot return trait type `{tn}` (no C representation)"), span: *name_span});
+                            }
+                            let param_tys: Vec<Ty> = params.iter().map(|p| {
+                                let pt = self.resolve_type(&p.ty);
+                                if let Some(tn) = self.extern_trait_name(&pt) {
+                                    self.errors.push(SemError{message: format!("extern function `{name}` cannot take trait type `{tn}` (no C representation)"), span: p.span});
+                                }
+                                pt
+                            }).collect();
                             let param_modes: Vec<ParamMode> = vec![ParamMode::None; param_tys.len()];
                             self.funcs.insert(name.clone(), FuncSig{ret, params: param_tys, param_modes, param_names: params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: params.iter().map(|p| p.is_variadic).collect(), generic_params: Vec::new(), where_clause: None, span: *name_span});
                         }
@@ -1272,6 +1508,9 @@ impl Checker {
                                     }
                                     let fty = self.resolve_type(&f.ty);
                                     if fty == Ty::Void { self.errors.push(SemError{message: format!("field `{}` cannot be `void`", f.name), span: f.span}); }
+                                    if let Some(tn) = self.extern_trait_name(&fty) {
+                                        self.errors.push(SemError{message: format!("extern struct field `{}` cannot use trait type `{tn}` (no C representation)", f.name), span: f.span});
+                                    }
                                     fmap.insert(f.name.clone(), (idx, fty.clone()));
                                     fvis.insert(f.name.clone(), crate::ast::Visibility::Public);
                                     fdefs.insert(f.name.clone(), None);
@@ -1294,6 +1533,9 @@ impl Checker {
                                     let mut payload_tys = Vec::new();
                                     for p in &v.payload_params {
                                         let pt = self.resolve_type(&p.ty);
+                                        if let Some(tn) = self.extern_trait_name(&pt) {
+                                            self.errors.push(SemError{message: format!("extern enum payload cannot use trait type `{tn}` (no C representation)"), span: p.span});
+                                        }
                                         payload_tys.push(pt);
                                     }
                                     let tag = if let Some(expr) = &v.discriminant {
@@ -1312,6 +1554,9 @@ impl Checker {
                             let decl_ty = self.resolve_type(ty);
                             if decl_ty == Ty::Void {
                                 self.errors.push(SemError{message: "extern const cannot be `void`".into(), span: *name_span});
+                            }
+                            if let Some(tn) = self.extern_trait_name(&decl_ty) {
+                                self.errors.push(SemError{message: format!("extern const `{name}` cannot use trait type `{tn}` (no C representation)"), span: *name_span});
                             }
                             if self.scopes.last().map(|s| s.contains_key(name)).unwrap_or(false) {
                                 self.errors.push(SemError{message: format!("redefinition of extern const `{}`", name), span: *name_span});
@@ -1675,7 +1920,7 @@ impl Checker {
                                     Ty::FixedArray { elem: de, .. },
                                     Ty::FixedArray { elem: ie, .. },
                                 ) => Ty::assignable(ie, de),
-                                _ => Ty::assignable(&init_ty, &decl_ty),
+                                _ => self.ty_assignable(&init_ty, &decl_ty),
                             }
                         };
                         if !is_null && !compatible && decl_ty != Ty::Void && decl_ty != Ty::Any {
@@ -1697,7 +1942,7 @@ impl Checker {
                 }
                 let init_ty = self.check_expr(&c.init);
                 let is_null = matches!(c.init.kind, ExprKind::Null);
-                if !is_null && !Ty::assignable(&init_ty, &decl_ty) && decl_ty != Ty::Any {
+                if !is_null && !self.ty_assignable(&init_ty, &decl_ty) && decl_ty != Ty::Any {
                     self.errors.push(SemError { message: format!("const initializer mismatch: expected `{decl_ty}`, found `{init_ty}`"), span: c.init.span });
                 }
                 self.declare_const(&c.name, decl_ty, c.name_span);
@@ -1784,7 +2029,7 @@ impl Checker {
                     }),
                     (Some(expr), ty) => {
                         let got = self.check_expr(expr);
-                        if !Ty::assignable(&got, ty) {
+                        if !self.ty_assignable(&got, ty) {
                             self.errors.push(SemError{message: format!("return type mismatch: expected `{ty}`, found `{got}`"), span: expr.span});
                         }
                     }
@@ -2100,7 +2345,7 @@ impl Checker {
                 }
                 let rhs_ty = self.check_expr(value);
                 let is_null = matches!(value.kind, ExprKind::Null);
-                if !is_null && !Ty::assignable(&rhs_ty, &lhs_ty) {
+                if !is_null && !self.ty_assignable(&rhs_ty, &lhs_ty) {
                     self.errors.push(SemError{message: format!("assignment type mismatch: expected `{lhs_ty}`, found `{rhs_ty}`"), span: expr.span});
                 }
                 lhs_ty
@@ -2143,6 +2388,9 @@ impl Checker {
                         if let Some(prop) = cinfo.properties.get(field) {
                             return prop.ty.clone();
                         }
+                    }
+                    if self.traits.contains_key(sname) {
+                        return self.check_trait_field(sname, field, &expr.span);
                     }
                 }
                 // For optional types, unwrap
@@ -2257,7 +2505,7 @@ impl Checker {
                                     for (i, arg) in args.iter().enumerate() {
                                         if let Some(exp) = substituted_sig.params.get(i) {
                                             let aty = self.check_call_arg(arg);
-                                            if !Ty::assignable(&aty, exp) {
+                                            if !self.ty_assignable(&aty, exp) {
                                                 // already reported? skip duplicate; but ensure one error
                                             }
                                         }
@@ -2315,7 +2563,7 @@ impl Checker {
                                     let pidx = if let CallArg::Named { name, .. } = arg {
                                         sig.param_names.iter().position(|n| n == name).unwrap_or(i)
                                     } else { i };
-                                    if !Ty::assignable(&aty, &sig.params[pidx]) {
+                                    if !self.ty_assignable(&aty, &sig.params[pidx]) {
                                         self.errors.push(SemError{message: format!("ctor arg {}: expected `{}`, found `{aty}`", i+1, sig.params[pidx]), span: arg.span()});
                                     }
                                 }
@@ -2333,7 +2581,7 @@ impl Checker {
                         for (i, arg) in args.iter().enumerate() {
                             let aty = self.check_call_arg(arg);
                             let fty = &field_tys[i];
-                            if !Ty::assignable(&aty, fty) {
+                            if !self.ty_assignable(&aty, fty) {
                                 self.errors.push(SemError{message: format!("ctor arg {}: expected `{}`, found `{aty}`", i+1, fty), span: arg.span()});
                             }
                         }
@@ -2367,7 +2615,7 @@ impl Checker {
                                 sig.param_names.iter().position(|n| n == name).unwrap_or(i)
                             } else { i };
                             if let Some(param_ty) = sig.params.get(pidx) {
-                                if !Ty::assignable(&aty, param_ty) {
+                                if !self.ty_assignable(&aty, param_ty) {
                                     let is_generic = matches!(param_ty, Ty::Generic(n, _) if n.len() == 1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false));
                                     if !is_generic {
                                         self.errors.push(SemError{message: format!("argument {} of `{callee}`: expected `{}`, found `{aty}`", i+1, param_ty), span: arg.span()});
@@ -2385,7 +2633,7 @@ impl Checker {
                         }
                         for (i, arg) in args.iter().enumerate() {
                             let aty = self.check_call_arg(arg);
-                            if let Some(pt) = params.get(i) { if !Ty::assignable(&aty, pt) { self.errors.push(SemError{message: format!("argument {}: expected `{}`, found `{aty}`", i+1, pt), span: arg.span()}); } }
+                            if let Some(pt) = params.get(i) { if !self.ty_assignable(&aty, pt) { self.errors.push(SemError{message: format!("argument {}: expected `{}`, found `{aty}`", i+1, pt), span: arg.span()}); } }
                         }
                         *ret
                     } else if let Ty::Any = var_ty {
@@ -2452,6 +2700,10 @@ impl Checker {
                         } else {
                             self.errors.push(SemError { message: format!("struct `{sname}` has no field `{field}`"), span: *field_span, }); Ty::Int
                         }
+                    } else if self.traits.contains_key(sname) {
+                        // Trait-typed receiver: structural field dispatch
+                        // (see `check_trait_field`).
+                        self.check_trait_field(sname, field, field_span)
                     } else {
                         self.errors.push(SemError { message: format!("unknown struct `{sname}`"), span: object.span, }); Ty::Int
                     }
@@ -2721,22 +2973,7 @@ impl Checker {
                         } else if self.cur_class.as_deref() != Some(sname.as_str()) {
                             self.errors.push(SemError{message: format!("method `{method}` is private"), span: *method_span});
                         }
-                        if meth.param_is_variadic.iter().any(|&v| v) {
-                            self.check_call_with_sig(args, meth, *method_span, method);
-                        } else {
-                            if meth.params.len() != args.len() {
-                                self.errors.push(SemError{message: format!("method `{}` expects {} args, found {}", method, meth.params.len(), args.len()), span: *method_span});
-                            }
-                            for (i, a) in args.iter().enumerate() {
-                                let aty = self.check_call_arg(a);
-                                let pidx = if let CallArg::Named { name, .. } = a {
-                                    meth.param_names.iter().position(|n| n == name).unwrap_or(i)
-                                } else { i };
-                                if let Some(pt) = meth.params.get(pidx) {
-                                    if !Ty::assignable(&aty, pt) { self.errors.push(SemError{message: format!("arg {} of `{}`: expected `{}`, found `{}`", i+1, method, pt, aty), span: a.span()}); }
-                                }
-                            }
-                        }
+                        self.check_method_call_args(args, meth, method, method_span);
                         meth.ret.clone()
                     } else {
                         // Also check if class was actually struct with no methods? Then try struct field? but method not found
@@ -2744,6 +2981,10 @@ impl Checker {
                         for a in args { let _ = self.check_call_arg(a); }
                         Ty::Int
                     }
+                } else if self.traits.contains_key(&sname) {
+                    // Trait-typed receiver: interface dispatch (see
+                    // `check_trait_method_call`).
+                    self.check_trait_method_call(&sname, method, method_span, args, object.span)
                 } else {
                     // Try structs map for method? For now treat as class not found, check if struct has method? struct has no methods
                     self.errors.push(SemError{message: format!("unknown class `{sname}`"), span: object.span});
@@ -2786,7 +3027,7 @@ impl Checker {
                                 for (pty, arg) in payload_tys.iter().zip(args.iter()) {
                                     let aty = self.check_call_arg(arg);
                                     let is_generic = matches!(pty, Ty::Generic(n, _) if n.len() == 1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false));
-                                    if !Ty::assignable(&aty, pty) && !is_generic {
+                                    if !self.ty_assignable(&aty, pty) && !is_generic {
                                         self.errors.push(SemError{message: format!("variant `{variant}` payload: expected `{}`, found `{}`", pty, aty), span: arg.span()});
                                     }
                                 }
@@ -3353,7 +3594,7 @@ impl Checker {
                     sig.param_names.iter().position(|n| n == name).unwrap_or(i)
                 } else { i };
                 if let Some(param_ty) = sig.params.get(pidx) {
-                    if !Ty::assignable(&aty, param_ty) {
+                    if !self.ty_assignable(&aty, param_ty) {
                         let is_generic = matches!(param_ty, Ty::Generic(n, _) if n.len() == 1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false));
                         if !is_generic {
                             self.errors.push(SemError { message: format!("argument {} of `{}`: expected `{}`, found `{}`", i+1, callee, param_ty, aty), span: arg.span() });
@@ -3384,7 +3625,7 @@ impl Checker {
                     let pidx = vidx + 1 + j;
                     if let Some(param_ty) = sig.params.get(pidx) {
                         let aty = self.check_call_arg(arg);
-                        if !Ty::assignable(&aty, param_ty) {
+                        if !self.ty_assignable(&aty, param_ty) {
                             let is_generic = matches!(param_ty, Ty::Generic(n, _) if n.len() == 1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false));
                             if !is_generic {
                                 self.errors.push(SemError { message: format!("argument {} of `{}`: expected `{}`, found `{}`", pidx + 1, callee, param_ty, aty), span: arg.span() });
@@ -3420,7 +3661,7 @@ impl Checker {
                         }
                         let aty = self.check_call_arg(arg);
                         let expected = &sig.params[pidx];
-                        if !Ty::assignable(&aty, expected) {
+                        if !self.ty_assignable(&aty, expected) {
                             self.errors.push(SemError { message: format!("named argument `{}` of `{}`: expected `{}`, found `{}`", name, callee, expected, aty), span: arg.span() });
                         }
                         if let Some(mode) = sig.param_modes.get(pidx) {
@@ -3451,7 +3692,7 @@ impl Checker {
         for (i, arg) in args.iter().enumerate() {
             let aty = self.check_call_arg(arg);
             if let Some(param_ty) = sig.params.get(i) {
-                if !Ty::assignable(&aty, param_ty) {
+                if !self.ty_assignable(&aty, param_ty) {
                     self.errors.push(SemError { message: format!("argument {} of `{}`: expected `{}`, found `{}`", i + 1, callee, param_ty, aty), span: arg.span() });
                 }
             }
@@ -3720,6 +3961,10 @@ impl Checker {
                             });
                             Ty::Int
                         }
+                    } else if self.traits.contains_key(sname) {
+                        // Trait-typed receiver: structural field dispatch
+                        // (see `check_trait_field`).
+                        self.check_trait_field(sname, field, field_span)
                     } else {
                         self.errors.push(SemError {
                             message: format!("unknown struct `{sname}`"),
