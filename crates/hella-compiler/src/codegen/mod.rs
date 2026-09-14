@@ -7047,6 +7047,9 @@ impl<'ctx> Codegen<'ctx> {
                 let tmp = self.builder.build_insert_value(agg.into_struct_value(), tag_val, 0, "enum.tag").unwrap();
                 agg = tmp.as_basic_value_enum();
                 if !args.is_empty() {
+                    if args.len() > 1 {
+                        return Err(CodegenError{message: format!("variant `{variant}` has {} payload args; multi-param enum payloads are not supported in phase 1", args.len()), span: expr.span});
+                    }
                     let payload_val = self.codegen_call_arg(&args[0])?;
                     let tmp2 = self.builder.build_insert_value(agg.into_struct_value(), payload_val, 1, "enum.payload").unwrap();
                     agg = tmp2.as_basic_value_enum();
@@ -7420,6 +7423,8 @@ impl<'ctx> Codegen<'ctx> {
                                                     }
                                                     _ => tag_eq,
                                                 }
+                                            } else if p.len() > 1 {
+                                                return Err(CodegenError{message: format!("variant `{variant}` has {} payload patterns; multi-param enum payloads are not supported in phase 1", p.len()), span: pat.span()});
                                             } else { tag_eq }
                                         } else { tag_eq }
                                     }
@@ -7533,6 +7538,8 @@ impl<'ctx> Codegen<'ctx> {
                                         }
                                         _ => self.context.bool_type().const_int(1, false),
                                     }
+                                } else if pats.len() > 1 {
+                                    return Err(CodegenError{message: format!("variant `{variant}` has {} payload patterns; multi-param enum payloads are not supported in phase 1", pats.len()), span: arm.pattern.span()});
                                 } else {
                                     self.context.bool_type().const_int(1, false)
                                 };

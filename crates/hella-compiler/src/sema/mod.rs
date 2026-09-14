@@ -3547,6 +3547,9 @@ impl Checker {
                 let enum_name_str = match &enum_ty { Ty::Enum(n) => n.clone(), _ => "".to_string() };
                 if let Some(einfo) = self.enums.get(&enum_name_str).cloned() {
                     if let Some((_, payload_tys)) = einfo.variant_map.get(variant.rsplit("::").next().unwrap_or(variant)) {
+                        if payload_tys.len() > 1 {
+                            self.errors.push(SemError{message: format!("variant `{variant}` has {} payload params; multi-param enum payloads are not supported in phase 1 (use a single payload)", payload_tys.len()), span: *variant_span});
+                        }
                         if !payload_tys.is_empty() {
                             if args.len() != payload_tys.len() {
                                 self.errors.push(SemError{message: format!("variant `{variant}` expects {} payload(s), found {}", payload_tys.len(), args.len()), span: *variant_span});
@@ -3666,6 +3669,9 @@ impl Checker {
                                     // Qualified `Color.Red` parses as `Color::Red`; strip to `Red` for lookup.
                                     let vbase: &str = variant.rsplit("::").next().unwrap_or(variant);
                                     if let Some((_, payload_tys)) = einfo.variant_map.get(vbase) {
+                                        if payload_tys.len() > 1 {
+                                            self.errors.push(SemError{message: format!("variant `{variant}` has {} payload params; multi-param enum payloads are not supported in phase 1 (use a single payload)", payload_tys.len()), span: *variant_span});
+                                        }
                                         match (payload, payload_tys.as_slice()) {
                                             (Some(pats), [expected]) if pats.len() == 1 => {
                                                 match &pats[0] {
@@ -5022,6 +5028,16 @@ mod tests {
         assert_error_contains(
             "open class User has\nUser() initialize\nend\nvoid main() do\ndefer new User()\nend\n",
             "guaranteed leak",
+        );
+    }
+
+    /// T-13: multi-param enum payloads are a loud phase-1 error (not silent
+    /// first-param-only lowering).
+    #[test]
+    fn multi_payload_enum_rejected() {
+        assert_error_contains(
+            "enum P has\nPair(int a, int b)\nSingle(int x)\nend\nvoid main() do\nP p = .Pair(3, 4)\nend\n",
+            "not supported in phase 1",
         );
     }
 }
