@@ -894,7 +894,12 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
 
     pub fn hover(&self, source: &str, offset: usize) -> Option<Hover> {
         let sym = self.resolve_symbol_at(source, offset)?;
-        let value = format!("**{}**\n\n```hll\n{}\n```", sym.kind_heading(), sym.detail);
+        let mut value = format!("**{}**\n\n```hll\n{}\n```", sym.kind_heading(), sym.detail);
+        // `own` slots move on assignment and are destroyed at scope exit —
+        // worth surfacing where the type is hovered.
+        if sym.ty.as_deref().is_some_and(|t| t.strip_prefix("own ").is_some_and(|r| !r.is_empty())) {
+            value.push_str("\n\n*heap-owned: moves on assignment, destroyed at scope exit (`delete` frees early).*");
+        }
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
@@ -928,11 +933,7 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
         }
         // 2. Cursor on a reference: look up the word by name.
         let word = ident_at(source, offset)?;
-        let local = self
-            .locals
-            .iter()
-            .filter(|l| l.name == word && scope_covers(l, offset))
-            .min_by_key(|l| l.name_span.end - l.name_span.start);
+        let local = innermost_local(&self.locals, &word, offset, false);
         if let Some(l) = local {
             return Some(l);
         }
@@ -944,12 +945,7 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
     /// Span of the declaration the identifier at `offset` refers to.
     fn resolve_definition_span(&self, source: &str, offset: usize) -> Option<Span> {
         let word = ident_at(source, offset)?;
-        if let Some(l) = self
-            .locals
-            .iter()
-            .filter(|l| l.name == word && scope_covers(l, offset))
-            .min_by_key(|l| l.name_span.end - l.name_span.start)
-        {
+        if let Some(l) = innermost_local(&self.locals, &word, offset, false) {
             return Some(l.name_span);
         }
         self.top_recursive()
@@ -1197,12 +1193,7 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
             }
         } else if receiver == "super" {
             self.super_chain_members(offset)?
-        } else if let Some(local) = self
-            .locals
-            .iter()
-            .filter(|l| l.name == receiver && scope_covers_prefix(l, offset))
-            .min_by_key(|l| l.name_span.end - l.name_span.start)
-        {
+        } else if let Some(local) = innermost_local(&self.locals, receiver, offset, true) {
             let ty = local.ty.as_deref()?;
             let inner = ty.strip_prefix("own ").unwrap_or(ty);
             let resolved = self.resolve_named_type(inner)?;
@@ -1457,6 +1448,34 @@ fn scope_covers(l: &Symbol, offset: usize) -> bool {
         Some(scope) => scope.start <= offset && offset <= scope.end,
         None => true,
     }
+}
+
+/// Innermost visible declaration of a name. The old `min_by_key(name width)`
+/// tiebreak was meaningless for same-name identifiers (equal widths always
+/// tie, so the outermost declaration won); narrowest enclosing scope wins,
+/// ties go to the latest declaration, so shadowing resolves inward.
+fn innermost_local<'a>(
+    locals: &'a [Symbol],
+    name: &str,
+    offset: usize,
+    prefix: bool,
+) -> Option<&'a Symbol> {
+    locals
+        .iter()
+        .filter(|l| {
+            l.name == name
+                && if prefix {
+                    scope_covers_prefix(l, offset)
+                } else {
+                    scope_covers(l, offset)
+                }
+        })
+        .min_by(|a, b| {
+            let wa = a.scope.map(|s| s.end - s.start).unwrap_or(usize::MAX);
+            let wb = b.scope.map(|s| s.end - s.start).unwrap_or(usize::MAX);
+            wa.cmp(&wb)
+                .then_with(|| b.name_span.start.cmp(&a.name_span.start))
+        })
 }
 
 /// Completion variant: additionally require the declaration to appear before
@@ -2382,5 +2401,40 @@ mod tests {
         // `foo()` inside bar resolves to foo's declaration name_span.
         let foo_use = src.rfind("foo()").unwrap(); // the call inside bar
         assert_eq!(a.resolve_definition_span(src, foo_use).map(|s| &src[s.start..s.end]), Some("foo"));
+    }
+
+    #[test]
+    fn shadowed_local_resolves_inward() {
+        let src = "void main() do\n  int x = 1\n  if true do\n    string x = \"s\"\n    print(x)\n  end\nend\n";
+        let a = analyze(src);
+        let inner_decl = src.find("string x").unwrap() + 7;
+        let use_off = src.find("print(x)").unwrap() + 6;
+        assert_eq!(src.as_bytes()[use_off], b'x');
+        assert_eq!(
+            a.resolve_definition_span(src, use_off),
+            Some(Span::new(inner_decl, inner_decl + 1)),
+            "shadowed use should resolve to the inner declaration"
+        );
+    }
+
+    #[test]
+    fn hover_own_notes_ownership() {
+        let src = "open class User has\n  User() initialize\nend\nvoid main() do\n  own User a = new User()\n  print(a)\nend\n";
+        let a = analyze(src);
+        let use_off = src.find("print(a)").unwrap() + 6;
+        let hover = a.hover(src, use_off).expect("hover resolves");
+        let HoverContents::Markup(m) = &hover.contents else {
+            panic!("expected markup hover");
+        };
+        assert!(m.value.contains("own User"), "type shown, got: {}", m.value);
+        assert!(m.value.contains("heap-owned"), "ownership note, got: {}", m.value);
+    }
+
+    #[test]
+    fn completion_own_trait_upcast_members() {
+        let src = "trait Speaker has\n  string speak()\nend\nopen class Cat implements Speaker has\n  Cat() initialize\n  public string speak() do\n    return \"m\"\n  end\nend\nvoid main() do\n  own Speaker s = new Cat()\n  s.\nend\n";
+        let off = src.find("s.").unwrap() + 2;
+        let items = Analysis::complete(src, off, false);
+        assert_eq!(labels(&items), vec!["speak"]);
     }
 }
