@@ -1723,10 +1723,16 @@ impl Checker {
                             if let Some(tn) = self.extern_trait_name(&ret) {
                                 self.errors.push(SemError{message: format!("extern function `{name}` cannot return trait type `{tn}` (no C representation)"), span: *name_span});
                             }
+                            if Self::contains_own(&ret) {
+                                self.errors.push(SemError{message: format!("extern function `{name}` cannot return `own` type (no C representation)"), span: *name_span});
+                            }
                             let param_tys: Vec<Ty> = params.iter().map(|p| {
                                 let pt = self.resolve_type(&p.ty);
                                 if let Some(tn) = self.extern_trait_name(&pt) {
                                     self.errors.push(SemError{message: format!("extern function `{name}` cannot take trait type `{tn}` (no C representation)"), span: p.span});
+                                }
+                                if Self::contains_own(&pt) {
+                                    self.errors.push(SemError{message: format!("extern function `{name}` cannot take `own` type (no C representation)"), span: p.span});
                                 }
                                 pt
                             }).collect();
@@ -1751,6 +1757,11 @@ impl Checker {
                         if matches!(fty, Ty::Own(_)) {
                             self.errors.push(SemError {
                                 message: "own fields need structural destruction — rejected in phase 1".into(),
+                                span: f.span,
+                            });
+                        } else if Self::contains_own(&fty) {
+                            self.errors.push(SemError {
+                                message: format!("extern struct field `{}` cannot use `own` type (no C representation)", f.name),
                                 span: f.span,
                             });
                         }
@@ -1782,6 +1793,9 @@ impl Checker {
                                         if let Some(tn) = self.extern_trait_name(&pt) {
                                             self.errors.push(SemError{message: format!("extern enum payload cannot use trait type `{tn}` (no C representation)"), span: p.span});
                                         }
+                                        if Self::contains_own(&pt) {
+                                            self.errors.push(SemError{message: "extern enum payload cannot use `own` type (no C representation)".into(), span: p.span});
+                                        }
                                         payload_tys.push(pt);
                                     }
                                     let tag = if let Some(expr) = &v.discriminant {
@@ -1803,6 +1817,9 @@ impl Checker {
                             }
                             if let Some(tn) = self.extern_trait_name(&decl_ty) {
                                 self.errors.push(SemError{message: format!("extern const `{name}` cannot use trait type `{tn}` (no C representation)"), span: *name_span});
+                            }
+                            if Self::contains_own(&decl_ty) {
+                                self.errors.push(SemError{message: format!("extern const `{name}` cannot use `own` type (no C representation)"), span: *name_span});
                             }
                             if self.scopes.last().map(|s| s.contains_key(name)).unwrap_or(false) {
                                 self.errors.push(SemError{message: format!("redefinition of extern const `{}`", name), span: *name_span});
