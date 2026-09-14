@@ -137,6 +137,10 @@ struct BuildArgs {
     /// Show verbose progress (default: summary lines)
     #[arg(long, default_value_t = false)]
     verbose: bool,
+
+    /// Force recompilation even if output is up to date
+    #[arg(long, default_value_t = false)]
+    force: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -168,6 +172,10 @@ struct RunArgs {
     /// Show verbose progress (default: summary lines)
     #[arg(long, default_value_t = false)]
     verbose: bool,
+
+    /// Force recompilation even if output is up to date
+    #[arg(long, default_value_t = false)]
+    force: bool,
 
     /// Arguments forwarded to the program (use `--` to separate them)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -234,6 +242,7 @@ struct CompileOptions<'a> {
     /// requires it for files actually named `main` (library modules
     /// are entry-less by design — same rule as the LSP).
     require_main: bool,
+    force: bool,
 }
 
 fn main() -> miette::Result<()> {
@@ -723,6 +732,7 @@ fn run_build(args: BuildArgs) -> miette::Result<()> {
         exe_path,
         check_only: false,
         require_main: true,
+        force: args.force,
     };
     let _ = compile(opts)?;
     Ok(())
@@ -747,6 +757,7 @@ fn run_check(args: CheckArgs) -> miette::Result<()> {
         exe_path: None,
         check_only: true,
         require_main,
+        force: false,
     };
     let _ = compile(opts)?;
     Ok(())
@@ -776,6 +787,7 @@ fn run_run(args: RunArgs) -> miette::Result<()> {
         exe_path: Some(exe_path),
         check_only: false,
         require_main: true,
+        force: args.force,
     };
     let built = compile(opts)?;
     let exe = match built {
@@ -1054,7 +1066,7 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // (entry + resolved imports) and the build stamp still matches this
     // profile and toolchain version. `run` relies on this: its binary
     // persists between invocations and only rebuilds on change.
-    if is_fresh(&exe_path, &source_files, opts.release) {
+    if !opts.force && is_fresh(&exe_path, &source_files, opts.release) {
         pb.finish_with_message("Finished");
         status(&pb, quiet,
             "Fresh",
