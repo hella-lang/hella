@@ -1141,8 +1141,13 @@ impl Checker {
                     self.errors.push(SemError{message: format!("class name `{}` conflicts with function", c.name), span: c.name_span});
                 } else {
                     // Record extends / implements names (validation deferred until after all classes collected)
+                    // Generic `extends Base<int>`: identity is the base name.
                     let extends_name = c.extends.as_ref().map(|t| {
-                        match t { Type::Named(s, _) => s.clone(), _ => self.resolve_type(t).to_string() }
+                        match t {
+                            Type::Named(s, _) => s.clone(),
+                            Type::Generic(base, _, _) => base.rsplit("::").next().unwrap_or(base).to_string(),
+                            _ => self.resolve_type(t).to_string(),
+                        }
                     });
                     // Generic args on `extends`/`implements` must satisfy the
                     // parent/trait bounds now (traits are already collected;
@@ -1156,7 +1161,14 @@ impl Checker {
                     }
                     let mut implements_names = Vec::new();
                     for imp in &c.implements {
-                        let n = match imp { Type::Named(s, _) => s.clone(), _ => self.resolve_type(imp).to_string() };
+                        // Generic `implements Box<int>`: identity is the base
+                        // name (args were bounds-checked above); stringified
+                        // `Ty::Generic` (`Box<int>`) never matches trait keys.
+                        let n = match imp {
+                            Type::Named(s, _) => s.clone(),
+                            Type::Generic(base, _, _) => base.rsplit("::").next().unwrap_or(base).to_string(),
+                            _ => self.resolve_type(imp).to_string(),
+                        };
                         if let Type::Generic(base, args, _) = imp {
                             let lookup = base.rsplit("::").next().unwrap_or(base);
                             if let Some(tinfo) = self.traits.get(lookup).cloned() {
@@ -1367,12 +1379,32 @@ impl Checker {
                             }
                         }
                     }
-                    // Validate implements: class must provide all trait methods
+                    // Validate implements: class must provide all trait methods.
+                    // Generic `implements Box<int>`: substitute the trait's
+                    // params before comparing signatures.
+                    let mut imp_type_args: std::collections::HashMap<String, Vec<Type>> = std::collections::HashMap::new();
+                    for imp in &c.implements {
+                        if let Type::Generic(base, targs, _) = imp {
+                            let lookup = base.rsplit("::").next().unwrap_or(base).to_string();
+                            imp_type_args.insert(lookup, targs.clone());
+                        }
+                    }
                     for imp_name in &implements_names {
                         if let Some(trait_info) = self.traits.get(imp_name).cloned() {
+                            if !trait_info.generic_params.is_empty() && !imp_type_args.contains_key(imp_name) {
+                                self.errors.push(SemError{message: format!("trait `{}` is generic; provide type arguments (`implements {}<...>`)", imp_name, imp_name), span: c.span});
+                            }
+                            let mut subst: std::collections::HashMap<String, Ty> = std::collections::HashMap::new();
+                            if let Some(targs) = imp_type_args.get(imp_name) {
+                                for (gp, ta) in trait_info.generic_params.iter().zip(targs.iter()) {
+                                    subst.insert(gp.name.clone(), self.resolve_type(ta));
+                                }
+                            }
                             for (mname, sig) in trait_info.methods.iter() {
+                                let exp_ret = Self::subst_generic_ty(&sig.ret, &subst);
+                                let exp_params: Vec<Ty> = sig.params.iter().map(|p| Self::subst_generic_ty(p, &subst)).collect();
                                 if let Some(cls_sig) = methods.get(mname) {
-                                    if cls_sig.ret != sig.ret || cls_sig.params != sig.params {
+                                    if cls_sig.ret != exp_ret || cls_sig.params != exp_params {
                                         self.errors.push(SemError{message: format!("class `{}` method `{}` does not match trait `{}` signature", c.name, mname, imp_name), span: c.span});
                                     }
                                 } else {
