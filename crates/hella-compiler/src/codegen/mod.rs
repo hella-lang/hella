@@ -3018,14 +3018,17 @@ impl<'ctx> Codegen<'ctx> {
             })
             .collect();
         let is_c_varargs = f.params.iter().any(|p| p.is_variadic && p.name.is_empty());
-        // Special ABI for `main`: C `int main()` is always i32; `int main(string[] args)` is `i32 ()` with `args` as local empty `string[]`
+        // Special ABI for `main`: C `int main()` is always i32;
+        // `int main(string[] args)` is `i32 (i32 argc, ptr argv)` with `args`
+        // populated from argv (see the prologue below).
         let is_main_with_args = f.name == "main"
             && f.params.len() == 1
             && f.params[0].name == "args"
             && matches!(&f.params[0].ty, Type::Array(el, _) if matches!(el.as_ref(), Type::String(_)));
         let fn_ty = if f.name == "main" {
             if is_main_with_args {
-                self.context.i32_type().fn_type(&[], false)
+                let ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                self.context.i32_type().fn_type(&[self.context.i32_type().into(), ptr.into()], false)
             } else {
                 self.context.i32_type().fn_type(&param_types, is_c_varargs)
             }
@@ -3730,18 +3733,53 @@ impl<'ctx> Codegen<'ctx> {
 
         self.vars.push(HashMap::new());
         self.own_slots.push(Vec::new());
-        // Special handling for `int main(string[] args)` where `args` is `string[]` and function is `i32 ()` with no LLVM params
+        // Special handling for `int main(string[] args)`: the LLVM function
+        // is C `i32 (i32 argc, ptr argv)`; `args` is a local `[16 x string]`
+        // filled with argv[1..] (program name excluded, C#/Java-style),
+        // capped at 16 entries, remainder null.
         let is_main_with_args = f.name == "main"
             && f.params.len() == 1
             && f.params[0].name == "args"
             && matches!(&f.params[0].ty, crate::ast::Type::Array(el, _) if matches!(el.as_ref(), crate::ast::Type::String(_)));
         if is_main_with_args {
-            let args_arr_ty = self.context.ptr_type(inkwell::AddressSpace::default()).array_type(16);
+            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+            let args_arr_ty = ptr_ty.array_type(16);
             let args_ty: BasicTypeEnum<'ctx> = args_arr_ty.into();
             let args_alloca = self.create_entry_block_alloca("args", args_ty);
             let zero: BasicValueEnum<'ctx> = args_arr_ty.const_zero().into();
             self.builder.build_store(args_alloca, zero).unwrap();
             self.vars.last_mut().unwrap().insert("args".to_string(), (args_alloca, args_ty));
+            // count = min(max(argc - 1, 0), 16)
+            let i64_ty = self.context.i64_type();
+            let argc = self.builder.build_int_s_extend(func.get_nth_param(0).unwrap().into_int_value(), i64_ty, "argc64").unwrap();
+            let argv = func.get_nth_param(1).unwrap().into_pointer_value();
+            let argc_minus_1 = self.builder.build_int_sub(argc, i64_ty.const_int(1, false), "argc.m1").unwrap();
+            let is_pos = self.builder.build_int_compare(IntPredicate::SGT, argc_minus_1, i64_ty.const_int(0, false), "argc.pos").unwrap();
+            let nonneg = self.builder.build_select(is_pos, argc_minus_1, i64_ty.const_zero(), "argc.nonneg").unwrap();
+            let nonneg = nonneg.into_int_value();
+            let over = self.builder.build_int_compare(IntPredicate::SGT, nonneg, i64_ty.const_int(16, false), "argc.over").unwrap();
+            let count = self.builder.build_select(over, i64_ty.const_int(16, false), nonneg, "argc.count").unwrap().into_int_value();
+            // idx loop: args[idx] = argv[idx + 1]
+            let idx_ptr = self.create_entry_block_alloca("__argv_idx", i64_ty.into());
+            self.builder.build_store(idx_ptr, i64_ty.const_zero()).unwrap();
+            let copy_cond = self.context.append_basic_block(func, "argv.copy.cond");
+            let copy_body = self.context.append_basic_block(func, "argv.copy.body");
+            let copy_done = self.context.append_basic_block(func, "argv.copy.done");
+            self.builder.build_unconditional_branch(copy_cond).unwrap();
+            self.builder.position_at_end(copy_cond);
+            let idx = self.builder.build_load(i64_ty, idx_ptr, "argv.idx").unwrap().into_int_value();
+            let more = self.builder.build_int_compare(IntPredicate::SLT, idx, count, "argv.more").unwrap();
+            self.builder.build_conditional_branch(more, copy_body, copy_done).unwrap();
+            self.builder.position_at_end(copy_body);
+            let src_idx = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "argv.src").unwrap();
+            let slot_ptr = unsafe { self.builder.build_gep(ptr_ty, argv, &[src_idx], "argv.slot").unwrap() };
+            let s = self.builder.build_load(ptr_ty, slot_ptr, "argv.str").unwrap();
+            let dst_ptr = unsafe { self.builder.build_gep(args_arr_ty, args_alloca, &[i64_ty.const_int(0, false), idx], "args.slot").unwrap() };
+            self.builder.build_store(dst_ptr, s).unwrap();
+            let next = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "argv.next").unwrap();
+            self.builder.build_store(idx_ptr, next).unwrap();
+            self.builder.build_unconditional_branch(copy_cond).unwrap();
+            self.builder.position_at_end(copy_done);
         } else {
             for (i, param) in f.params.iter().enumerate() {
                 let param_val = func.get_nth_param(i as u32).unwrap();
