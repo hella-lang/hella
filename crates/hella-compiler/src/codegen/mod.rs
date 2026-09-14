@@ -2054,6 +2054,27 @@ impl<'ctx> Codegen<'ctx> {
                 .build_ptr_to_int(val.into_pointer_value(), d, "ptrtoint")
                 .unwrap()
                 .into(),
+            // Lift into Optional `{value, true}`: dest is a two-field struct
+            // whose second field is `i1` and whose first field matches the
+            // source type. (Sema only produces such flows for `T` → `T?`.)
+            (_, BasicTypeEnum::StructType(dst_st))
+                if dst_st.count_fields() == 2
+                    && matches!(dst_st.get_field_type_at_index(1), Some(BasicTypeEnum::IntType(flag)) if flag.get_bit_width() == 1)
+                    && dst_st.get_field_type_at_index(0) == Some(src) =>
+            {
+                let mut agg: BasicValueEnum<'ctx> = dst_st.get_undef().into();
+                let tmp = self
+                    .builder
+                    .build_insert_value(agg.into_struct_value(), val, 0, "opt.val")
+                    .unwrap();
+                agg = tmp.as_basic_value_enum();
+                let present = self.context.bool_type().const_int(1, false);
+                let tmp2 = self
+                    .builder
+                    .build_insert_value(agg.into_struct_value(), present, 1, "opt.some")
+                    .unwrap();
+                tmp2.as_basic_value_enum()
+            }
             _ => val,
         }
     }
@@ -6238,16 +6259,27 @@ impl<'ctx> Codegen<'ctx> {
                     BinOp::Shl => self.builder.build_left_shift(l.into_int_value(), r.into_int_value(), "shl").unwrap().into(),
                     BinOp::Shr => self.builder.build_right_shift(l.into_int_value(), r.into_int_value(), false, "shr").unwrap().into(),
                     BinOp::NullCoalesce => {
-                        // a ?? b : if a is Optional, return a if not null else b; for MVP treat as l if not zero
-                        let is_null = if l.is_pointer_value() {
-                            self.builder.build_is_null(l.into_pointer_value(), "isnull").unwrap()
+                        // `a ?? b`: `a` is an Optional `{value, present}`
+                        // struct (or legacy int/pointer zero-check).
+                        if l.is_struct_value() {
+                            let pair = l.into_struct_value();
+                            let present = self.builder.build_extract_value(pair, 1, "opt.present").unwrap().into_int_value();
+                            let inner = self.builder.build_extract_value(pair, 0, "opt.value").unwrap();
+                            let fallback = self.coerce_to_ty(r, inner.get_type());
+                            self.builder.build_select(present, inner, fallback, "coalesce").unwrap().into()
+                        } else if l.is_pointer_value() {
+                            let is_null = self.builder.build_is_null(l.into_pointer_value(), "isnull").unwrap();
+                            // For now, just return l if not zero else r
+                            let cond = is_null;
+                            // Use select
+                            self.builder.build_select(cond, r, l, "coalesce").unwrap().into()
                         } else {
-                            self.builder.build_int_compare(inkwell::IntPredicate::EQ, l.into_int_value(), self.context.i64_type().const_int(0,false), "isnull").unwrap()
-                        };
-                        // For now, just return l if not zero else r
-                        let cond = is_null;
-                        // Use select
-                        self.builder.build_select(cond, r, l, "coalesce").unwrap().into()
+                            let is_null = self.builder.build_int_compare(inkwell::IntPredicate::EQ, l.into_int_value(), self.context.i64_type().const_int(0,false), "isnull").unwrap();
+                            // For now, just return l if not zero else r
+                            let cond = is_null;
+                            // Use select
+                            self.builder.build_select(cond, r, l, "coalesce").unwrap().into()
+                        }
                     },
                     BinOp::Range | BinOp::RangeInclusive => {
                         // For MVP, range as array of two ints [start, end] stored as struct {i64,i64} or just return l
@@ -8520,6 +8552,15 @@ mod tests {
     fn tuple_return_destructure_verifies() {
         compile_src(
             "(int, int) pair() do\n  return (3, 4)\nend\nvoid main() do\n  a, b = pair()\n  int x = 1\n  int y = 2\n  x, y = (y, x)\nend\n",
+        );
+    }
+
+    /// T-4: Optional lift (`int` → `int?`) and `??` lower through the
+    /// `{value, present}` representation.
+    #[test]
+    fn optional_coalesce_verifies() {
+        compile_src(
+            "int orElse(int? n, int fallback) do\n  return n ?? fallback\nend\nvoid main() do\n  int? a = 5\n  int x = orElse(a, 99)\nend\n",
         );
     }
 

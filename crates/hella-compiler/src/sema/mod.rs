@@ -130,6 +130,10 @@ impl Ty {
             (Ty::Map { key: fk, value: fv }, Ty::Map { key: tk, value: tv }) => {
                 Self::assignable(fk, tk) && Self::assignable(fv, tv)
             }
+            // Optionals: element-wise between optionals; any value lifts
+            // into its Optional (`Some`). Unwrapping needs `??`.
+            (Ty::Optional(fe), Ty::Optional(te)) => Self::assignable(fe, te),
+            (from, Ty::Optional(te)) => Self::assignable(from, te),
             _ => false,
         }
     }
@@ -2764,8 +2768,19 @@ impl Checker {
                         Ty::Bool
                     }
                     BinOp::NullCoalesce => {
-                        // a ?? b : if a is Optional, return inner, else return lt
-                        Ty::Int
+                        // `a ?? b`: `a` must be Optional (or `any`/null); the
+                        // result is the inner type, `b` must match it.
+                        if let Ty::Optional(inner) = lt.clone() {
+                            if !self.ty_assignable(&rt, &inner) {
+                                self.errors.push(SemError{message: format!("`??` fallback must match `{inner}`, found `{rt}`"), span: expr.span});
+                            }
+                            *inner
+                        } else if lt == Ty::Any {
+                            rt
+                        } else {
+                            self.errors.push(SemError{message: format!("`??` requires an Optional left side, found `{lt}`"), span: expr.span});
+                            Ty::Int
+                        }
                     }
                     BinOp::Range | BinOp::RangeInclusive => {
                         if lt != Ty::Int || rt != Ty::Int {
@@ -5038,6 +5053,16 @@ mod tests {
         assert_error_contains(
             "enum P has\nPair(int a, int b)\nSingle(int x)\nend\nvoid main() do\nP p = .Pair(3, 4)\nend\n",
             "not supported in phase 1",
+        );
+    }
+
+    /// T-4: values lift into `Optional`; `??` needs an Optional left side.
+    #[test]
+    fn optional_lift_and_coalesce() {
+        assert_clean("int orElse(int? n, int fallback) do\nreturn n ?? fallback\nend\nvoid main() do\nint? a = 5\nint x = orElse(a, 99)\nend\n");
+        assert_error_contains(
+            "void main() do\nint x = 1 ?? 2\nend\n",
+            "requires an Optional left side",
         );
     }
 }
