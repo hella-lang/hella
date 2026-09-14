@@ -241,6 +241,8 @@ struct StructInfo {
     field_map: HashMap<String, (usize, Ty)>,
     field_vis: HashMap<String, crate::ast::Visibility>,
     field_defaults: HashMap<String, Option<Expr>>,
+    generic_params: Vec<GenericParam>,
+    where_clause: Option<WhereClause>,
     span: Span,
 }
 
@@ -260,6 +262,8 @@ struct ClassInfo {
     is_sealed: bool,
     extends: Option<String>,
     implements: Vec<String>,
+    generic_params: Vec<GenericParam>,
+    where_clause: Option<WhereClause>,
     span: Span,
 }
 
@@ -276,6 +280,8 @@ struct PropertyInfo {
 struct TraitInfo {
     name: String,
     methods: HashMap<String, FuncSig>,
+    generic_params: Vec<GenericParam>,
+    where_clause: Option<WhereClause>,
     span: Span,
 }
 
@@ -306,6 +312,8 @@ struct EnumInfo {
     name: String,
     variants: Vec<EnumVariantInfo>,
     variant_map: HashMap<String, (usize, Vec<Ty>)>, // variant -> (tag, payload tys)
+    generic_params: Vec<GenericParam>,
+    where_clause: Option<WhereClause>,
     span: Span,
 }
 
@@ -822,6 +830,15 @@ impl Checker {
     }
 
     fn resolve_type(&mut self, ty: &Type) -> Ty {
+        // Enforce generic bounds at every instantiation site (`Box<int>` in
+        // any type position). Single-letter type parameters themselves carry
+        // no arguments, so this only fires on real applications.
+        if let Type::Generic(base, args, _) = ty {
+            if !args.is_empty() {
+                let span = ty.span();
+                self.check_type_application(base, args, span);
+            }
+        }
         let mut t = Ty::from(ty);
         // Handle generic type params: if t is Struct with name that is a generic param, treat as Generic
         if let Ty::Struct(ref n) = t {
@@ -1040,9 +1057,12 @@ impl Checker {
                             field_map: fmap,
                             field_vis: fvis,
                             field_defaults: fdefaults,
+                            generic_params: s.generic_params.clone(),
+                            where_clause: s.where_clause.clone(),
                             span: s.span,
                         },
                     );
+                    self.check_where_clause_def("struct", &s.name, &s.generic_params, &s.where_clause, s.span);
                 }
             }
         }
@@ -1082,7 +1102,8 @@ impl Checker {
                             methods.insert(m.name.clone(), FuncSig{ret: ret_ty, params: param_tys, param_modes, param_names: m.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: m.params.iter().map(|p| p.is_variadic).collect(), generic_params: m.generic_params.clone(), where_clause: m.where_clause.clone(), span: m.name_span});
                         }
                     }
-                    self.traits.insert(t.name.clone(), TraitInfo{name: t.name.clone(), methods, span: t.span});
+                    self.traits.insert(t.name.clone(), TraitInfo{name: t.name.clone(), methods, generic_params: t.generic_params.clone(), where_clause: t.where_clause.clone(), span: t.span});
+                    self.check_where_clause_def("trait", &t.name, &t.generic_params, &t.where_clause, t.span);
                 }
             }
         }
@@ -1098,9 +1119,25 @@ impl Checker {
                     let extends_name = c.extends.as_ref().map(|t| {
                         match t { Type::Named(s, _) => s.clone(), _ => self.resolve_type(t).to_string() }
                     });
+                    // Generic args on `extends`/`implements` must satisfy the
+                    // parent/trait bounds now (traits are already collected;
+                    // parent classes may follow, so skip unknown ones here —
+                    // the deferred validation below reports those).
+                    if let Some(Type::Generic(base, args, _)) = c.extends.as_ref() {
+                        let lookup = base.rsplit("::").next().unwrap_or(base);
+                        if let Some(pinfo) = self.classes.get(lookup).cloned() {
+                            self.check_type_args(&pinfo.generic_params, &pinfo.where_clause, lookup, args, c.extends.as_ref().map(|t| t.span()).unwrap_or(c.span));
+                        }
+                    }
                     let mut implements_names = Vec::new();
                     for imp in &c.implements {
                         let n = match imp { Type::Named(s, _) => s.clone(), _ => self.resolve_type(imp).to_string() };
+                        if let Type::Generic(base, args, _) = imp {
+                            let lookup = base.rsplit("::").next().unwrap_or(base);
+                            if let Some(tinfo) = self.traits.get(lookup).cloned() {
+                                self.check_type_args(&tinfo.generic_params, &tinfo.where_clause, lookup, args, imp.span());
+                            }
+                        }
                         implements_names.push(n);
                     }
                     let mut seen: HashSet<String> = HashSet::new();
@@ -1155,7 +1192,7 @@ impl Checker {
                         fields.push((f.name.clone(), fty));
                     }
                     // Also insert class layout into structs map for field access / instantiation
-                    self.structs.insert(c.name.clone(), StructInfo{name: c.name.clone(), fields: fields.clone(), field_map: fmap.clone(), field_vis: fvis.clone(), field_defaults: fdefaults.clone(), span: c.span});
+                    self.structs.insert(c.name.clone(), StructInfo{name: c.name.clone(), fields: fields.clone(), field_map: fmap.clone(), field_vis: fvis.clone(), field_defaults: fdefaults.clone(), generic_params: c.generic_params.clone(), where_clause: c.where_clause.clone(), span: c.span});
                     // Collect methods
                     let mut methods = HashMap::new();
                     let mut method_vis: HashMap<String, crate::ast::Visibility> = HashMap::new();
@@ -1351,7 +1388,8 @@ impl Checker {
                         let to = self.resolve_type(&conv.to_ty);
                         conv_vec.push((from, to, conv.span));
                     }
-                    self.classes.insert(c.name.clone(), ClassInfo{name: c.name.clone(), fields, field_map: fmap, field_vis: fvis, methods, method_vis, constructors: ctor_sigs, properties: prop_map, operators: op_map, conversions: conv_vec, is_open: c.is_open, is_sealed: c.is_sealed, extends: extends_name.clone(), implements: implements_names.clone(), span: c.span});
+                    self.classes.insert(c.name.clone(), ClassInfo{name: c.name.clone(), fields, field_map: fmap, field_vis: fvis, methods, method_vis, constructors: ctor_sigs, properties: prop_map, operators: op_map, conversions: conv_vec, is_open: c.is_open, is_sealed: c.is_sealed, extends: extends_name.clone(), implements: implements_names.clone(), generic_params: c.generic_params.clone(), where_clause: c.where_clause.clone(), span: c.span});
+                    self.check_where_clause_def("class", &c.name, &c.generic_params, &c.where_clause, c.span);
                 }
             }
         }
@@ -1439,7 +1477,8 @@ impl Checker {
                         vmap.insert(v.name.clone(), (tag, payload_tys.clone()));
                         variants.push(EnumVariantInfo{name: v.name.clone(), tag, payload_tys, discriminant_expr: v.discriminant.clone(), span: v.span});
                     }
-                    self.enums.insert(e.name.clone(), EnumInfo{name: e.name.clone(), variants, variant_map: vmap, span: e.span});
+                    self.enums.insert(e.name.clone(), EnumInfo{name: e.name.clone(), variants, variant_map: vmap, generic_params: e.generic_params.clone(), where_clause: e.where_clause.clone(), span: e.span});
+                    self.check_where_clause_def("enum", &e.name, &e.generic_params, &e.where_clause, e.span);
                 }
             }
         }
@@ -1451,14 +1490,14 @@ impl Checker {
                 fvis.insert("value".to_string(), Visibility::Public);
                 let mut fdefs = HashMap::new();
                 fdefs.insert("value".to_string(), None);
-                self.structs.insert(td.name.clone(), StructInfo{name: td.name.clone(), fields: vec![("value".to_string(), ty.clone())], field_map: [(String::from("value"), (0, ty.clone()))].into_iter().collect(), field_vis: fvis, field_defaults: fdefs, span: td.span});
+                self.structs.insert(td.name.clone(), StructInfo{name: td.name.clone(), fields: vec![("value".to_string(), ty.clone())], field_map: [(String::from("value"), (0, ty.clone()))].into_iter().collect(), field_vis: fvis, field_defaults: fdefs, generic_params: td.generic_params.clone(), where_clause: None, span: td.span});
             } else if let Item::Distinct(dd) = item {
                 let ty = self.resolve_type(&dd.ty);
                 let mut fvis = HashMap::new();
                 fvis.insert("value".to_string(), Visibility::Public);
                 let mut fdefs = HashMap::new();
                 fdefs.insert("value".to_string(), None);
-                self.structs.insert(dd.name.clone(), StructInfo{name: dd.name.clone(), fields: vec![("value".to_string(), ty.clone())], field_map: [(String::from("value"), (0, ty.clone()))].into_iter().collect(), field_vis: fvis, field_defaults: fdefs, span: dd.span});
+                self.structs.insert(dd.name.clone(), StructInfo{name: dd.name.clone(), fields: vec![("value".to_string(), ty.clone())], field_map: [(String::from("value"), (0, ty.clone()))].into_iter().collect(), field_vis: fvis, field_defaults: fdefs, generic_params: dd.generic_params.clone(), where_clause: None, span: dd.span});
             } else if let Item::Extension(ext) = item {
                 let target_name = match &ext.ty { Type::Named(n, _) => n.clone(), Type::Generic(n, _, _) => n.clone(), _ => "".to_string() };
                 let ext_members = ext.members.clone();
@@ -1591,7 +1630,7 @@ impl Checker {
                         let cls = self.classes.entry(target_name.clone()).or_insert_with(|| ClassInfo{
                             name: target_name.clone(), fields: vec![], field_map: HashMap::new(), field_vis: HashMap::new(),
                             methods: HashMap::new(), method_vis: HashMap::new(), constructors: vec![], properties: HashMap::new(),
-                            operators: HashMap::new(), conversions: vec![], is_open: false, is_sealed: false, extends: None, implements: vec![], span: Span::new(0,0)
+                            operators: HashMap::new(), conversions: vec![], is_open: false, is_sealed: false, extends: None, implements: vec![], generic_params: vec![], where_clause: None, span: Span::new(0,0)
                         });
                         for (name, sig, vis) in pending_ext {
                             let vis_pub = if vis == crate::ast::Visibility::Default { crate::ast::Visibility::Public } else { vis };
@@ -1773,7 +1812,7 @@ impl Checker {
                                     fdefs.insert(f.name.clone(), None);
                                     flds.push((f.name.clone(), fty));
                                 }
-                                self.structs.insert(name.clone(), StructInfo{name: name.clone(), fields: flds, field_map: fmap, field_vis: fvis, field_defaults: fdefs, span: *name_span});
+                                self.structs.insert(name.clone(), StructInfo{name: name.clone(), fields: flds, field_map: fmap, field_vis: fvis, field_defaults: fdefs, generic_params: vec![], where_clause: None, span: *name_span});
                             }
                         }
                         crate::ast::ExternMember::Enum{name, name_span, variants, ..} => {
@@ -1807,7 +1846,7 @@ impl Checker {
                                     vmap.insert(v.name.clone(), (tag, payload_tys.clone()));
                                     vars.push(EnumVariantInfo{name: v.name.clone(), tag, payload_tys, discriminant_expr: v.discriminant.clone(), span: v.span});
                                 }
-                                self.enums.insert(name.clone(), EnumInfo{name: name.clone(), variants: vars, variant_map: vmap, span: *name_span});
+                                self.enums.insert(name.clone(), EnumInfo{name: name.clone(), variants: vars, variant_map: vmap, generic_params: vec![], where_clause: None, span: *name_span});
                             }
                         }
                         crate::ast::ExternMember::Const{ty, name, name_span, ..} => {
@@ -4394,6 +4433,59 @@ impl Checker {
             Ty::Own(el) => Type::Own(Box::new(Self::ty_to_type(el)), sp),
             Ty::Tuple(tys) => Type::Tuple(tys.iter().map(|t| Self::ty_to_type(t)).collect(), sp),
             Ty::Function(ret, args) => Type::FunctionType(Box::new(Self::ty_to_type(ret)), args.iter().map(|a| Self::ty_to_type(a)).collect(), sp),
+        }
+    }
+
+    /// Enforce a generic declaration's bounds at an instantiation site
+    /// (`Box<int>` in any type position, `implements Comparable<T>`).
+    /// Unknown bases are reported by `resolve_type`; non-generic bases given
+    /// arguments are an error here.
+    fn check_type_application(&mut self, base: &str, args: &[Type], span: Span) {
+        let lookup = base.rsplit("::").next().unwrap_or(base);
+        // Classes mirror into the structs map; prefer the class entry so
+        // class bounds apply (struct and class entries agree otherwise).
+        if let Some(cinfo) = self.classes.get(lookup).cloned() {
+            self.check_type_args(&cinfo.generic_params, &cinfo.where_clause, lookup, args, span);
+        } else if let Some(sinfo) = self.structs.get(lookup).cloned() {
+            self.check_type_args(&sinfo.generic_params, &sinfo.where_clause, lookup, args, span);
+        } else if let Some(einfo) = self.enums.get(lookup).cloned() {
+            self.check_type_args(&einfo.generic_params, &einfo.where_clause, lookup, args, span);
+        } else if let Some(tinfo) = self.traits.get(lookup).cloned() {
+            self.check_type_args(&tinfo.generic_params, &tinfo.where_clause, lookup, args, span);
+        }
+    }
+
+    /// Bounds check for one instantiation; type-flavored arity message when
+    /// the base declares no generics at all.
+    fn check_type_args(&mut self, generic_params: &[GenericParam], where_clause: &Option<WhereClause>, base: &str, args: &[Type], span: Span) {
+        if generic_params.is_empty() && where_clause.is_none() {
+            if !args.is_empty() {
+                self.errors.push(SemError { message: format!("type `{base}` is not generic but {} type argument(s) provided", args.len()), span });
+            }
+            return;
+        }
+        self.check_generic_bounds(generic_params, where_clause, args, span);
+    }
+
+    /// Validate a type declaration's own `where` clause: subjects must name
+    /// the declaration's generic parameters (no type resolution, so no
+    /// forward-declaration hazard; bound existence is enforced at
+    /// instantiation sites, which run after all declarations are collected).
+    fn check_where_clause_def(&mut self, kind: &str, name: &str, generic_params: &[GenericParam], where_clause: &Option<WhereClause>, span: Span) {
+        let Some(wc) = where_clause else { return };
+        if generic_params.is_empty() {
+            self.errors.push(SemError { message: format!("`where` clause on non-generic {kind} `{name}`"), span });
+            return;
+        }
+        for constr in &wc.constraints {
+            let subj = match &constr.ty {
+                Type::Named(n, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
+                Type::Generic(n, _, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
+                other => other.name(),
+            };
+            if !generic_params.iter().any(|gp| gp.name == subj) {
+                self.errors.push(SemError { message: format!("`where` subject `{subj}` is not a generic parameter of {kind} `{name}`"), span: constr.span });
+            }
         }
     }
 
