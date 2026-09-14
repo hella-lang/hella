@@ -714,7 +714,7 @@ impl Parser {
                         let pty = self.parse_type()?;
                         let (pn, pn_span) = self.parse_ident()?;
                         let pspan = Span::new(pty.span().start, pn_span.end);
-                        let param = Param { is_variadic: false, mode: ParamMode::None, ty: pty, name: pn, name_span: pn_span, span: pspan};
+                        let param = Param { is_variadic: false, mode: ParamMode::None, ty: pty, name: pn, name_span: pn_span, default: None, span: pspan};
                         self.expect(Token::RParen, "expected `)` after setter param")?;
                         let body = self.parse_block()?;
                         setter = Some((param, body));
@@ -725,7 +725,7 @@ impl Parser {
                     let pty = self.parse_type()?;
                     let (pn, pn_span) = self.parse_ident()?;
                     let pspan = Span::new(pty.span().start, pn_span.end);
-                    let param = Param { is_variadic: false, mode: ParamMode::None, ty: pty, name: pn, name_span: pn_span, span: pspan};
+                    let param = Param { is_variadic: false, mode: ParamMode::None, ty: pty, name: pn, name_span: pn_span, default: None, span: pspan};
                     self.expect(Token::RParen, "expected `)` after setter param")?;
                     let body = self.parse_block()?;
                     setter = Some((param, body));
@@ -1078,7 +1078,7 @@ impl Parser {
                                     (format!("_payload{}", payload_params.len()), pty.span())
                                 };
                                 let pspan2 = Span::new(pty.span().start, pspan.end);
-                                payload_params.push(Param{is_variadic: false, mode: ParamMode::None, ty: pty, name: pname, name_span: pspan, span: pspan2});
+                                payload_params.push(Param{is_variadic: false, mode: ParamMode::None, ty: pty, name: pname, name_span: pspan, default: None, span: pspan2});
                                 if !self.consume_if(Token::Comma) { break; }
                                 if self.peek_token() == Some(&Token::RParen) { break; }
                             }
@@ -1292,7 +1292,7 @@ impl Parser {
                         let pty = self.parse_type()?;
                         let (pn, pn_span) = self.parse_ident()?;
                         let pspan = Span::new(pty.span().start, pn_span.end);
-                        let param = Param{is_variadic: false, mode: ParamMode::None, ty: pty, name: pn, name_span: pn_span, span: pspan};
+                        let param = Param{is_variadic: false, mode: ParamMode::None, ty: pty, name: pn, name_span: pn_span, default: None, span: pspan};
                         self.expect(Token::RParen, "expected `)` after setter param")?;
                         let body = self.parse_block()?;
                         setter = Some((param, body));
@@ -1303,7 +1303,7 @@ impl Parser {
                     let pty = self.parse_type()?;
                     let (pn, pn_span) = self.parse_ident()?;
                     let pspan = Span::new(pty.span().start, pn_span.end);
-                    let param = Param{is_variadic: false, mode: ParamMode::None, ty: pty, name: pn, name_span: pn_span, span: pspan};
+                    let param = Param{is_variadic: false, mode: ParamMode::None, ty: pty, name: pn, name_span: pn_span, default: None, span: pspan};
                     self.expect(Token::RParen, "expected `)` after setter param")?;
                     let body = self.parse_block()?;
                     setter = Some((param, body));
@@ -1412,7 +1412,7 @@ impl Parser {
                         if self.consume_if(Token::Eq) {
                             default_expr = Some(self.parse_expr()?);
                         }
-                        payload_params.push(Param { is_variadic: false, mode, ty, name: pname, name_span: pspan, span: pspan2 });
+                        payload_params.push(Param { is_variadic: false, mode, ty, name: pname, name_span: pspan, default: default_expr, span: pspan2 });
                         if !self.consume_if(Token::Comma) { break; }
                         if self.peek_token() == Some(&Token::RParen) { break; }
                     }
@@ -1740,20 +1740,24 @@ impl Parser {
                     // derived: `... vda`
                     let (n, ns) = self.parse_ident()?;
                     let pspan = Span::new(ns.start, ns.end);
-                    if self.consume_if(Token::Eq) {
-                        let _ = self.parse_expr()?;
-                    }
-                    return Ok(Param { is_variadic: true, mode, ty: Type::Named("__derived__".to_string(), ns), name: n, name_span: ns, span: pspan });
+                    let default = if self.consume_if(Token::Eq) {
+                        Some(self.parse_expr()?)
+                    } else {
+                        None
+                    };
+                    return Ok(Param { is_variadic: true, mode, ty: Type::Named("__derived__".to_string(), ns), name: n, name_span: ns, default, span: pspan });
                 }
             }
         }
         let ty = self.parse_type()?;
         let (pn, pn_span) = self.parse_ident()?;
         let pspan = Span::new(ty.span().start, pn_span.end);
-        if self.consume_if(Token::Eq) {
-            let _ = self.parse_expr()?;
-        }
-        Ok(Param { is_variadic, mode, ty, name: pn, name_span: pn_span, span: pspan })
+        let default = if self.consume_if(Token::Eq) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        Ok(Param { is_variadic, mode, ty, name: pn, name_span: pn_span, default, span: pspan })
     }
 
     fn parse_call_arg(&mut self) -> Result<CallArg, ParseError> {
@@ -3000,7 +3004,7 @@ impl Parser {
                             if next_is_delim {
                                 let (pn, pn_span) = self.parse_ident()?;
                                 let ty = Type::Named("__derived__".to_string(), pn_span);
-                                params.push(Param { is_variadic: true, mode: ParamMode::None, ty, name: pn, name_span: pn_span, span: pn_span });
+                                params.push(Param { is_variadic: true, mode: ParamMode::None, ty, name: pn, name_span: pn_span, default: None, span: pn_span });
                                 if !self.consume_if(Token::Comma) { break; }
                                 if self.peek_token() == Some(&Token::Pipe) { break; }
                                 continue;
@@ -3012,7 +3016,7 @@ impl Parser {
                         if let Ok(ty) = self.parse_type() {
                             if let Ok((pn, pn_span)) = self.parse_ident() {
                                 let pspan = Span::new(ty.span().start, pn_span.end);
-                                params.push(Param { is_variadic: true, mode: ParamMode::None, ty, name: pn, name_span: pn_span, span: pspan});
+                                params.push(Param { is_variadic: true, mode: ParamMode::None, ty, name: pn, name_span: pn_span, default: None, span: pspan});
                                 parsed_explicit = true;
                             } else {
                                 self.pos = save;
@@ -3023,7 +3027,7 @@ impl Parser {
                         if !parsed_explicit {
                             let (pn, pn_span) = self.parse_ident()?;
                             let any_ty = Type::Any(pn_span);
-                            params.push(Param { is_variadic: true, mode: ParamMode::None, ty: any_ty, name: pn, name_span: pn_span, span: pn_span});
+                            params.push(Param { is_variadic: true, mode: ParamMode::None, ty: any_ty, name: pn, name_span: pn_span, default: None, span: pn_span});
                         }
                         if !self.consume_if(Token::Comma) { break; }
                         if self.peek_token() == Some(&Token::Pipe) { break; }
@@ -3035,7 +3039,7 @@ impl Parser {
                     if let Ok(ty) = self.parse_type() {
                         if let Ok((pn, pn_span)) = self.parse_ident() {
                             let pspan = Span::new(ty.span().start, pn_span.end);
-                            params.push(Param { is_variadic: false, mode: ParamMode::None, ty, name: pn, name_span: pn_span, span: pspan});
+                            params.push(Param { is_variadic: false, mode: ParamMode::None, ty, name: pn, name_span: pn_span, default: None, span: pspan});
                             parsed = true;
                         } else {
                             self.pos = save;
@@ -3047,7 +3051,7 @@ impl Parser {
                         let (pn, pn_span) = self.parse_ident()?;
                         let any_ty = Type::Any(pn_span);
                         let pspan = Span::new(pn_span.start, pn_span.end);
-                        params.push(Param { is_variadic: false, mode: ParamMode::None, ty: any_ty, name: pn, name_span: pn_span, span: pspan});
+                        params.push(Param { is_variadic: false, mode: ParamMode::None, ty: any_ty, name: pn, name_span: pn_span, default: None, span: pspan});
                     }
                     if !self.consume_if(Token::Comma) { break; }
                     if self.peek_token() == Some(&Token::Pipe) { break; }

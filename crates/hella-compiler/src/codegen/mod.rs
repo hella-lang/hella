@@ -104,6 +104,9 @@ struct TyInfo {
     param_modes: Vec<ParamMode>,
     param_names: Vec<String>,
     param_is_variadic: Vec<bool>,
+    /// Default value per parameter (`None` = required); leading entry is
+    /// always `None` for the implicit `this`. Filled at call sites.
+    param_defaults: Vec<Option<crate::ast::Expr>>,
 }
 
 impl<'ctx> Codegen<'ctx> {
@@ -691,7 +694,9 @@ impl<'ctx> Codegen<'ctx> {
             full_modes.extend(m.params.iter().map(|p| p.mode));
             let mut full_variadic = vec![false];
             full_variadic.extend(m.params.iter().map(|p| p.is_variadic));
-            let tyinfo = TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic};
+            let mut full_defaults = vec![None];
+            full_defaults.extend(m.params.iter().map(|p| p.default.clone()));
+            let tyinfo = TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults};
             methods.insert(m.name.clone(), (func, tyinfo));
         }
         self.class_methods.insert(c.name.clone(), methods);
@@ -756,7 +761,9 @@ impl<'ctx> Codegen<'ctx> {
             full_modes.extend(op.params.iter().map(|p| p.mode));
             let mut full_variadic = vec![false];
             full_variadic.extend(op.params.iter().map(|p| p.is_variadic));
-            ops.insert(op.op.clone(), (func, TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic}));
+            let mut full_defaults = vec![None];
+            full_defaults.extend(op.params.iter().map(|p| p.default.clone()));
+            ops.insert(op.op.clone(), (func, TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults}));
         }
         if !ops.is_empty() { self.class_operators.insert(c.name.clone(), ops); }
         // Inherit parent methods for extends (static dispatch)
@@ -817,7 +824,9 @@ impl<'ctx> Codegen<'ctx> {
             full_modes.extend(ctor.params.iter().map(|p| p.mode));
             let mut full_variadic = vec![false];
             full_variadic.extend(ctor.params.iter().map(|p| p.is_variadic));
-            ctors.push((func, TyInfo{ret: crate::sema::Ty::Void, params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic}));
+            let mut full_defaults = vec![None];
+            full_defaults.extend(ctor.params.iter().map(|p| p.default.clone()));
+            ctors.push((func, TyInfo{ret: crate::sema::Ty::Void, params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults}));
         }
         if !ctors.is_empty() { self.class_constructors.insert(c.name.clone(), ctors); }
         // Declare destructors: `void (ptr this)`, mangled `Class__dtor`
@@ -827,7 +836,7 @@ impl<'ctx> Codegen<'ctx> {
             let fn_ty = self.context.void_type().fn_type(&[this_ty], false);
             let mangled = format!("{}__dtor{}", c.name, if c.destructors.len()>1 { format!("{}", idx)} else {"".to_string()});
             let func = self.module.add_function(&mangled, fn_ty, None);
-            dtors.push((func, TyInfo{ret: crate::sema::Ty::Void, params: vec![crate::sema::Ty::Struct(c.name.clone())], param_modes: vec![ParamMode::None], param_names: vec!["this".to_string()], param_is_variadic: vec![false]}));
+            dtors.push((func, TyInfo{ret: crate::sema::Ty::Void, params: vec![crate::sema::Ty::Struct(c.name.clone())], param_modes: vec![ParamMode::None], param_names: vec!["this".to_string()], param_is_variadic: vec![false], param_defaults: vec![None]}));
         }
         if !dtors.is_empty() { self.class_destructors.insert(c.name.clone(), dtors); }
         // Declare properties: getter/setter — allow separate declarations that merge
@@ -852,7 +861,7 @@ impl<'ctx> Codegen<'ctx> {
                     self.module.add_function(&mangled, fn_ty, None)
                 };
                 let mut params = vec![crate::sema::Ty::Struct(c.name.clone())];
-                pg = Some((func, TyInfo{ret: prop_ty.clone(), params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new()}));
+                pg = Some((func, TyInfo{ret: prop_ty.clone(), params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new()}));
             }
             if let Some((ref param,_)) = prop.setter {
                 let setter_ty_raw: crate::sema::Ty = (&param.ty).into();
@@ -867,7 +876,7 @@ impl<'ctx> Codegen<'ctx> {
                     self.module.add_function(&mangled, fn_ty, None)
                 };
                 let mut params = vec![crate::sema::Ty::Struct(c.name.clone()), setter_ty.clone()];
-                ps = Some((func, TyInfo{ret: crate::sema::Ty::Void, params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new()}));
+                ps = Some((func, TyInfo{ret: crate::sema::Ty::Void, params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new()}));
             }
             if let Some(existing) = props.get(&prop.name).cloned() {
                 let mut merged_getter = existing.getter;
@@ -1093,7 +1102,9 @@ impl<'ctx> Codegen<'ctx> {
                     full_modes.extend(f.params.iter().map(|p| p.mode));
                     let mut full_variadic = vec![false];
                     full_variadic.extend(f.params.iter().map(|p| p.is_variadic));
-                    entry.insert(f.name.clone(), (func, TyInfo{ret: ret_ty, params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic}));
+            let mut full_defaults = vec![None];
+            full_defaults.extend(f.params.iter().map(|p| p.default.clone()));
+                    entry.insert(f.name.clone(), (func, TyInfo{ret: ret_ty, params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults}));
                 }
                 crate::ast::ExtensionMember::Operator(op) => {
                     let ret_ty = crate::sema::Ty::Int;
@@ -1154,8 +1165,10 @@ impl<'ctx> Codegen<'ctx> {
                     full_modes.extend(op.params.iter().map(|p| p.mode));
                     let mut full_variadic = vec![false];
                     full_variadic.extend(op.params.iter().map(|p| p.is_variadic));
+            let mut full_defaults = vec![None];
+            full_defaults.extend(op.params.iter().map(|p| p.default.clone()));
                     let entry = self.class_operators.entry(target.clone()).or_insert_with(HashMap::new);
-                    entry.insert(op.op.clone(), (func, TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic}));
+                    entry.insert(op.op.clone(), (func, TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults}));
                 }
                 crate::ast::ExtensionMember::Property(prop) => {
                     let prop_ty_raw: crate::sema::Ty = prop.ty.as_ref().map(|t| t.into()).or_else(|| prop.setter.as_ref().map(|(p,_)| (&p.ty).into())).unwrap_or(crate::sema::Ty::Int);
@@ -1176,7 +1189,7 @@ impl<'ctx> Codegen<'ctx> {
                             self.module.add_function(&mangled, fn_ty, None)
                         };
                         let mut params = vec![crate::sema::Ty::Struct(target.clone())];
-                        pg = Some((func, TyInfo{ret: prop_ty.clone(), params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new()}));
+                        pg = Some((func, TyInfo{ret: prop_ty.clone(), params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new()}));
                     }
                     if let Some((ref param,_)) = prop.setter {
                         let setter_ty_raw: crate::sema::Ty = (&param.ty).into();
@@ -1191,7 +1204,7 @@ impl<'ctx> Codegen<'ctx> {
                             self.module.add_function(&mangled, fn_ty, None)
                         };
                         let mut params = vec![crate::sema::Ty::Struct(target.clone()), setter_ty.clone()];
-                        ps = Some((func, TyInfo{ret: crate::sema::Ty::Void, params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new()}));
+                        ps = Some((func, TyInfo{ret: crate::sema::Ty::Void, params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new()}));
                     }
                     let entry = self.class_properties.entry(target.clone()).or_insert_with(HashMap::new);
                     if let Some(existing) = entry.get(&prop.name).cloned() {
@@ -3153,6 +3166,7 @@ impl<'ctx> Codegen<'ctx> {
                     param_modes,
                     param_names: f.params.iter().map(|p| p.name.clone()).collect(),
                     param_is_variadic: f.params.iter().map(|p| p.is_variadic).collect(),
+                    param_defaults: f.params.iter().map(|p| p.default.clone()).collect(),
                 },
             ),
         );
@@ -3362,6 +3376,75 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    /// Evaluate the default value for parameter `idx` (call-site fill for
+    /// omitted trailing/named arguments; sema guarantees one exists) and
+    /// lower it exactly like a provided argument.
+    fn codegen_default_for_param(
+        &mut self,
+        info: &TyInfo,
+        idx: usize,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let def = info
+            .param_defaults
+            .get(idx)
+            .and_then(|d| d.clone())
+            .ok_or(CodegenError {
+                message: "missing argument with no default value".into(),
+                span: Span::new(0, 0),
+            })?;
+        let arg = CallArg::Expr(def);
+        self.codegen_arg_for_param(&arg, info, idx)
+    }
+
+    /// Pack a non-variadic call against `info`: positional arguments fill
+    /// parameters in order, `named` arguments fill by parameter name
+    /// (overriding positionals on conflict), and anything still missing is
+    /// filled from defaults (sema-checked). `base` is the TyInfo index of
+    /// the first user argument (0 for free functions, 1 for `this`-leading
+    /// infos). Unfillable slots fall back to `i64` zero (unreachable after
+    /// sema; preserves the legacy named-call shape).
+    fn pack_call_args(
+        &mut self,
+        args: &[CallArg],
+        info: &TyInfo,
+        base: usize,
+    ) -> Result<Vec<inkwell::values::BasicMetadataValueEnum<'ctx>>, CodegenError> {
+        let mut out: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = Vec::new();
+        let mut named: std::collections::HashMap<String, &CallArg> = std::collections::HashMap::new();
+        for a in args {
+            if let CallArg::Named { name, .. } = a {
+                named.insert(name.clone(), a);
+            }
+        }
+        let positionals: Vec<&CallArg> = args
+            .iter()
+            .filter(|a| !matches!(a, CallArg::Named { .. }))
+            .collect();
+        let mut pos = 0;
+        for (idx, pname) in info.param_names.iter().enumerate().skip(base) {
+            if idx >= info.params.len() {
+                break;
+            }
+            if let Some(arg) = named.get(pname) {
+                out.push(self.codegen_arg_for_param(arg, info, idx)?.into());
+            } else if pos < positionals.len() {
+                out.push(self.codegen_arg_for_param(positionals[pos], info, idx)?.into());
+                pos += 1;
+            } else if let Ok(v) = self.codegen_default_for_param(info, idx) {
+                out.push(v.into());
+            } else {
+                out.push(self.context.i64_type().const_int(0, false).into());
+            }
+        }
+        // Extra positionals beyond the parameter list (sema already
+        // diagnosed arity) still evaluate for side effects.
+        while pos < positionals.len() {
+            let _ = self.codegen_call_arg(positionals[pos])?;
+            pos += 1;
+        }
+        Ok(out)
+    }
+
     /// Box a call argument into its declared parameter type when that
     /// type is a trait object; pass through otherwise.
     fn box_arg_for_param(
@@ -3451,10 +3534,8 @@ impl<'ctx> Codegen<'ctx> {
                 arg_vals.push(v.into());
             }
         } else {
-            for (i, a) in args.iter().enumerate() {
-                let v = self.codegen_arg_for_param(a, info, i + 1)?;
-                arg_vals.push(v.into());
-            }
+            // Positional prefix, named reorder, default fill (`base` 1 skips `this`).
+            arg_vals.extend(self.pack_call_args(args, info, 1)?);
         }
         Ok(arg_vals)
     }
@@ -6400,10 +6481,12 @@ impl<'ctx> Codegen<'ctx> {
                 // extern resolution below.
                 // Check for class constructor call: ClassName(args) -> allocate + ctor
                 if let Some(ctors) = self.class_constructors.get(callee).cloned() {
-                    // pick ctor by arity
+                    // pick ctor by arity, allowing omitted trailing defaults
                     let mut chosen = None;
                     for (func, info) in &ctors {
-                        if info.params.len() == args.len() + 1 { // +1 for this
+                        let min = info.params.len().saturating_sub(info.param_defaults.iter().rev().take_while(|d| d.is_some()).count());
+                        // params[0] is `this`
+                        if args.len() + 1 >= min && args.len() + 1 <= info.params.len() {
                             chosen = Some(*func);
                             break;
                         }
@@ -6413,13 +6496,15 @@ impl<'ctx> Codegen<'ctx> {
                     let st = *self.struct_types.get(callee).unwrap();
                     let tmp = self.builder.build_alloca(st, "ctor.tmp").unwrap();
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = vec![tmp.into()];
-                    for (i, a) in args.iter().enumerate() {
-                        // `params[0]` is `this`.
-                        let v = match ctor_info.as_ref() {
-                            Some(info) => self.codegen_arg_for_param(a, info, i + 1)?,
-                            None => self.codegen_call_arg(a)?,
-                        };
-                        arg_vals.push(v.into());
+                    match ctor_info.as_ref() {
+                        // `params[0]` is `this`: positional prefix, named
+                        // reorder, default fill.
+                        Some(info) => arg_vals.extend(self.pack_call_args(args, info, 1)?),
+                        None => {
+                            for a in args {
+                                arg_vals.push(self.codegen_call_arg(a)?.into());
+                            }
+                        }
                     }
                     self.builder.build_call(ctor_func, &arg_vals, "ctor.call").unwrap();
                     let loaded = self.builder.build_load(st.as_basic_type_enum(), tmp, "ctor.load").unwrap();
@@ -6530,28 +6615,8 @@ impl<'ctx> Codegen<'ctx> {
                             }
                         }
                     } else {
-                        let has_named = args.iter().any(|a| matches!(a, CallArg::Named{..}));
-                        if has_named && !info.param_names.is_empty() {
-                            let mut map: std::collections::HashMap<String, &CallArg> = std::collections::HashMap::new();
-                            for a in args {
-                                if let CallArg::Named { name, .. } = a {
-                                    map.insert(name.clone(), a);
-                                }
-                            }
-                            for (idx, pname) in info.param_names.iter().enumerate() {
-                                if let Some(arg) = map.get(pname) {
-                                    let v = self.codegen_arg_for_param(arg, &info, idx)?;
-                                    arg_vals.push(v.into());
-                                } else {
-                                    arg_vals.push(self.context.i64_type().const_int(0,false).into());
-                                }
-                            }
-                        } else {
-                            for (i, a) in args.iter().enumerate() {
-                                let v = self.codegen_arg_for_param(a, &info, i)?;
-                                arg_vals.push(v.into());
-                            }
-                        }
+                        // Positional prefix, named reorder, default fill.
+                        arg_vals.extend(self.pack_call_args(args, &info, 0)?);
                     }
                     let call = self.builder.build_call(func, &arg_vals, "call").unwrap();
                     let vk = call.try_as_basic_value();
@@ -7143,16 +7208,23 @@ impl<'ctx> Codegen<'ctx> {
                 let heap_ptr = self.builder.build_bit_cast(raw, st.ptr_type(inkwell::AddressSpace::default()), "new.cast").unwrap().into_pointer_value();
                 // Initialize via constructor or direct field stores.
                 if let Some(ctors) = self.class_constructors.get(&inner_name).cloned() {
-                    // Pick ctor by arity (same rule as `Type(args)` calls).
+                    // Pick ctor by arity, allowing omitted trailing defaults
+                    // (same rule as `Type(args)` calls).
                     let mut chosen: Option<(inkwell::values::FunctionValue<'ctx>, TyInfo)> = None;
                     for (func, info) in &ctors {
-                        if info.params.len() == args.len() + 1 { chosen = Some((*func, info.clone())); break; }
+                        let min = info.params.len().saturating_sub(info.param_defaults.iter().rev().take_while(|d| d.is_some()).count());
+                        if args.len() + 1 >= min && args.len() + 1 <= info.params.len() { chosen = Some((*func, info.clone())); break; }
                     }
                     let (ctor_fn, info) = chosen.or_else(|| ctors.first().cloned()).ok_or(CodegenError{message: format!("no constructor for `{inner_name}`"), span: expr.span})?;
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = vec![heap_ptr.into()];
                     for (i, a) in args.iter().enumerate() {
                         let v = self.codegen_call_arg(a)?;
                         let v = self.box_arg_for_param(v, &info, i+1, a.span())?;
+                        arg_vals.push(v.into());
+                    }
+                    // Fill omitted trailing defaults.
+                    for idx in (args.len() + 1)..info.params.len() {
+                        let v = self.codegen_default_for_param(&info, idx)?;
                         arg_vals.push(v.into());
                     }
                     self.builder.build_call(ctor_fn, &arg_vals, "new.ctor").unwrap();

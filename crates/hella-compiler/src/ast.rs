@@ -87,6 +87,8 @@ pub struct Param {
     pub ty: Type,
     pub name: String,
     pub name_span: Span,
+    /// Default value from `= expr` (EBNF `parameter`); `None` when absent.
+    pub default: Option<Expr>,
     pub span: Span,
 }
 

@@ -229,6 +229,7 @@ struct FuncSig {
     param_modes: Vec<ParamMode>,
     param_names: Vec<String>,
     param_is_variadic: Vec<bool>,
+    param_defaults: Vec<Option<Expr>>,
     generic_params: Vec<GenericParam>,
     where_clause: Option<WhereClause>,
     span: Span,
@@ -655,8 +656,13 @@ impl Checker {
         if sig.param_is_variadic.iter().any(|&v| v) {
             self.check_call_with_sig(args, sig, *method_span, method);
         } else {
-            if sig.params.len() != args.len() {
-                self.errors.push(SemError{message: format!("method `{}` expects {} args, found {}", method, sig.params.len(), args.len()), span: *method_span});
+            let min_required = Self::min_args_for_sig(sig);
+            if args.len() < min_required || args.len() > sig.params.len() {
+                if min_required == sig.params.len() {
+                    self.errors.push(SemError{message: format!("method `{}` expects {} args, found {}", method, sig.params.len(), args.len()), span: *method_span});
+                } else {
+                    self.errors.push(SemError{message: format!("method `{}` expects {}-{} args, found {}", method, min_required, sig.params.len(), args.len()), span: *method_span});
+                }
             }
             for (i, a) in args.iter().enumerate() {
                 let pidx = if let CallArg::Named { name, .. } = a {
@@ -668,6 +674,24 @@ impl Checker {
                     if !self.ty_assignable(&aty, pt) { self.errors.push(SemError{message: format!("arg {} of `{}`: expected `{}`, found `{}`", i+1, method, pt, aty), span: a.span()}); }
                 }
                 self.check_arg_mode(a, sig, pidx, method, i + 1);
+            }
+            // Missing arguments must have defaults (filled at codegen).
+            let mut provided = std::collections::HashSet::new();
+            let mut n_pos = 0;
+            for a in args {
+                if let CallArg::Named { name, .. } = a {
+                    if let Some(pidx) = sig.param_names.iter().position(|n| n == name) {
+                        provided.insert(pidx);
+                    }
+                } else {
+                    provided.insert(n_pos);
+                    n_pos += 1;
+                }
+            }
+            for (pidx, pname) in sig.param_names.iter().enumerate() {
+                if !provided.contains(&pidx) && sig.param_defaults.get(pidx).and_then(|d| d.as_ref()).is_none() {
+                    self.errors.push(SemError{message: format!("missing argument `{}` for method `{}` (no default value)", pname, method), span: *method_span});
+                }
             }
         }
     }
@@ -1097,9 +1121,10 @@ impl Checker {
                                 if ty == Ty::Void { self.errors.push(SemError{message: format!("parameter `{}` cannot be `void`", p.name), span: p.span}); }
                                 ty
                             }).collect();
+                            self.check_param_defaults(&m.params, &param_tys);
                             let param_modes: Vec<ParamMode> = m.params.iter().map(|p| p.mode).collect();
                             let ret_ty = self.resolve_type(&m.ret_ty);
-                            methods.insert(m.name.clone(), FuncSig{ret: ret_ty, params: param_tys, param_modes, param_names: m.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: m.params.iter().map(|p| p.is_variadic).collect(), generic_params: m.generic_params.clone(), where_clause: m.where_clause.clone(), span: m.name_span});
+                            methods.insert(m.name.clone(), FuncSig{ret: ret_ty, params: param_tys, param_modes, param_names: m.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: m.params.iter().map(|p| p.is_variadic).collect(), param_defaults: m.params.iter().map(|p| p.default.clone()).collect(), generic_params: m.generic_params.clone(), where_clause: m.where_clause.clone(), span: m.name_span});
                         }
                     }
                     self.traits.insert(t.name.clone(), TraitInfo{name: t.name.clone(), methods, generic_params: t.generic_params.clone(), where_clause: t.where_clause.clone(), span: t.span});
@@ -1220,11 +1245,12 @@ impl Checker {
                                 if t == Ty::Void { self.errors.push(SemError{message: format!("parameter `{}` cannot be `void`", p.name), span: p.span}); }
                                 t
                             }).collect();
+                            self.check_param_defaults(&m.params, &param_tys);
                             let param_modes: Vec<ParamMode> = m.params.iter().map(|p| p.mode).collect();
                             let ret_ty = self.resolve_type(&m.ret_ty);
                             let mut pseen = HashSet::new();
                             for p in &m.params { if !pseen.insert(&p.name) { self.errors.push(SemError{message: format!("duplicate param `{}`", p.name), span: p.name_span}); } }
-                            methods.insert(m.name.clone(), FuncSig{ret: ret_ty, params: param_tys, param_modes, param_names: m.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: m.params.iter().map(|p| p.is_variadic).collect(), generic_params: m.generic_params.clone(), where_clause: m.where_clause.clone(), span: m.name_span});
+                            methods.insert(m.name.clone(), FuncSig{ret: ret_ty, params: param_tys, param_modes, param_names: m.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: m.params.iter().map(|p| p.is_variadic).collect(), param_defaults: m.params.iter().map(|p| p.default.clone()).collect(), generic_params: m.generic_params.clone(), where_clause: m.where_clause.clone(), span: m.name_span});
                             method_vis.insert(m.name.clone(), m.visibility);
                         }
                     }
@@ -1271,9 +1297,10 @@ impl Checker {
                             if !pseen.insert(&p.name) { self.errors.push(SemError{message: format!("duplicate param `{}` in constructor", p.name), span: p.name_span}); }
                             param_tys.push(ty);
                         }
+                        self.check_param_defaults(&ctor.params, &param_tys);
                         let param_modes: Vec<ParamMode> = ctor.params.iter().map(|p| p.mode).collect();
                         // constructors are void return
-                        ctor_sigs.push((FuncSig{ret: Ty::Void, params: param_tys, param_modes, param_names: ctor.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: ctor.params.iter().map(|p| p.is_variadic).collect(), generic_params: Vec::new(), where_clause: None, span: ctor.name_span}, ctor.visibility));
+                        ctor_sigs.push((FuncSig{ret: Ty::Void, params: param_tys, param_modes, param_names: ctor.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: ctor.params.iter().map(|p| p.is_variadic).collect(), param_defaults: ctor.params.iter().map(|p| p.default.clone()).collect(), generic_params: Vec::new(), where_clause: None, span: ctor.name_span}, ctor.visibility));
                     }
                     // Validate destructors: name must match class name
                     for dtor in &c.destructors {
@@ -1377,10 +1404,11 @@ impl Checker {
                             }
                             p_tys.push(ty);
                         }
+                        self.check_param_defaults(&op.params, &p_tys);
                         let p_modes: Vec<ParamMode> = op.params.iter().map(|p| p.mode).collect();
                         // For MVP, assume operator returns int (or struct for + if class)
                         let ret = Ty::Int;
-                        op_map.insert(op.op.clone(), FuncSig{ret: ret.clone(), params: p_tys, param_modes: p_modes, param_names: op.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: op.params.iter().map(|p| p.is_variadic).collect(), generic_params: Vec::new(), where_clause: op.where_clause.clone(), span: op.span});
+                        op_map.insert(op.op.clone(), FuncSig{ret: ret.clone(), params: p_tys, param_modes: p_modes, param_names: op.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: op.params.iter().map(|p| p.is_variadic).collect(), param_defaults: op.params.iter().map(|p| p.default.clone()).collect(), generic_params: Vec::new(), where_clause: op.where_clause.clone(), span: op.span});
                     }
                     let mut conv_vec: Vec<(Ty, Ty, Span)> = Vec::new();
                     for conv in &c.conversions {
@@ -1454,6 +1482,7 @@ impl Checker {
                         for p in &v.payload_params {
                             let pt = self.resolve_type(&p.ty);
                             if pt == Ty::Void { self.errors.push(SemError{message: format!("variant `{}` payload param `{}` cannot be `void`", v.name, p.name), span: p.span}); }
+                            if p.default.is_some() { self.errors.push(SemError{message: format!("variant `{}` payload param `{}` cannot have a default value", v.name, p.name), span: p.name_span}); }
                             payload_tys.push(pt);
                         }
                         // discriminant: if Some(expr), try to evaluate as int, else use idx
@@ -1521,8 +1550,9 @@ impl Checker {
                                 if ty == Ty::Void { self.errors.push(SemError{message: format!("parameter `{}` cannot be `void`", p.name), span: p.span}); }
                                 ty
                             }).collect();
+                            self.check_param_defaults(&f.params, &param_tys);
                             let param_modes: Vec<ParamMode> = f.params.iter().map(|p| p.mode).collect();
-                            let sig = FuncSig{ret: ret_ty, params: param_tys, param_modes, param_names: f.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: f.params.iter().map(|p| p.is_variadic).collect(), generic_params: f.generic_params.clone(), where_clause: f.where_clause.clone(), span: f.name_span};
+                            let sig = FuncSig{ret: ret_ty, params: param_tys, param_modes, param_names: f.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: f.params.iter().map(|p| p.is_variadic).collect(), param_defaults: f.params.iter().map(|p| p.default.clone()).collect(), generic_params: f.generic_params.clone(), where_clause: f.where_clause.clone(), span: f.name_span};
                             pending_ext.push((f.name.clone(), sig, f.visibility));
                         }
                         crate::ast::ExtensionMember::Field(field) => {
@@ -1552,8 +1582,9 @@ impl Checker {
                                 }
                                 p_tys.push(ty);
                             }
+                            self.check_param_defaults(&op.params, &p_tys);
                             let ret = Ty::Int;
-                            let sig = FuncSig{ret: ret.clone(), params: p_tys, param_modes: op.params.iter().map(|p| p.mode).collect(), param_names: op.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: op.params.iter().map(|p| p.is_variadic).collect(), generic_params: Vec::new(), where_clause: op.where_clause.clone(), span: op.span};
+                            let sig = FuncSig{ret: ret.clone(), params: p_tys, param_modes: op.params.iter().map(|p| p.mode).collect(), param_names: op.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: op.params.iter().map(|p| p.is_variadic).collect(), param_defaults: op.params.iter().map(|p| p.default.clone()).collect(), generic_params: Vec::new(), where_clause: op.where_clause.clone(), span: op.span};
                             pending_ops.push((op.op.clone(), sig, op.visibility));
                         }
                         crate::ast::ExtensionMember::Property(prop) => {
@@ -1776,7 +1807,7 @@ impl Checker {
                                 pt
                             }).collect();
                             let param_modes: Vec<ParamMode> = vec![ParamMode::None; param_tys.len()];
-                            self.funcs.insert(name.clone(), FuncSig{ret, params: param_tys, param_modes, param_names: params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: params.iter().map(|p| p.is_variadic).collect(), generic_params: Vec::new(), where_clause: None, span: *name_span});
+                            self.funcs.insert(name.clone(), FuncSig{ret, params: param_tys, param_modes, param_names: params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: params.iter().map(|p| p.is_variadic).collect(), param_defaults: params.iter().map(|_| None).collect(), generic_params: Vec::new(), where_clause: None, span: *name_span});
                         }
                         crate::ast::ExternMember::Struct{name, name_span, fields, ..} => {
                             if self.structs.contains_key(name) {
@@ -1829,6 +1860,7 @@ impl Checker {
                                     let mut payload_tys = Vec::new();
                                     for p in &v.payload_params {
                                         let pt = self.resolve_type(&p.ty);
+                                        if p.default.is_some() { self.errors.push(SemError{message: format!("variant `{}` payload param `{}` cannot have a default value", v.name, p.name), span: p.name_span}); }
                                         if let Some(tn) = self.extern_trait_name(&pt) {
                                             self.errors.push(SemError{message: format!("extern enum payload cannot use trait type `{tn}` (no C representation)"), span: p.span});
                                         }
@@ -1936,6 +1968,7 @@ impl Checker {
                             t
                         })
                         .collect();
+                    self.check_param_defaults(&f.params, &param_tys);
                     let ret_ty = self.resolve_type(&f.ret_ty);
                     let param_modes: Vec<ParamMode> = f.params.iter().map(|p| p.mode).collect();
                     let mut seen = HashSet::new();
@@ -1958,6 +1991,7 @@ impl Checker {
                             param_modes,
                             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
                             param_is_variadic: f.params.iter().map(|p| p.is_variadic).collect(),
+                            param_defaults: f.params.iter().map(|p| p.default.clone()).collect(),
                             generic_params: f.generic_params.clone(),
                             where_clause: f.where_clause.clone(),
                             span: f.name_span,
@@ -2854,6 +2888,7 @@ impl Checker {
                                 param_modes: func.param_modes.clone(),
                                 param_names: func.param_names.clone(),
                                 param_is_variadic: func.param_is_variadic.clone(),
+                                param_defaults: func.param_defaults.clone(),
                                 generic_params: vec![],
                                 where_clause: None,
                                 span: func.span,
@@ -2910,6 +2945,7 @@ impl Checker {
                                         param_modes: func.param_modes.clone(),
                                         param_names: func.param_names.clone(),
                                         param_is_variadic: func.param_is_variadic.clone(),
+                                        param_defaults: func.param_defaults.clone(),
                                         generic_params: vec![],
                                         where_clause: None,
                                         span: func.span,
@@ -2967,7 +3003,8 @@ impl Checker {
                         if !cinfo.constructors.is_empty() {
                             let mut matched: Option<(FuncSig, crate::ast::Visibility)> = None;
                             for (sig, vis) in &cinfo.constructors {
-                                if sig.params.len() == args.len() {
+                                let min = Self::min_args_for_sig(sig);
+                                if args.len() >= min && args.len() <= sig.params.len() {
                                     matched = Some((sig.clone(), *vis));
                                     break;
                                 }
@@ -3019,15 +3056,28 @@ impl Checker {
                     if sig.param_is_variadic.iter().any(|&v| v) {
                         self.check_call_with_sig(args, &sig, *callee_span, callee);
                     } else {
-                        if sig.params.len() != args.len() {
-                            self.errors.push(SemError {
-                                message: format!(
-                                    "`{callee}` expects {} args, found {}",
-                                    sig.params.len(),
-                                    args.len()
-                                ),
-                                span: *callee_span,
-                            });
+                        let min_required = Self::min_args_for_sig(&sig);
+                        if args.len() < min_required || args.len() > sig.params.len() {
+                            if min_required == sig.params.len() {
+                                self.errors.push(SemError {
+                                    message: format!(
+                                        "`{callee}` expects {} args, found {}",
+                                        sig.params.len(),
+                                        args.len()
+                                    ),
+                                    span: *callee_span,
+                                });
+                            } else {
+                                self.errors.push(SemError {
+                                    message: format!(
+                                        "`{callee}` expects {}-{} args, found {}",
+                                        min_required,
+                                        sig.params.len(),
+                                        args.len()
+                                    ),
+                                    span: *callee_span,
+                                });
+                            }
                         }
                         for (i, arg) in args.iter().enumerate() {
                             let pidx = if let CallArg::Named { name, .. } = arg {
@@ -3044,6 +3094,26 @@ impl Checker {
                                 }
                             }
                             self.check_arg_mode(arg, &sig, pidx, callee, i + 1);
+                        }
+                        // Missing named arguments must have defaults.
+                        if args.iter().any(|a| matches!(a, CallArg::Named{..})) {
+                            let mut provided = std::collections::HashSet::new();
+                            let mut n_pos = 0;
+                            for a in args {
+                                if let CallArg::Named { name, .. } = a {
+                                    if let Some(pidx) = sig.param_names.iter().position(|n| n == name) {
+                                        provided.insert(pidx);
+                                    }
+                                } else {
+                                    provided.insert(n_pos);
+                                    n_pos += 1;
+                                }
+                            }
+                            for (pidx, pname) in sig.param_names.iter().enumerate() {
+                                if !provided.contains(&pidx) && sig.param_defaults.get(pidx).and_then(|d| d.as_ref()).is_none() {
+                                    self.errors.push(SemError{message: format!("missing argument `{}` for `{callee}` (no default value)", pname), span: *callee_span});
+                                }
+                            }
                         }
                     }
                     sig.ret
@@ -3807,7 +3877,8 @@ impl Checker {
                         if !cls.constructors.is_empty() {
                             let mut matched: Option<(crate::sema::Ty, usize)> = None;
                             for (sig, _) in &cls.constructors {
-                                if sig.params.len() == args.len() {
+                                let min = Self::min_args_for_sig(sig);
+                                if args.len() >= min && args.len() <= sig.params.len() {
                                     matched = Some((Ty::Struct(n.clone()), 0));
                                     break;
                                 }
@@ -3816,14 +3887,15 @@ impl Checker {
                                 // arity mismatch: try to find any ctor
                                 let mut found = false;
                                 for (sig, _) in &cls.constructors {
-                                    if sig.params.len() == args.len() { found = true; break; }
+                                    let min = Self::min_args_for_sig(sig);
+                                    if args.len() >= min && args.len() <= sig.params.len() { found = true; break; }
                                 }
                                 if !found {
                                     self.errors.push(SemError{message: format!("no matching constructor for `{n}` with {} args", args.len()), span: expr.span});
                                 }
                             }
                             // type-check args against the first matching ctor
-                            if let Some((sig, _)) = cls.constructors.iter().find(|(s,_)| s.params.len() == args.len()) {
+                            if let Some((sig, _)) = cls.constructors.iter().find(|(s,_)| { let min = Self::min_args_for_sig(s); args.len() >= min && args.len() <= s.params.len() }) {
                                 for (i, arg) in args.iter().enumerate() {
                                     let aty = self.check_call_arg(arg);
                                     if let Some(pt) = sig.params.get(i) {
@@ -4259,8 +4331,13 @@ impl Checker {
             }
             return;
         }
-        if sig.params.len() != args.len() {
-            self.errors.push(SemError { message: format!("`{}` expects {} args, found {}", callee, sig.params.len(), args.len()), span: callee_span });
+        let min_required = Self::min_args_for_sig(sig);
+        if args.len() < min_required || args.len() > sig.params.len() {
+            if min_required == sig.params.len() {
+                self.errors.push(SemError { message: format!("`{}` expects {} args, found {}", callee, sig.params.len(), args.len()), span: callee_span });
+            } else {
+                self.errors.push(SemError { message: format!("`{}` expects {}-{} args, found {}", callee, min_required, sig.params.len(), args.len()), span: callee_span });
+            }
         }
         let has_named = args.iter().any(|a| matches!(a, CallArg::Named{..}));
         if has_named {
@@ -4300,6 +4377,16 @@ impl Checker {
                 } else {
                     // positional before named is allowed, but we already handled count; for positional, check via index
                     let _ = self.check_call_arg(arg);
+                }
+            }
+            // Missing arguments must have defaults (filled at codegen).
+            let n_positional = args.iter().filter(|a| !matches!(a, CallArg::Named{..})).count();
+            for (pidx, pname) in sig.param_names.iter().enumerate() {
+                if pidx < n_positional || seen.contains(&pidx) {
+                    continue;
+                }
+                if sig.param_defaults.get(pidx).and_then(|d| d.as_ref()).is_none() {
+                    self.errors.push(SemError { message: format!("missing argument `{}` for `{}` (no default value)", pname, callee), span: callee_span });
                 }
             }
             // Also check positional args that are not named: they must match remaining params
@@ -4485,6 +4572,45 @@ impl Checker {
             };
             if !generic_params.iter().any(|gp| gp.name == subj) {
                 self.errors.push(SemError { message: format!("`where` subject `{subj}` is not a generic parameter of {kind} `{name}`"), span: constr.span });
+            }
+        }
+    }
+
+    /// Minimum argument count for a call: total params minus trailing
+    /// defaulted ones. Defaults are trailing-enforced at definition, so
+    /// positional omission always drops the tail. Conservative when the
+    /// defaults vector is short (missing entries count as required).
+    fn min_args_for_sig(sig: &FuncSig) -> usize {
+        let trailing = sig.param_defaults.iter().rev().take_while(|d| d.is_some()).count();
+        sig.params.len().saturating_sub(trailing)
+    }
+
+    /// Validate default arguments on a parameter list (EBNF `parameter`):
+    /// defaults must be trailing, never on variadic/`out`/`ref` params, and
+    /// each default must match its parameter type. Defaults evaluate at the
+    /// call site, so they are checked in a fresh scope (only globals resolve,
+    /// never sibling params). `resolved` parallels `params`.
+    fn check_param_defaults(&mut self, params: &[Param], resolved: &[Ty]) {
+        let mut seen_default = false;
+        for (p, ty) in params.iter().zip(resolved.iter()) {
+            if p.default.is_some() && p.is_variadic {
+                self.errors.push(SemError { message: format!("variadic parameter `{}` cannot have a default value", p.name), span: p.name_span });
+                continue;
+            }
+            if p.default.is_some() && p.mode != ParamMode::None {
+                self.errors.push(SemError { message: format!("`out`/`ref` parameter `{}` cannot have a default value", p.name), span: p.name_span });
+                continue;
+            }
+            if let Some(d) = &p.default {
+                seen_default = true;
+                self.push_scope();
+                let dt = self.check_expr(d);
+                self.pop_scope();
+                if !self.ty_assignable(&dt, ty) {
+                    self.errors.push(SemError { message: format!("default for `{}`: expected `{}`, found `{}`", p.name, ty, dt), span: d.span });
+                }
+            } else if seen_default && !p.is_variadic {
+                self.errors.push(SemError { message: format!("parameter `{}` without default follows a defaulted parameter", p.name), span: p.name_span });
             }
         }
     }
