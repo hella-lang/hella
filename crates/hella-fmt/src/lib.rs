@@ -707,10 +707,16 @@ impl<'a> Formatter<'a> {
         if let Type::Named(n, _) = &p.ty {
             if n == "__derived__" {
                 s.push_str(&p.name);
+                if let Some(d) = &p.default {
+                    s.push_str(&format!(" = {}", self.fmt_expr_compact(d)));
+                }
                 return s;
             }
         }
         s.push_str(&format!("{} {}", self.fmt_type(&p.ty), p.name));
+        if let Some(d) = &p.default {
+            s.push_str(&format!(" = {}", self.fmt_expr_compact(d)));
+        }
         s
     }
 
@@ -2521,6 +2527,14 @@ mod tests {
         let out = fmt(src);
         let twice = fmt(&out);
         assert_eq!(out, twice);
+    }
+
+    #[test]
+    fn param_defaults_preserved() {
+        let src = "int add(int a, int b = 10) do\nreturn a + b\nend\n";
+        let out = fmt(src);
+        assert!(out.contains("int b = 10"), "default stripped, got: {out}");
+        assert_eq!(out, fmt(&out));
     }
 
     #[test]
