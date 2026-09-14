@@ -2744,9 +2744,6 @@ impl<'ctx> Codegen<'ctx> {
                         _ => {}
                     }
                 }
-                if lookup.len() == 1 && lookup.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
-                    return self.context.i64_type().into();
-                }
                 if let Some(st) = self.struct_types.get(lookup) {
                     st.as_basic_type_enum().into()
                 } else if let Some(et) = self.enum_types.get(lookup) {
@@ -2754,6 +2751,10 @@ impl<'ctx> Codegen<'ctx> {
                 } else if let Some(pair) = self.trait_pair_of(lookup) {
                     // Trait-typed slots lower to `{data ptr, type tag}` pairs.
                     pair.as_basic_type_enum().into()
+                } else if lookup.len() == 1 && lookup.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
+                    // Unresolved single-uppercase name: a generic parameter
+                    // (erasure MVP, mirrors sema). Known types resolve above.
+                    self.context.i64_type().into()
                 } else {
                     panic!("unknown struct/enum type {n}")
                 }
@@ -2870,9 +2871,6 @@ impl<'ctx> Codegen<'ctx> {
                     return Some(self.context.i64_type().into());
                 }
                 let lookup = n.rsplit("::").next().unwrap_or(n);
-                if lookup.len() == 1 && lookup.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
-                    return Some(self.context.i64_type().into());
-                }
                 if let Some(st) = self.struct_types.get(lookup) {
                     Some(st.as_basic_type_enum().into())
                 } else if let Some(et) = self.enum_types.get(lookup) {
@@ -2880,6 +2878,10 @@ impl<'ctx> Codegen<'ctx> {
                 } else if let Some(pair) = self.trait_pair_of(lookup) {
                     // Trait-typed slots lower to `{data ptr, type tag}` pairs.
                     Some(pair.as_basic_type_enum().into())
+                } else if lookup.len() == 1 && lookup.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
+                    // Unresolved single-uppercase name: a generic parameter
+                    // (erasure MVP, mirrors sema). Known types resolve above.
+                    Some(self.context.i64_type().into())
                 } else {
                     panic!("unknown struct {n} in llvm_ty_for_sema")
                 }
@@ -2892,12 +2894,12 @@ impl<'ctx> Codegen<'ctx> {
             crate::sema::Ty::Double => Some(self.context.f64_type().into()),
             crate::sema::Ty::Generic(n, args) => {
                 let lookup = n.rsplit("::").next().unwrap_or(n);
-                if lookup.len() == 1 && lookup.chars().next().unwrap().is_ascii_uppercase() {
-                    if !args.is_empty() { return self.llvm_ty_for_sema(&args[0]); }
-                    return Some(self.context.i64_type().into());
-                }
                 if let Some(st) = self.struct_types.get(lookup) { Some(st.as_basic_type_enum().into()) }
                 else if let Some(et) = self.enum_types.get(lookup) { Some(et.as_basic_type_enum().into()) }
+                else if lookup.len() == 1 && lookup.chars().next().unwrap().is_ascii_uppercase() {
+                    if !args.is_empty() { return self.llvm_ty_for_sema(&args[0]); }
+                    Some(self.context.i64_type().into())
+                }
                 else { Some(self.context.ptr_type(inkwell::AddressSpace::default()).into()) }
             }
             crate::sema::Ty::Tuple(tys) => {
@@ -3093,7 +3095,12 @@ impl<'ctx> Codegen<'ctx> {
                     .context
                     .ptr_type(inkwell::AddressSpace::default())
                     .fn_type(&param_types, is_c_varargs),
-                crate::sema::Ty::Struct(ref n) if n.len()==1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) => {
+                crate::sema::Ty::Struct(ref n) if n.len()==1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) && {
+                    let lookup = n.rsplit("::").next().unwrap_or(n);
+                    !self.struct_types.contains_key(lookup) && !self.enum_types.contains_key(lookup) && self.trait_pair_of(lookup).is_none()
+                } => {
+                    // Unresolved single-uppercase return: a generic parameter
+                    // (erasure MVP). Known types fall through below.
                     self.context.i64_type().fn_type(&param_types, is_c_varargs)
                 }
                 crate::sema::Ty::Own(ref inner) => {
@@ -5080,7 +5087,12 @@ impl<'ctx> Codegen<'ctx> {
                         Type::Double(_) => self.context.f64_type().const_float(0.0).into(),
                         Type::Void(_) => unreachable!(),
                         Type::Named(n, _) => {
-                            if n.len()==1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
+                            let lookup = n.rsplit("::").next().unwrap_or(n);
+                            if let Some(st) = self.struct_types.get(lookup) {
+                                st.const_zero().into()
+                            } else if let Some(et) = self.enum_types.get(lookup) {
+                                et.const_zero().into()
+                            } else if n.len()==1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
                                 self.context.i64_type().const_int(0,false).into()
                             } else {
                                 let st = self.struct_types.get(n).unwrap();
@@ -8314,6 +8326,114 @@ mod tests {
         assert!(
             !ir.contains("trait.dtor"),
             "unexpected dtor dispatch, got:\n{ir}"
+        );
+    }
+
+    /// T-17: `|` alternatives, tuple patterns, and qualified enum patterns
+    /// lower without panics (used to `panic!("enum pattern on non-enum")`).
+    #[test]
+    fn match_alternative_tuple_qualified_verifies() {
+        compile_src(
+            "enum Color has\n  Red\n  Green\n  Blue\nend\nint pick(Color c) do\n  return match c do\n    Color.Red | Color.Green -> 1\n    Color.Blue -> 2\n    _ -> 3\n  end\nend\nint tup((int, int) t) do\n  return match t do\n    (1, 2) -> 10\n    _ -> 20\n  end\nend\nvoid main() do\nend\n",
+        );
+    }
+
+    /// T-17: single-letter enum names must not trip generic (`T` → `i64`)
+    /// erasure in match lowering.
+    #[test]
+    fn single_letter_enum_match_verifies() {
+        compile_src(
+            "enum E has\n  A\n  B\nend\nint use(E e) do\n  return match e do\n    E.A -> 1\n    E.B -> 2\n  end\nend\nvoid main() do\nend\n",
+        );
+    }
+
+    /// T-18: `for` over computed iters (literals, not just `Ident` vars).
+    #[test]
+    fn for_over_array_literal_verifies() {
+        compile_src(
+            "void main() do\n  for x in [10, 20, 30] do\n  end\nend\n",
+        );
+    }
+
+    /// T-19: `int main(string[] args)` lowers to C `i32 (i32, ptr)`.
+    #[test]
+    fn main_with_args_has_argc_argv() {
+        let ir = compile_ir(
+            "int main(string[] args) do\n  return 0\nend\n",
+        );
+        assert!(
+            ir.contains("define i32 @main(i32") && ir.contains("argv.copy"),
+            "expected argc/argv main, got:\n{ir}"
+        );
+    }
+
+    /// T-10: `debug_assert` emits in debug but vanishes in release.
+    #[test]
+    fn debug_assert_stripped_in_release() {
+        let src = "void main() do\n  debug_assert true\nend\n";
+        let debug_ir = compile_ir(src);
+        assert!(debug_ir.contains("assert"), "debug build should keep debug_assert, got:\n{debug_ir}");
+        let lexed = crate::lexer::lex(src);
+        let prog = crate::parse::parse(lexed.tokens, src.to_string()).unwrap();
+        let ctx = inkwell::context::Context::create();
+        let mut cg = Codegen::new(&ctx, "test");
+        cg.release = true;
+        cg.compile_program(&prog).expect("codegen failed");
+        let release_ir = cg.get_module_ir();
+        assert!(
+            !release_ir.contains("assert.fail") && !release_ir.contains("abort"),
+            "release build should strip debug_assert, got:\n{release_ir}"
+        );
+    }
+
+    /// T-6: array slicing lowers to a real copy (not object identity).
+    #[test]
+    fn slice_verifies() {
+        compile_src(
+            "void main() do\n  int arr[6] nums\n  int arr sub = nums[1..4]\n  int arr full = nums[..]\n  int arr incl = nums[1..=2]\nend\n",
+        );
+    }
+
+    /// Own-P1-1: `is`/`is not` on `own` lowers to data-pointer identity.
+    #[test]
+    fn own_is_identity_verifies() {
+        compile_src(
+            "open class User has\n  User() initialize\nend\nvoid main() do\n  own User a = new User()\n  own User b = new User()\n  bool same = a is b\n  bool diff = a is not b\nend\n",
+        );
+    }
+
+    /// Own-P1-4: methods with `own` params track + destroy them.
+    #[test]
+    fn method_own_param_verifies() {
+        compile_src(
+            "open class User has\n  User() initialize\n  public void greet(own User friend, bool early) do\n    if early do\n      return\n    end\n  end\nend\nvoid main() do\n  own User a = new User()\n  a.greet(new User(), true)\nend\n",
+        );
+    }
+
+    /// Own-P1-3: conditional moves into `own` slots verify.
+    #[test]
+    fn ternary_own_move_verifies() {
+        compile_src(
+            "open class User has\n  User() initialize\nend\nvoid main() do\n  own User a = new User()\n  own User b = new User()\n  bool pick = true\n  own User c = pick ? a : b\nend\n",
+        );
+    }
+
+    /// T-11: omitted trailing defaulted args lower via fill.
+    #[test]
+    fn default_args_verifies() {
+        compile_src(
+            "int add(int a, int b = 10) do\n  return a + b\nend\nint mul(int a = 3, int b = 4) do\n  return a * b\nend\nvoid main() do\n  int x = add(1)\n  int y = mul()\n  int z = add(1, 2)\nend\n",
+        );
+        compile_src(
+            "class Counter has\n  int n\n  Counter(int n) initialize\n  int bump(int step = 1) do\n    return this.n + step\n  end\nend\nvoid main() do\n  Counter c = Counter(10)\n  int x = c.bump()\nend\n",
+        );
+    }
+
+    /// T-21: conversions are typed by their declared target.
+    #[test]
+    fn conversion_to_string_verifies() {
+        compile_src(
+            "class Meters has\n  int v\n  Meters(int v) initialize\n  convert Meters to string do\n    return \"m\"\n  end\nend\nvoid main() do\n  Meters m = Meters(5)\nend\n",
         );
     }
 }
