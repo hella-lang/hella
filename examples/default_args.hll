@@ -1,0 +1,39 @@
+// default_args.hll — default parameter values (`= expr`, EBNF `parameter`).
+// Omitted trailing arguments fill from defaults; `named:` arguments may
+// reorder. Exit code is the answer.
+import std::io
+
+
+int add(int a, int b = 10) do
+    return a + b
+end
+
+int mul(int a = 3, int b = 4) do
+    return a * b
+end
+
+class User has
+    string name
+    int    age
+
+    User(string name, int age = 30) initialize
+
+    string show() do
+        return "{this.name}:{this.age}"
+    end
+end
+
+void show_total(int total) do
+    println("total={total}")
+    println("{add(b: 100, a: 1)}")
+    User u = User("ada")
+    println("{u.show()}")
+end
+
+int main() do
+    int total = add(1, 2) + add(1) + mul() + mul(5)
+    show_total(total)
+
+    // 3 + 11 + 12 + 20 = 46
+    return total - 46
+end

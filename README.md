@@ -92,8 +92,13 @@ cargo run -p hella -- build -f examples/basics.hll && ./examples/basics; echo $?
 | `data_control.hll` | Structs, field defaults, arrays, `match`, strings, `loop`/`for`, `defer` |
 | `abstraction.hll` | Classes, constructors, traits, enums, properties |
 | `hello_io.hll` | `import std::io` and printing (`print`, `println`, `printInt`, `putChar`) |
+| `stdlib_io.hll` | Standard-library I/O over `extern "c"` declarations |
 | `advanced.hll` | Generics, closures, interpolation, operators, `extern`, `distinct` |
 | `variadic.hll` | Variadic functions (`...`) |
+| `default_args.hll` | Default parameter values and `named:` arguments |
+| `own_heap.hll` | Heap ownership (`own`, `new`, `delete`, moves, trait upcasts) |
+| `trait_objects.hll` | Trait objects and dynamic dispatch |
+| `types_ints.hll` / `types_arr.hll` / `types_vec.hll` / `types_map.hll` / `types_methods.hll` | Integer widths, fixed arrays (incl. slicing), vectors, maps, methods |
 
 The exit code of each example is its answer; `basics` exits with `230`, `abstraction` with `233`, and so on.
 
