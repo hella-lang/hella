@@ -545,7 +545,10 @@ impl<'ctx> Codegen<'ctx> {
                 } else {
                     self.resolve_ty_for_codegen(&t)
                 };
-                if let Some(bt) = self.llvm_ty_for_sema(&sema_t) { param_llvm.push(bt.into()); }
+                // `ref`/`out` params take opaque pointers (mirrors `declare_function`).
+                if p.mode != ParamMode::None {
+                    param_llvm.push(self.context.ptr_type(inkwell::AddressSpace::default()).into());
+                } else if let Some(bt) = self.llvm_ty_for_sema(&sema_t) { param_llvm.push(bt.into()); }
             }
             let fn_ty = match ret_ty {
                 crate::sema::Ty::Void => self.context.void_type().fn_type(&param_llvm, false),
@@ -652,7 +655,10 @@ impl<'ctx> Codegen<'ctx> {
                         }
                     } else { crate::sema::Ty::Array(Box::new(self.resolve_ty_for_codegen(&t))) }
                 } else { self.resolve_ty_for_codegen(&t) };
-                if let Some(bt) = self.llvm_ty_for_sema(&sema_t) { param_llvm.push(bt.into()); }
+                // `ref`/`out` params take opaque pointers (mirrors `declare_function`).
+                if pp.mode != ParamMode::None {
+                    param_llvm.push(self.context.ptr_type(inkwell::AddressSpace::default()).into());
+                } else if let Some(bt) = self.llvm_ty_for_sema(&sema_t) { param_llvm.push(bt.into()); }
             }
             let fn_ty = match ret_ty {
                 crate::sema::Ty::Int => self.context.i64_type().fn_type(&param_llvm, false),
@@ -727,7 +733,10 @@ impl<'ctx> Codegen<'ctx> {
                         crate::sema::Ty::Array(Box::new(res))
                     }
                 } else { self.resolve_ty_for_codegen(&raw) };
-                if let Some(bt) = self.llvm_ty_for_sema(&sema_t) { param_llvm.push(bt.into()); }
+                // `ref`/`out` params take opaque pointers (mirrors `declare_function`).
+                if p.mode != ParamMode::None {
+                    param_llvm.push(self.context.ptr_type(inkwell::AddressSpace::default()).into());
+                } else if let Some(bt) = self.llvm_ty_for_sema(&sema_t) { param_llvm.push(bt.into()); }
             }
             let fn_ty = self.context.void_type().fn_type(&param_llvm, false);
             let mangled = format!("{}__ctor{}", c.name, if c.constructors.len()>1 { format!("{}", idx)} else {"".to_string()});
@@ -935,7 +944,10 @@ impl<'ctx> Codegen<'ctx> {
                                 }
                             } else { crate::sema::Ty::Array(Box::new(self.resolve_ty_for_codegen(&t))) }
                         } else { self.resolve_ty_for_codegen(&t) };
-                        if let Some(bt) = self.llvm_ty_for_sema(&sema_t) { param_llvm.push(bt.into()); }
+                        // `ref`/`out` params take opaque pointers (mirrors `declare_function`).
+                        if pp.mode != ParamMode::None {
+                            param_llvm.push(self.context.ptr_type(inkwell::AddressSpace::default()).into());
+                        } else if let Some(bt) = self.llvm_ty_for_sema(&sema_t) { param_llvm.push(bt.into()); }
                     }
                     let fn_ty = match ret_ty {
                         crate::sema::Ty::Void => self.context.void_type().fn_type(&param_llvm, false),
@@ -1038,7 +1050,10 @@ impl<'ctx> Codegen<'ctx> {
                                 }
                             } else { crate::sema::Ty::Array(Box::new(self.resolve_ty_for_codegen(&t))) }
                         } else { self.resolve_ty_for_codegen(&t) };
-                        if let Some(bt) = self.llvm_ty_for_sema(&sema_t) { param_llvm.push(bt.into()); }
+                        // `ref`/`out` params take opaque pointers (mirrors `declare_function`).
+                        if pp.mode != ParamMode::None {
+                            param_llvm.push(self.context.ptr_type(inkwell::AddressSpace::default()).into());
+                        } else if let Some(bt) = self.llvm_ty_for_sema(&sema_t) { param_llvm.push(bt.into()); }
                     }
                     let fn_ty = match ret_ty {
                         crate::sema::Ty::Int => self.context.i64_type().fn_type(&param_llvm, false),
@@ -1699,10 +1714,17 @@ impl<'ctx> Codegen<'ctx> {
                     self.vars.last_mut().unwrap().insert("this".to_string(), (this_alloca, this_ty));
                     for (i, param) in f.params.iter().enumerate() {
                         let llvm_ty = self.llvm_ty_for(&param.ty);
-                        let alloca = self.create_entry_block_alloca(&param.name, llvm_ty);
                         let val = func.get_nth_param((i+1) as u32).unwrap();
-                        self.builder.build_store(alloca, val).unwrap();
-                        self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, llvm_ty));
+                        if param.mode != ParamMode::None {
+                            // `ref`/`out`: the caller passed a pointer; use it directly.
+                            let inner_ty = self.llvm_ty_for(&param.ty);
+                            let ptr = val.into_pointer_value();
+                            self.vars.last_mut().unwrap().insert(param.name.clone(), (ptr, inner_ty));
+                        } else {
+                            let alloca = self.create_entry_block_alloca(&param.name, llvm_ty);
+                            self.builder.build_store(alloca, val).unwrap();
+                            self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, llvm_ty));
+                        }
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
@@ -1751,10 +1773,17 @@ impl<'ctx> Codegen<'ctx> {
                     self.vars.last_mut().unwrap().insert("this".to_string(), (this_alloca, this_ty));
                     for (i, param) in op.params.iter().enumerate() {
                         let llvm_ty = self.llvm_ty_for(&param.ty);
-                        let alloca = self.create_entry_block_alloca(&param.name, llvm_ty);
                         let val = func.get_nth_param((i+1) as u32).unwrap();
-                        self.builder.build_store(alloca, val).unwrap();
-                        self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, llvm_ty));
+                        if param.mode != ParamMode::None {
+                            // `ref`/`out`: the caller passed a pointer; use it directly.
+                            let inner_ty = self.llvm_ty_for(&param.ty);
+                            let ptr = val.into_pointer_value();
+                            self.vars.last_mut().unwrap().insert(param.name.clone(), (ptr, inner_ty));
+                        } else {
+                            let alloca = self.create_entry_block_alloca(&param.name, llvm_ty);
+                            self.builder.build_store(alloca, val).unwrap();
+                            self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, llvm_ty));
+                        }
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
@@ -3104,6 +3133,117 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    /// Materialize an `out` call argument with no visible variable: alloca
+    /// a slot (explicit annotation wins, else the declared parameter type,
+    /// else an opaque `any` slot), register it like a `VarDecl` (including
+    /// vec/map/string tracking and destructors), and return its pointer.
+    /// Existing variables (and non-`out` args) yield `None` — callers fall
+    /// through to normal resolution.
+    fn materialize_out_var(
+        &mut self,
+        arg: &CallArg,
+        param_sema_ty: Option<&crate::sema::Ty>,
+    ) -> Result<Option<PointerValue<'ctx>>, CodegenError> {
+        let CallArg::Out { name, ty: opt_ty, name_span, .. } = arg else {
+            return Ok(None);
+        };
+        if self.lookup_var(name).is_some() {
+            return Ok(None);
+        }
+        let llvm_ty = match opt_ty {
+            Some(t) => self.llvm_ty_for(t),
+            None => match param_sema_ty {
+                Some(pt) => self.llvm_ty_for_sema(pt).unwrap_or_else(|| {
+                    self.context.ptr_type(inkwell::AddressSpace::default()).into()
+                }),
+                // No signature context (unknown callee): opaque slot,
+                // mirroring sema's `any` fallback.
+                None => self.context.ptr_type(inkwell::AddressSpace::default()).into(),
+            },
+        };
+        let alloca = self.create_entry_block_alloca(name, llvm_ty);
+        self.vars.last_mut().ok_or(CodegenError {
+            message: "outside function".into(),
+            span: *name_span,
+        })?.insert(name.clone(), (alloca, llvm_ty));
+        // Track like VarDecl so later uses lower correctly.
+        let is_vec = opt_ty.as_ref().is_some_and(|t| matches!(t, Type::Vec { .. }))
+            || matches!(param_sema_ty, Some(crate::sema::Ty::Vec(_)));
+        let is_map = opt_ty.as_ref().is_some_and(|t| matches!(t, Type::Map { .. }))
+            || matches!(param_sema_ty, Some(crate::sema::Ty::Map { .. }));
+        let is_string = opt_ty.as_ref().is_some_and(|t| matches!(t, Type::String(_)))
+            || matches!(param_sema_ty, Some(crate::sema::Ty::String));
+        if is_vec {
+            self.vec_vars.insert(name.clone());
+        }
+        if is_map {
+            self.map_vars.insert(name.clone());
+        }
+        if is_string {
+            self.string_vars.insert(name.clone());
+        }
+        if let Some(class_name) = match opt_ty {
+            Some(t) => self.dtor_class_for_ty(t),
+            None => None,
+        }
+        .or_else(|| match param_sema_ty {
+            Some(crate::sema::Ty::Struct(n)) if self.class_destructors.contains_key(n) => {
+                Some(n.clone())
+            }
+            _ => None,
+        }) {
+            if let Some(top) = self.scope_dtors.last_mut() {
+                top.push((alloca, class_name));
+            }
+        }
+        Ok(Some(alloca))
+    }
+
+    /// Lower one call argument against its declared parameter.
+    /// - `ref` params take pointers: explicit `ref e` passes through
+    ///   (already a pointer); plain lvalues address-take; anything else
+    ///   is a compile error (sema rejects non-lvalues first).
+    /// - `out` params take pointers: explicit `out x` passes through
+    ///   without coercion; anything else was rejected in sema.
+    /// - Otherwise evaluates to a value (trait-boxed, int-coerced).
+    /// `param_idx` indexes `info` (including any leading `this`).
+    fn codegen_arg_for_param(
+        &mut self,
+        arg: &CallArg,
+        info: &TyInfo,
+        param_idx: usize,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        // Implicit `out` declarations materialize their slot first so the
+        // pointer resolution below finds them.
+        self.materialize_out_var(arg, info.params.get(param_idx))?;
+        match info.param_modes.get(param_idx) {
+            Some(ParamMode::Ref) => match arg {
+                CallArg::Ref { .. } => self.codegen_call_arg(arg),
+                CallArg::Expr(e) | CallArg::Named { value: e, .. } => {
+                    Ok(self.codegen_as_ptr(e)?.into())
+                }
+                CallArg::Out { name_span, .. } => Err(CodegenError {
+                    message: "`out` argument passed to `ref` parameter".into(),
+                    span: *name_span,
+                }),
+            },
+            Some(ParamMode::Out) => {
+                // Pointer already; must skip int coercion.
+                self.codegen_call_arg(arg)
+            }
+            _ => {
+                let v = self.codegen_call_arg(arg)?;
+                let v = self.box_arg_for_param(v, info, param_idx, arg.span())?;
+                if let Some(pt) = info.params.get(param_idx) {
+                    if let Some(dest) = self.llvm_ty_for_sema(pt) {
+                        return Ok(self.coerce_to_ty(v, dest));
+                    }
+                }
+                Ok(v)
+            }
+        }
+    }
+
     /// Box a call argument into its declared parameter type when that
     /// type is a trait object; pass through otherwise.
     fn box_arg_for_param(
@@ -3141,8 +3281,7 @@ impl<'ctx> Codegen<'ctx> {
             let fixed_real = if vidx == 0 { 0 } else { vidx - 1 };
             // push fixed real params
             for (i, a) in args.iter().take(fixed_real).enumerate() {
-                let v = self.codegen_call_arg(a)?;
-                let v = self.box_arg_for_param(v, info, i + 1, a.span())?;
+                let v = self.codegen_arg_for_param(a, info, i + 1)?;
                 arg_vals.push(v.into());
             }
             // variadic element type
@@ -3172,6 +3311,7 @@ impl<'ctx> Codegen<'ctx> {
                 arr_val = arr_llvm_ty.const_zero().into();
             } else {
                 for (j, arg) in args.iter().skip(fixed_real).take(vda_count).enumerate() {
+                    self.materialize_out_var(arg, Some(&elem_ty))?;
                     let v = self.codegen_call_arg(arg)?;
                     let v = match elem_dest {
                         Some(dest) => self.box_trait_value(v, dest, arg.span())?,
@@ -3188,23 +3328,13 @@ impl<'ctx> Codegen<'ctx> {
             }
             arg_vals.push(arr_val.into());
             for (j, arg) in args.iter().skip(fixed_real + vda_count).enumerate() {
-                let v = self.codegen_call_arg(arg)?;
                 // tail real-param index = fixed + vda(1) + j → params idx +1 for `this`
-                let v = if let Some(pt) = info.params.get(fixed_real + j + 2) {
-                    if let Some(dest) = self.llvm_ty_for_sema(pt) {
-                        self.box_trait_value(v, dest, arg.span())?
-                    } else {
-                        v
-                    }
-                } else {
-                    v
-                };
+                let v = self.codegen_arg_for_param(arg, info, fixed_real + j + 2)?;
                 arg_vals.push(v.into());
             }
         } else {
             for (i, a) in args.iter().enumerate() {
-                let v = self.codegen_call_arg(a)?;
-                let v = self.box_arg_for_param(v, info, i + 1, a.span())?;
+                let v = self.codegen_arg_for_param(a, info, i + 1)?;
                 arg_vals.push(v.into());
             }
         }
@@ -3766,10 +3896,17 @@ impl<'ctx> Codegen<'ctx> {
             } else {
                 self.llvm_ty_for(&param.ty)
             };
-            let alloca = self.create_entry_block_alloca(&param.name, llvm_ty);
             let param_val = func.get_nth_param((i+1) as u32).unwrap();
-            self.builder.build_store(alloca, param_val).unwrap();
-            self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, llvm_ty));
+            if param.mode != ParamMode::None {
+                // `ref`/`out`: the caller passed a pointer; use it directly.
+                let inner_ty = self.llvm_ty_for(&param.ty);
+                let ptr = param_val.into_pointer_value();
+                self.vars.last_mut().unwrap().insert(param.name.clone(), (ptr, inner_ty));
+            } else {
+                let alloca = self.create_entry_block_alloca(&param.name, llvm_ty);
+                self.builder.build_store(alloca, param_val).unwrap();
+                self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, llvm_ty));
+            }
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
@@ -3827,10 +3964,17 @@ impl<'ctx> Codegen<'ctx> {
             } else {
                 self.llvm_ty_for(&param.ty)
             };
-            let alloca = self.create_entry_block_alloca(&param.name, llvm_ty);
             let val = func.get_nth_param((i+1) as u32).unwrap();
-            self.builder.build_store(alloca, val).unwrap();
-            self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, llvm_ty));
+            if param.mode != ParamMode::None {
+                // `ref`/`out`: the caller passed a pointer; use it directly.
+                let inner_ty = self.llvm_ty_for(&param.ty);
+                let ptr = val.into_pointer_value();
+                self.vars.last_mut().unwrap().insert(param.name.clone(), (ptr, inner_ty));
+            } else {
+                let alloca = self.create_entry_block_alloca(&param.name, llvm_ty);
+                self.builder.build_store(alloca, val).unwrap();
+                self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, llvm_ty));
+            }
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
@@ -4100,10 +4244,17 @@ impl<'ctx> Codegen<'ctx> {
         self.vars.last_mut().unwrap().insert("this".to_string(), (this_alloca, this_ty));
         for (i, param) in op.params.iter().enumerate() {
             let llvm_ty = self.llvm_ty_for(&param.ty);
-            let alloca = self.create_entry_block_alloca(&param.name, llvm_ty);
             let val = func.get_nth_param((i+1) as u32).unwrap();
-            self.builder.build_store(alloca, val).unwrap();
-            self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, llvm_ty));
+            if param.mode != ParamMode::None {
+                // `ref`/`out`: the caller passed a pointer; use it directly.
+                let inner_ty = self.llvm_ty_for(&param.ty);
+                let ptr = val.into_pointer_value();
+                self.vars.last_mut().unwrap().insert(param.name.clone(), (ptr, inner_ty));
+            } else {
+                let alloca = self.create_entry_block_alloca(&param.name, llvm_ty);
+                self.builder.build_store(alloca, val).unwrap();
+                self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, llvm_ty));
+            }
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
@@ -5829,15 +5980,10 @@ impl<'ctx> Codegen<'ctx> {
                     let tmp = self.builder.build_alloca(st, "ctor.tmp").unwrap();
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = vec![tmp.into()];
                     for (i, a) in args.iter().enumerate() {
-                        let v = self.codegen_call_arg(a)?;
-                        // Box class values into trait-typed parameters
-                        // (`params[0]` is `this`).
-                        let v = match ctor_info.as_ref().and_then(|info| info.params.get(i + 1)) {
-                            Some(pt) => match self.llvm_ty_for_sema(pt) {
-                                Some(dest) => self.box_trait_value(v, dest, a.span())?,
-                                None => v,
-                            },
-                            None => v,
+                        // `params[0]` is `this`.
+                        let v = match ctor_info.as_ref() {
+                            Some(info) => self.codegen_arg_for_param(a, info, i + 1)?,
+                            None => self.codegen_call_arg(a)?,
                         };
                         arg_vals.push(v.into());
                     }
@@ -5860,8 +6006,7 @@ impl<'ctx> Codegen<'ctx> {
                             // fixed params before variadic
                             for (i, a) in args.iter().take(fixed).enumerate() {
                                 // handle named if any? For variadic with named, assume positional for fixed
-                                let v = self.codegen_call_arg(a)?;
-                                let v = self.box_arg_for_param(v, &info, i, a.span())?;
+                                let v = self.codegen_arg_for_param(a, &info, i)?;
                                 arg_vals.push(v.into());
                             }
                             // variadic tail: `vda` as `T[]` array
@@ -5882,6 +6027,7 @@ impl<'ctx> Codegen<'ctx> {
                             // Fill array with variadic args
                             let elem_dest: Option<BasicTypeEnum> = self.llvm_ty_for_sema(&elem_ty);
                             for (j, arg) in args.iter().skip(fixed).enumerate() {
+                                self.materialize_out_var(arg, Some(&elem_ty))?;
                                 let v = self.codegen_call_arg(arg)?;
                                 let v = match elem_dest {
                                     Some(dest) => self.box_trait_value(v, dest, arg.span())?,
@@ -5930,6 +6076,7 @@ impl<'ctx> Codegen<'ctx> {
                                 let mut arr_val2: BasicValueEnum = arr_llvm_ty.const_zero().into();
                                 let elem_dest2: Option<BasicTypeEnum> = self.llvm_ty_for_sema(&elem_ty);
                                 for (j, arg) in args.iter().skip(fixed).take(vda_count).enumerate() {
+                                    self.materialize_out_var(arg, Some(&elem_ty))?;
                                     let v = self.codegen_call_arg(arg)?;
                                     let v = match elem_dest2 {
                                         Some(dest) => self.box_trait_value(v, dest, arg.span())?,
@@ -5943,8 +6090,7 @@ impl<'ctx> Codegen<'ctx> {
                                 arg_vals.push(arr_val2.into());
                                 // Push remaining fixed after variadic
                                 for (j, arg) in args.iter().skip(fixed + vda_count).enumerate() {
-                                    let v = self.codegen_call_arg(arg)?;
-                                    let v = self.box_arg_for_param(v, &info, vidx + 1 + j, arg.span())?;
+                                    let v = self.codegen_arg_for_param(arg, &info, vidx + 1 + j)?;
                                     arg_vals.push(v.into());
                                 }
                             }
@@ -5960,8 +6106,7 @@ impl<'ctx> Codegen<'ctx> {
                             }
                             for (idx, pname) in info.param_names.iter().enumerate() {
                                 if let Some(arg) = map.get(pname) {
-                                    let v = self.codegen_call_arg(arg)?;
-                                    let v = self.box_arg_for_param(v, &info, idx, arg.span())?;
+                                    let v = self.codegen_arg_for_param(arg, &info, idx)?;
                                     arg_vals.push(v.into());
                                 } else {
                                     arg_vals.push(self.context.i64_type().const_int(0,false).into());
@@ -5969,20 +6114,8 @@ impl<'ctx> Codegen<'ctx> {
                             }
                         } else {
                             for (i, a) in args.iter().enumerate() {
-                                let v = self.codegen_call_arg(a)?;
-                                let v = self.box_arg_for_param(v, &info, i, a.span())?;
-                                // Coerce int args to the declared param width
-                                // (e.g. `add32(100, 200)` literals are i64 → i32 params).
-                                let coerced = if let Some(param_ty) = info.params.get(i) {
-                                    if let Some(dest) = self.llvm_ty_for_sema(param_ty) {
-                                        self.coerce_to_ty(v, dest)
-                                    } else {
-                                        v
-                                    }
-                                } else {
-                                    v
-                                };
-                                arg_vals.push(coerced.into());
+                                let v = self.codegen_arg_for_param(a, &info, i)?;
+                                arg_vals.push(v.into());
                             }
                         }
                     }
@@ -5992,7 +6125,13 @@ impl<'ctx> Codegen<'ctx> {
                 }
                 if let Some(f) = self.module.get_function(callee) {
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-                    for a in args { let v = self.codegen_call_arg(a)?; arg_vals.push(v.into()); }
+                    for a in args {
+                        // No signature context (matches sema's `any`
+                        // fallback for implicit `out` declarations).
+                        self.materialize_out_var(a, None)?;
+                        let v = self.codegen_call_arg(a)?;
+                        arg_vals.push(v.into());
+                    }
                     let call = self.builder.build_call(f, &arg_vals, "call").unwrap();
                     let vk = call.try_as_basic_value();
                     if vk.is_basic() { return Ok(vk.basic().unwrap()); } else { return Ok(self.context.i64_type().const_int(0,false).into()); }
@@ -6002,6 +6141,7 @@ impl<'ctx> Codegen<'ctx> {
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                     let mut param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> = Vec::new();
                     for a in args {
+                        self.materialize_out_var(a, None)?;
                         let v = self.codegen_call_arg(a)?;
                         param_tys.push(v.get_type().into());
                         arg_vals.push(v.into());
@@ -7407,6 +7547,35 @@ mod tests {
     fn trait_multi_implementor_dispatch_verifies() {
         compile_src(
             "trait Speaker has\n  string speak()\nend\nopen class Cat implements Speaker has\n  Cat() initialize\n  public string speak() do\n    return \"meow\"\n  end\nend\nopen class Dog implements Speaker has\n  Dog() initialize\n  public string speak() do\n    return \"woof\"\n  end\nend\nstring pick(Speaker s) do\n  return s.speak()\nend\nvoid main() do\n  Speaker a = Cat()\n  Speaker b = Dog()\n  string x = pick(a)\n  string y = pick(b)\nend\n",
+        );
+    }
+
+    /// `ref`/`out` params lower to pointers on both sides of every call
+    /// (free functions, methods, ctors, operators, extensions). Used to
+    /// fail verification with mismatched call signatures.
+    #[test]
+    fn ref_out_params_verify() {
+        compile_src(
+            "void swap(ref int a, ref int b) do\n  int t = a\n  a = b\n  b = t\nend\nvoid produce(out int v) do\n  v = 42\nend\nint main() do\n  int x = 1\n  int y = 2\n  swap(ref x, ref y)\n  produce(out x)\n  return 0\nend\n",
+        );
+        compile_src(
+            "class Acc has\n  int total\n  Acc() initialize\n  public void bump(ref int x) do\n    x = x + 1\n  end\nend\nvoid main() do\n  Acc a = Acc()\n  int v = 10\n  a.bump(ref v)\nend\n",
+        );
+    }
+
+    /// Implicit `out` declarations materialize their slot at the call:
+    /// `out message` with no prior declaration brings the name into scope.
+    #[test]
+    fn implicit_out_var_verifies() {
+        compile_src(
+            "void some_fn(string name, out string msg) do\n  msg = \"Yo!\"\nend\nvoid main() do\n  string usr = \"Abbas\"\n  some_fn(usr, out message)\n  string s = message\nend\n",
+        );
+    }
+
+    #[test]
+    fn implicit_out_var_annotated_verifies() {
+        compile_src(
+            "void some_fn(string name, out string msg) do\n  msg = \"Yo!\"\nend\nvoid main() do\n  some_fn(\"x\", out string message)\nend\n",
         );
     }
 

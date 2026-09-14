@@ -512,6 +512,10 @@ argument =
     | named-argument
     | "out" , [ type ] , identifier
     | "ref" , expression ;
+    (* `out name` with no visible variable declares it in the current     *)
+    (* scope from the call on (explicit type wins, else the callee's      *)
+    (* declared parameter type). `ref`/`out` markers are enforced         *)
+    (* against the declared parameter modes.                              *)
 
 named-argument =
     identifier , ":" , expression ;

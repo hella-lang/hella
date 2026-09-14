@@ -464,13 +464,15 @@ impl Checker {
                 self.errors.push(SemError{message: format!("method `{}` expects {} args, found {}", method, sig.params.len(), args.len()), span: *method_span});
             }
             for (i, a) in args.iter().enumerate() {
-                let aty = self.check_call_arg(a);
                 let pidx = if let CallArg::Named { name, .. } = a {
                     sig.param_names.iter().position(|n| n == name).unwrap_or(i)
                 } else { i };
+                self.declare_out_arg(a, sig.params.get(pidx));
+                let aty = self.check_call_arg(a);
                 if let Some(pt) = sig.params.get(pidx) {
                     if !self.ty_assignable(&aty, pt) { self.errors.push(SemError{message: format!("arg {} of `{}`: expected `{}`, found `{}`", i+1, method, pt, aty), span: a.span()}); }
                 }
+                self.check_arg_mode(a, &sig.param_modes, pidx, method, i + 1);
             }
         }
     }
@@ -2559,13 +2561,15 @@ impl Checker {
                                     self.errors.push(SemError{message: format!("constructor for `{callee}` is private"), span: *callee_span});
                                 }
                                 for (i, arg) in args.iter().enumerate() {
-                                    let aty = self.check_call_arg(arg);
                                     let pidx = if let CallArg::Named { name, .. } = arg {
                                         sig.param_names.iter().position(|n| n == name).unwrap_or(i)
                                     } else { i };
+                                    self.declare_out_arg(arg, sig.params.get(pidx));
+                                    let aty = self.check_call_arg(arg);
                                     if !self.ty_assignable(&aty, &sig.params[pidx]) {
                                         self.errors.push(SemError{message: format!("ctor arg {}: expected `{}`, found `{aty}`", i+1, sig.params[pidx]), span: arg.span()});
                                     }
+                                    self.check_arg_mode(arg, &sig.param_modes, pidx, callee, i + 1);
                                 }
                                 return struct_ty;
                             } else {
@@ -2610,10 +2614,11 @@ impl Checker {
                             });
                         }
                         for (i, arg) in args.iter().enumerate() {
-                            let aty = self.check_call_arg(arg);
                             let pidx = if let CallArg::Named { name, .. } = arg {
                                 sig.param_names.iter().position(|n| n == name).unwrap_or(i)
                             } else { i };
+                            self.declare_out_arg(arg, sig.params.get(pidx));
+                            let aty = self.check_call_arg(arg);
                             if let Some(param_ty) = sig.params.get(pidx) {
                                 if !self.ty_assignable(&aty, param_ty) {
                                     let is_generic = matches!(param_ty, Ty::Generic(n, _) if n.len() == 1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false));
@@ -2622,6 +2627,7 @@ impl Checker {
                                     }
                                 }
                             }
+                            self.check_arg_mode(arg, &sig.param_modes, pidx, callee, i + 1);
                         }
                     }
                     sig.ret
@@ -3025,6 +3031,9 @@ impl Checker {
                                 self.errors.push(SemError{message: format!("variant `{variant}` expects {} payload(s), found {}", payload_tys.len(), args.len()), span: *variant_span});
                             } else {
                                 for (pty, arg) in payload_tys.iter().zip(args.iter()) {
+                                    if matches!(arg, CallArg::Out { .. }) {
+                                        self.errors.push(SemError { message: format!("`out` argument not allowed in enum payload `{variant}`"), span: arg.span() });
+                                    }
                                     let aty = self.check_call_arg(arg);
                                     let is_generic = matches!(pty, Ty::Generic(n, _) if n.len() == 1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false));
                                     if !self.ty_assignable(&aty, pty) && !is_generic {
@@ -3373,6 +3382,54 @@ impl Checker {
         }
     }
 
+    /// Validate `out`/`ref` call markers against the declared parameter
+    /// mode. `param_idx` indexes the signature (no `this` offset in sema
+    /// sigs). Named arguments are owned by the dedicated named-arg path
+    /// and skipped here.
+    fn check_arg_mode(
+        &mut self,
+        arg: &CallArg,
+        modes: &[ParamMode],
+        param_idx: usize,
+        callee: &str,
+        arg_no: usize,
+    ) {
+        if matches!(arg, CallArg::Named { .. }) {
+            return;
+        }
+        let Some(mode) = modes.get(param_idx) else {
+            return;
+        };
+        let is_out = matches!(arg, CallArg::Out { .. });
+        let is_ref = matches!(arg, CallArg::Ref { .. });
+        match mode {
+            ParamMode::Out if !is_out => self.errors.push(SemError { message: format!("argument {} of `{}` is `out` param but call uses non-out", arg_no, callee), span: arg.span() }),
+            ParamMode::Ref if !is_ref => self.errors.push(SemError { message: format!("argument {} of `{}` is `ref` param but call uses non-ref", arg_no, callee), span: arg.span() }),
+            ParamMode::None if is_out || is_ref => self.errors.push(SemError { message: format!("argument {} of `{}` is by-value param but call uses `out`/`ref`", arg_no, callee), span: arg.span() }),
+            _ => {}
+        }
+    }
+
+    /// Declare a single `out` argument with no visible variable, bringing
+    /// it into the innermost scope from the call on. Explicit annotations
+    /// win; otherwise the callee's declared parameter type (or `any` when
+    /// unknown). Existing variables are reused untouched.
+    fn declare_out_arg(&mut self, arg: &CallArg, expected: Option<&Ty>) {
+        let CallArg::Out { name, ty: opt_ty, .. } = arg else {
+            return;
+        };
+        if self.lookup_var(name).is_some() {
+            return;
+        }
+        let ty = match opt_ty {
+            Some(t) => self.resolve_type(t),
+            None => expected.cloned().unwrap_or(Ty::Any),
+        };
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name.to_string(), ty);
+        }
+    }
+
     fn check_call_arg(&mut self, arg: &CallArg) -> Ty {
         match arg {
             CallArg::Expr(e) => self.check_expr(e),
@@ -3387,8 +3444,13 @@ impl Checker {
                     }
                     var_ty
                 } else {
-                    self.errors.push(SemError { message: format!("undefined variable `{}` for `out`", name), span: *name_span });
-                    Ty::Int
+                    // No pre-pass declared it (unknown callee, indirect
+                    // call, …): bring it into scope as `any` rather than
+                    // cascading more errors.
+                    if let Some(scope) = self.scopes.last_mut() {
+                        scope.insert(name.to_string(), Ty::Any);
+                    }
+                    Ty::Any
                 }
             }
             CallArg::Ref { expr, .. } => {
@@ -3589,10 +3651,11 @@ impl Checker {
             }
             // Check fixed params
             for (i, arg) in args.iter().take(fixed).enumerate() {
-                let aty = self.check_call_arg(arg);
                 let pidx = if let CallArg::Named { name, .. } = arg {
                     sig.param_names.iter().position(|n| n == name).unwrap_or(i)
                 } else { i };
+                self.declare_out_arg(arg, sig.params.get(pidx));
+                let aty = self.check_call_arg(arg);
                 if let Some(param_ty) = sig.params.get(pidx) {
                     if !self.ty_assignable(&aty, param_ty) {
                         let is_generic = matches!(param_ty, Ty::Generic(n, _) if n.len() == 1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false));
@@ -3601,6 +3664,7 @@ impl Checker {
                         }
                     }
                 }
+                self.check_arg_mode(arg, &sig.param_modes, pidx, callee, i + 1);
             }
             // Check variadic tail: `vda` is `T[]` where `T` is element type
             if let Some(vty) = sig.params.get(vidx) {
@@ -3613,6 +3677,7 @@ impl Checker {
                     args.len() - sig.params.len() + 1
                 };
                 for (i, arg) in args.iter().skip(fixed).take(vda_count).enumerate() {
+                    self.declare_out_arg(arg, Some(elem_ty));
                     let aty = self.check_call_arg(arg);
                     let is_generic_elem = matches!(elem_ty, Ty::Generic(n, _) if n.len() == 1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false));
                     let is_any_elem = *elem_ty == Ty::Any;
@@ -3623,6 +3688,7 @@ impl Checker {
                 // Check remaining fixed params after variadic
                 for (j, arg) in args.iter().skip(fixed + vda_count).enumerate() {
                     let pidx = vidx + 1 + j;
+                    self.declare_out_arg(arg, sig.params.get(pidx));
                     if let Some(param_ty) = sig.params.get(pidx) {
                         let aty = self.check_call_arg(arg);
                         if !self.ty_assignable(&aty, param_ty) {
@@ -3632,6 +3698,7 @@ impl Checker {
                             }
                         }
                     }
+                    self.check_arg_mode(arg, &sig.param_modes, pidx, callee, fixed + vda_count + j + 1);
                 }
             }
             // Also check where bounds for variadic generic
