@@ -6781,12 +6781,69 @@ impl<'ctx> Codegen<'ctx> {
                 // For Phase 2, support a[i] where a is array variable; for other cases, error
                 return Err(CodegenError{message: "unsupported indexing base; only direct array variable indexing supported in Phase 2".into(), span: expr.span});
             }
-            ExprKind::Slice { object, start, end, inclusive: _ } => {
-                // MVP: evaluate bounds for side effects, return object value (slice as identity)
-                // Proper slicing (copy subarray, bounds checks) deferred
-                if let Some(s) = start { let _ = self.codegen_expr(s)?; }
-                if let Some(e) = end { let _ = self.codegen_expr(e)?; }
-                self.codegen_expr(object)
+            ExprKind::Slice { object, start, end, inclusive } => {
+                // `a[l..r]` / `a[..r]` / `a[l..]` / `a[..]` (`..=` includes
+                // `end`): copy the clamped range into a fresh array value,
+                // zero-filling outside it. Bounds evaluate once.
+                let (base_ptr, base_ty): (PointerValue<'ctx>, BasicTypeEnum<'ctx>) = if let ExprKind::Ident(ref n) = object.kind {
+                    let lookup = n.rsplit("::").next().unwrap_or(n);
+                    self.lookup_var(n).or_else(|| self.lookup_var(lookup)).ok_or(CodegenError{message: format!("undefined variable `{n}`"), span: object.span})?
+                } else {
+                    let v = self.codegen_expr(object)?;
+                    let tmp = self.create_entry_block_alloca("__slice_base", v.get_type());
+                    self.builder.build_store(tmp, v).unwrap();
+                    (tmp, v.get_type())
+                };
+                let arr_ty = match base_ty {
+                    BasicTypeEnum::ArrayType(at) => at,
+                    _ => return Err(CodegenError{message: "slicing is only supported on arrays".into(), span: object.span}),
+                };
+                let n = arr_ty.len();
+                let elem_ty = arr_ty.get_element_type();
+                // Copy the context reference out so the i64 type below does
+                // not hold an immutable borrow of `self` across `&mut` calls.
+                let ctx: &'ctx Context = self.context;
+                let i64_ty = ctx.i64_type();
+                let zero_elem: BasicValueEnum<'ctx> = match elem_ty {
+                    BasicTypeEnum::IntType(it) => it.const_zero().into(),
+                    BasicTypeEnum::PointerType(pt) => pt.const_null().into(),
+                    BasicTypeEnum::FloatType(ft) => ft.const_float(0.0).into(),
+                    BasicTypeEnum::StructType(st) => st.const_zero().into(),
+                    BasicTypeEnum::ArrayType(at) => at.const_zero().into(),
+                    _ => return Err(CodegenError{message: "unsupported array element type for slicing".into(), span: object.span}),
+                };
+                let i64_as_basic: BasicTypeEnum<'ctx> = i64_ty.into();
+                let lo_raw = if let Some(s) = start {
+                    let sv = self.codegen_expr(s)?;
+                    self.coerce_to_ty(sv, i64_as_basic).into_int_value()
+                } else {
+                    i64_ty.const_zero()
+                };
+                let hi_raw = if let Some(e) = end {
+                    let ev0 = self.codegen_expr(e)?;
+                    let ev = self.coerce_to_ty(ev0, i64_as_basic).into_int_value();
+                    if *inclusive { self.builder.build_int_add(ev, i64_ty.const_int(1, false), "slice.hi.incl").unwrap() } else { ev }
+                } else { i64_ty.const_int(n as u64, false) };
+                let n_val = i64_ty.const_int(n as u64, false);
+                let lo_nonneg = self.builder.build_select(self.builder.build_int_compare(IntPredicate::SGT, lo_raw, i64_ty.const_zero(), "slice.lo.pos").unwrap(), lo_raw, i64_ty.const_zero(), "slice.lo.nn").unwrap().into_int_value();
+                let lo = self.builder.build_select(self.builder.build_int_compare(IntPredicate::SGT, lo_nonneg, n_val, "slice.lo.over").unwrap(), n_val, lo_nonneg, "slice.lo").unwrap().into_int_value();
+                let hi_nonneg = self.builder.build_select(self.builder.build_int_compare(IntPredicate::SGT, hi_raw, i64_ty.const_zero(), "slice.hi.pos").unwrap(), hi_raw, i64_ty.const_zero(), "slice.hi.nn").unwrap().into_int_value();
+                let hi = self.builder.build_select(self.builder.build_int_compare(IntPredicate::SGT, hi_nonneg, n_val, "slice.hi.over").unwrap(), n_val, hi_nonneg, "slice.hi").unwrap().into_int_value();
+                let raw_len = self.builder.build_int_sub(hi, lo, "slice.len.raw").unwrap();
+                let len = self.builder.build_select(self.builder.build_int_compare(IntPredicate::SGT, raw_len, i64_ty.const_zero(), "slice.len.pos").unwrap(), raw_len, i64_ty.const_zero(), "slice.len").unwrap().into_int_value();
+                let mut agg: BasicValueEnum<'ctx> = arr_ty.get_undef().into();
+                for i in 0..n {
+                    let idx = i64_ty.const_int(i as u64, false);
+                    let in_range = self.builder.build_int_compare(IntPredicate::SLT, idx, len, "slice.in").unwrap();
+                    let want = self.builder.build_int_add(lo, idx, "slice.want").unwrap();
+                    let src_idx = self.builder.build_select(in_range, want, i64_ty.const_zero(), "slice.src").unwrap().into_int_value();
+                    let elem_ptr = unsafe { self.builder.build_gep(arr_ty, base_ptr, &[i64_ty.const_zero(), src_idx], "slice.elem.ptr").unwrap() };
+                    let e = self.builder.build_load(elem_ty, elem_ptr, "slice.elem").unwrap();
+                    let picked = self.builder.build_select(in_range, e, zero_elem, "slice.pick").unwrap();
+                    let tmp = self.builder.build_insert_value(agg.into_array_value(), picked, i, "slice.ins").unwrap();
+                    agg = tmp.as_basic_value_enum();
+                }
+                Ok(agg)
             }
             ExprKind::StringLit(s) => {
                 // Create global string pointer: build_global_string_ptr returns i8* to null-terminated string
