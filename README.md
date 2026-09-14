@@ -24,19 +24,24 @@ cargo run -p hella -- setup         # install the standard library to ~/.hella/l
 
 # Start your own project, or try an example:
 cargo run -p hella -- new hello     # scaffold hello/ with src/main.hll
-cargo run -p hella -- run examples/hello_io.hll
+cargo run -p hella -- run -f examples/hello_io.hll
 ```
 
 ## Commands
 
 | Command | What it does |
 |---------|--------------|
-| `hella build <file>` | Compile a `.hll` file to a native binary (same name, extension stripped) |
-| `hella run <file>` | Build (only if sources changed) and run it |
-| `hella check <file>` | Type-check without generating code |
+| `hella build` | Compile the current project (`hella.toml` + `src/main.hll`) |
+| `hella build -f <file>` | Compile a single `.hll` file to a native binary (same name, extension stripped) |
+| `hella run` | Build (only if sources changed) and run the current project |
+| `hella run -f <file>` | Build (only if sources changed) and run a single file |
+| `hella check` | Type-check the current project |
+| `hella check -f <file>` | Type-check a single file without generating code |
 | `hella new <name>` | Scaffold a project (`--lib` for a library instead of a binary) |
 | `hella setup` | Install the embedded standard library to `~/.hella/lib` (`--force` to overwrite) |
 | `hella lsp` | Run the language server (LSP over stdio) |
+
+`hella build` / `hella run` (without `-f`) only work inside a project directory (marked by `hella.toml`, then `src/main.hll` or `src/lib.hll`). Use `-f`/`--file` for a single file outside a project.
 
 Short aliases work too: `b`, `r`, `c`, `ls`. Add `--verbose` for per-phase output or `--quiet` for errors only. Any command accepts `--help` (e.g. `hella build --help`).
 
@@ -78,7 +83,7 @@ A few things that make Hella Hella:
 The `examples/` directory is the fastest way to learn. Build one and run the binary:
 
 ```sh
-cargo run -p hella -- build examples/basics.hll && ./examples/basics; echo $?
+cargo run -p hella -- build -f examples/basics.hll && ./examples/basics; echo $?
 ```
 
 | File | Shows you |

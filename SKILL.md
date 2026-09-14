@@ -21,7 +21,7 @@ Guide LLMs building a compiler for **Hella** (draft 0.2 EBNF) using Rust and `in
 - Phased implementation plan — `references/phases.md` (Phases 0–5 DONE, but see Gap Matrix: many stubs)
 - LLVM lowering map — `references/llvm-mapping.md` (`int→i64`, `bool→i1`, `T[]→[16 x T]`, `T?→{T,bool}`, `T*→ptr`, `defer` stacks)
 - Recommended crates and project layout — `references/toolchain.md` (**OUTDATED**: still lists `chumsky 0.10`, `llvm20-1`, `ariadne`; actual is `logos 0.15` + hand Pratt `crates/hella-compiler/src/parse/mod.rs:1`, `miette 7`, `inkwell 0.10 llvm21-1`, workspace `crates/hella-cli`+`crates/hella-compiler`+`crates/hella-lsp`)
-- Main driver with progress — `crates/hella-cli/src/main.rs:1` (`hella build <file>` single `ProgressBar` + status lines in brand green #00A693)
+- Main driver with progress — `crates/hella-cli/src/main.rs:1` (`hella build -f <file>` single `ProgressBar` + status lines in brand green #00A693)
 - Canonical examples — `examples/advanced.hll` (distinct/extend/init/extern/where/operator/closure/interpolation), `examples/abstraction.hll` (separate accessors, `open` class), `examples/data_control.hll` (omitted `has`), `examples/hello_io.hll` (`import std::io`)
 - Audit Gap Matrix — see `TodoWrite` “Hella 100% EBNF” (38 sections: 21% full, ~47% partial, 6 missing)
 
@@ -39,7 +39,7 @@ When asked to implement any part of the compiler:
    - Semantic checks (`crates/hella-compiler/src/sema/mod.rs` — `resolve_type`, `check_expr`/`check_stmt`, `ClassInfo{operators, conversions}`, merging `prop_map` for separate accessors, `open`-on-method rejection)
    - `inkwell` lowering (`crates/hella-compiler/src/codegen/mod.rs` — `llvm_ty_for`/`llvm_ty_for_sema`, `declare_*`/`codegen_*`, `class_operators` dispatch, `closure_count`/`hella.init`/`strcat`/`sprintf`)
 5. Prefer a compilable, testable increment over a complete but unrunnable design.
-6. Emit via `hella build <file>` (single progress bar + brand-green status lines, `--release` for O3 + aggressive codegen via `Codegen::optimize_for_release`), then object `TargetMachine` + `clang` link to a proper binary (extension stripped). Always `module.verify()` before emission.
+6. Emit via `hella build -f <file>` (single progress bar + brand-green status lines, `--release` for O3 + aggressive codegen via `Codegen::optimize_for_release`), then object `TargetMachine` + `clang` link to a proper binary (extension stripped). Always `module.verify()` before emission.
 7. Update `examples/*.hll` to exercise the new production and `references/ebnf-0.1.txt` if grammar changed.
 
 ## Architecture Snapshot (actual workspace as of Phase 5 DONE)
@@ -160,7 +160,7 @@ Progress output uses the Hella brand green #00A693 for `hella build`/`hella run`
 - Prefer complete, compilable Rust fragments over pseudocode when implementing a phase.
 - Always state which phase / EBNF § the work belongs to and which `Todo` `T-*` it closes.
 - Cite the relevant EBNF productions when adding syntax (`references/ebnf-0.1.txt:633` etc.).
-- Keep test programs in `examples/` as `.hll` files and verify with `hella build <file>` *and* `cargo test` (4 lexer tests) before marking `Todo` done.
+- Keep test programs in `examples/` as `.hll` files and verify with `hella build -f <file>` *and* `cargo test` (4 lexer tests) before marking `Todo` done.
 - **Todo is law:** Never work outside `TodoWrite` “Hella 100% EBNF”. If user asks for ad-hoc fix, add it as a `T-*` first, then execute.
 
 ### Hella 100% EBNF — Reference Todo (keep in sync with `TodoWrite`)

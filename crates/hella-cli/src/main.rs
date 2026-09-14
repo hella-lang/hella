@@ -4,29 +4,33 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use clap::{Parser, Subcommand};
 use clap::builder::styling::{AnsiColor, Color as ClapColor, Style, Styles};
+use clap::{Parser, Subcommand};
 use console::{Color, style};
 use indicatif::{ProgressBar, ProgressStyle};
 use miette::Report;
 
 use hella_compiler::lexer::lex;
 
-/// Standard-library sources embedded at build time by `crates/hella-cli/build.rs`
-/// (`stdlib/**/*.hll`), used by `hella setup` to populate `~/.hella/lib`.
+// Standard-library sources embedded at build time by `crates/hella-cli/build.rs`
+// (`stdlib/**/*.hll`), used by `hella setup` to populate `~/.hella/lib`.
 include!(concat!(env!("OUT_DIR"), "/stdlib_embedded.rs"));
 
 /// Hella brand green #00A693 as an ANSI truecolor style.
 fn brand_style() -> Style {
-    Style::new().fg_color(Some(ClapColor::Rgb(anstyle::RgbColor(0x00, 0xA6, 0x93)))).bold()
+    Style::new()
+        .fg_color(Some(ClapColor::Rgb(anstyle::RgbColor(0x00, 0xA6, 0x93))))
+        .bold()
 }
 
 /// clap help/error styling in the Hella brand palette:
 /// brand-green headers and literals, yellow errors, dim context.
 fn cli_styles() -> Styles {
     let brand = brand_style();
-    let dim = Style::new().fg_color(Some(ClapColor::Ansi(AnsiColor::BrightBlack)));
-    let yellow = Style::new().fg_color(Some(ClapColor::Ansi(AnsiColor::Yellow)));
+    let dim =
+        Style::new().fg_color(Some(ClapColor::Ansi(AnsiColor::BrightBlack)));
+    let yellow =
+        Style::new().fg_color(Some(ClapColor::Ansi(AnsiColor::Yellow)));
     Styles::styled()
         .header(brand)
         .usage(brand)
@@ -57,18 +61,16 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Build a .hll source file (lex → parse → check → codegen → link)
+    /// Build the current project
     #[command(visible_alias = "b")]
     Build(BuildArgs),
-    /// Build and run a .hll source file (rebuilds only when sources changed;
-    /// the binary is kept)
+    /// Build and run the current project
     #[command(visible_alias = "r")]
     Run(RunArgs),
-    /// Check a .hll source file (lex → parse → check, no codegen)
+    /// Type-check the current project
     #[command(visible_alias = "c")]
     Check(CheckArgs),
     /// Run the Hella language server (LSP over stdio)
-    #[command(visible_alias = "ls")]
     Lsp,
     /// Install the embedded standard library to `~/.hella/lib`
     Setup(SetupArgs),
@@ -98,7 +100,8 @@ struct NewArgs {
 
 #[derive(Parser, Debug)]
 struct BuildArgs {
-    /// Source file (.hll) to compile (default: project `src/main.hll`)
+    /// Source file (.hll) to compile (default: project `src/main.hll`; use -f/--file for an explicit file)
+    #[arg(short = 'f', long, value_name = "FILE")]
     file: Option<PathBuf>,
 
     /// Emit LLVM IR to stdout and exit (no link)
@@ -145,7 +148,8 @@ struct BuildArgs {
 
 #[derive(Parser, Debug)]
 struct RunArgs {
-    /// Source file (.hll) to compile and run (default: project `src/main.hll`)
+    /// Source file (.hll) to compile and run (default: project `src/main.hll`; use -f/--file for an explicit file)
+    #[arg(short = 'f', long, value_name = "FILE")]
     file: Option<PathBuf>,
 
     /// Keep object file (don't delete after linking)
@@ -202,7 +206,8 @@ struct FmtArgs {
 
 #[derive(Parser, Debug)]
 struct CheckArgs {
-    /// Source file (.hll) to check (default: project `src/main.hll` or `src/lib.hll`)
+    /// Source file (.hll) to check (default: project `src/main.hll` or `src/lib.hll`; use -f/--file for an explicit file)
+    #[arg(short = 'f', long, value_name = "FILE")]
     file: Option<PathBuf>,
 
     /// Print AST for debugging
@@ -277,17 +282,17 @@ struct Project {
 impl Project {
     /// `out/debug` or `out/release` under the project root (created on use).
     fn out_dir(&self, release: bool) -> PathBuf {
-        self.root.join("out").join(if release {
-            "release"
-        } else {
-            "debug"
-        })
+        self.root
+            .join("out")
+            .join(if release { "release" } else { "debug" })
     }
 }
 
 /// Resolve the entry file for build/run/check: an explicit file wins;
 /// otherwise the project convention applies (`src/main.hll`, falling back
 /// to `src/lib.hll` for `check`-able library sources).
+/// Project mode (no explicit file) requires a valid `hella.toml` project;
+/// `build`/`run` are canonically project commands.
 fn resolve_entry(explicit: Option<PathBuf>) -> miette::Result<ResolvedEntry> {
     if let Some(f) = explicit {
         return Ok(ResolvedEntry {
@@ -295,13 +300,26 @@ fn resolve_entry(explicit: Option<PathBuf>) -> miette::Result<ResolvedEntry> {
             project: None,
         });
     }
-    let cwd = std::env::current_dir()
-        .map_err(|e| miette::miette!("failed to read current directory: {e}"))?;
-    let root = find_project_root(&cwd).unwrap_or(cwd.clone());
+    let cwd = std::env::current_dir().map_err(|e| {
+        miette::miette!("failed to read current directory: {e}")
+    })?;
+    let Some(root) = find_project_root(&cwd) else {
+        return Err(miette::miette!(
+            "not in a Hella project (no hella.toml found in {} or parents); run `hella new <name>` or use -f/--file <FILE>",
+            cwd.display()
+        ));
+    };
+    // Validate hella.toml (read_manifest errors if malformed or missing name/version)
+    let manifest = read_manifest(&root)?;
+    if manifest.is_none() {
+        return Err(miette::miette!(
+            "invalid hella.toml in {} (must define `name` and `version`)",
+            root.display()
+        ));
+    }
     for cand in ["src/main.hll", "src/lib.hll"] {
         let path = root.join(cand);
         if path.is_file() {
-            let manifest = read_manifest(&root)?;
             let bin_name = manifest
                 .as_ref()
                 .map(|m| m.name.clone())
@@ -317,7 +335,7 @@ fn resolve_entry(explicit: Option<PathBuf>) -> miette::Result<ResolvedEntry> {
         }
     }
     Err(miette::miette!(
-        "no input file and no project found (looked for src/main.hll and src/lib.hll in {}); pass a file or run `hella new <name>`",
+        "no entry file found in project {} (looked for src/main.hll and src/lib.hll)",
         root.display()
     ))
 }
@@ -353,8 +371,9 @@ fn read_manifest(root: &Path) -> miette::Result<Option<Manifest>> {
     if !path.is_file() {
         return Ok(None);
     }
-    let text = fs::read_to_string(&path)
-        .map_err(|e| miette::miette!("failed to read {}: {e}", path.display()))?;
+    let text = fs::read_to_string(&path).map_err(|e| {
+        miette::miette!("failed to read {}: {e}", path.display())
+    })?;
     let mut name: Option<String> = None;
     let mut version: Option<String> = None;
     for (lineno, line) in text.lines().enumerate() {
@@ -363,16 +382,18 @@ fn read_manifest(root: &Path) -> miette::Result<Option<Manifest>> {
             continue;
         }
         let (key, value) = line.split_once('=').ok_or_else(|| {
-            miette::miette!("malformed {} line {}: {line:?}", path.display(), lineno + 1)
+            miette::miette!(
+                "malformed {} line {}: {line:?}",
+                path.display(),
+                lineno + 1
+            )
         })?;
         let value = value.trim();
         let value = value
             .strip_prefix('"')
             .and_then(|v| v.strip_suffix('"'))
             .or_else(|| {
-                value
-                    .strip_prefix('\'')
-                    .and_then(|v| v.strip_suffix('\''))
+                value.strip_prefix('\'').and_then(|v| v.strip_suffix('\''))
             })
             .ok_or_else(|| {
                 miette::miette!(
@@ -476,8 +497,9 @@ fn run_new(args: NewArgs) -> miette::Result<()> {
                 dest.display()
             ));
         }
-        fs::write(&dest, contents)
-            .map_err(|e| miette::miette!("failed to write {}: {e}", dest.display()))?;
+        fs::write(&dest, contents).map_err(|e| {
+            miette::miette!("failed to write {}: {e}", dest.display())
+        })?;
     }
 
     if args.vcs == "git" {
@@ -526,7 +548,10 @@ fn run_fmt(args: FmtArgs) -> miette::Result<()> {
     };
     for root in &roots {
         if !root.exists() {
-            return Err(miette::miette!("no such file or directory: {}", root.display()));
+            return Err(miette::miette!(
+                "no such file or directory: {}",
+                root.display()
+            ));
         }
     }
     let files = hella_fmt::collect_sources(&roots);
@@ -545,8 +570,9 @@ fn run_fmt(args: FmtArgs) -> miette::Result<()> {
     let mut changed = 0usize;
     let mut failed = 0usize;
     for path in &files {
-        let source = fs::read_to_string(path)
-            .map_err(|e| miette::miette!("failed to read {}: {e}", path.display()))?;
+        let source = fs::read_to_string(path).map_err(|e| {
+            miette::miette!("failed to read {}: {e}", path.display())
+        })?;
         match hella_fmt::format_source(&source) {
             Ok(formatted) => {
                 if formatted != source {
@@ -555,9 +581,16 @@ fn run_fmt(args: FmtArgs) -> miette::Result<()> {
                         println!("{}", path.display());
                     } else {
                         fs::write(path, formatted).map_err(|e| {
-                            miette::miette!("failed to write {}: {e}", path.display())
+                            miette::miette!(
+                                "failed to write {}: {e}",
+                                path.display()
+                            )
                         })?;
-                        eprintln!("{:>11} {}", brand("Formatted"), path.display());
+                        eprintln!(
+                            "{:>11} {}",
+                            brand("Formatted"),
+                            path.display()
+                        );
                     }
                 }
             }
@@ -578,9 +611,15 @@ fn run_fmt(args: FmtArgs) -> miette::Result<()> {
             return Err(miette::miette!("{failed} file(s) failed to parse"));
         }
         if changed > 0 {
-            return Err(miette::miette!("{changed} file(s) would be reformatted"));
+            return Err(miette::miette!(
+                "{changed} file(s) would be reformatted"
+            ));
         }
-        eprintln!("{:>11} {} file(s) already formatted", brand("Checked"), files.len());
+        eprintln!(
+            "{:>11} {} file(s) already formatted",
+            brand("Checked"),
+            files.len()
+        );
         return Ok(());
     }
     if failed > 0 {
@@ -617,8 +656,9 @@ fn run_setup(args: SetupArgs) -> miette::Result<()> {
                 miette::miette!("failed to create {}: {e}", parent.display())
             })?;
         }
-        fs::write(&dest, contents)
-            .map_err(|e| miette::miette!("failed to write {}: {e}", dest.display()))?;
+        fs::write(&dest, contents).map_err(|e| {
+            miette::miette!("failed to write {}: {e}", dest.display())
+        })?;
         installed += 1;
     }
     eprintln!(
@@ -662,9 +702,7 @@ fn gpath(p: &Path) -> String {
 
 /// Yellow duration, matching compiler-error yellow accents.
 fn gduration(d: Duration) -> String {
-    style(seconds(d))
-        .fg(Color::Yellow)
-        .to_string()
+    style(seconds(d)).fg(Color::Yellow).to_string()
 }
 
 /// Formats durations as `0.12s`.
@@ -692,12 +730,12 @@ fn new_progress_bar(quiet: bool, total_steps: u64) -> ProgressBar {
         ProgressBar::new(total_steps)
     };
     pb.set_style(
-        ProgressStyle::with_template("{spinner:.green} [{bar:30.green}] {pos}/{len} {msg}")
-            .unwrap()
-            .tick_strings(&[
-                "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
-            ])
-            .progress_chars("#>-"),
+        ProgressStyle::with_template(
+            "{spinner:.green} [{bar:30.green}] {pos}/{len} {msg}",
+        )
+        .unwrap()
+        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+        .progress_chars("#>-"),
     );
     pb.enable_steady_tick(Duration::from_millis(80));
     pb
@@ -715,9 +753,10 @@ fn run_build(args: BuildArgs) -> miette::Result<()> {
     // Project mode redirects output to `out/debug|release/<name>` unless
     // `-o` is given; file mode keeps the legacy next-to-source default.
     let exe_path = args.output.clone().or_else(|| {
-        entry.project.as_ref().map(|p| {
-            p.out_dir(args.release).join(&p.bin_name)
-        })
+        entry
+            .project
+            .as_ref()
+            .map(|p| p.out_dir(args.release).join(&p.bin_name))
     });
     let opts = CompileOptions {
         file: &entry.path,
@@ -740,10 +779,7 @@ fn run_build(args: BuildArgs) -> miette::Result<()> {
 
 fn run_check(args: CheckArgs) -> miette::Result<()> {
     let entry = resolve_entry(args.file.clone())?;
-    let require_main = entry
-        .path
-        .file_stem()
-        .is_some_and(|s| s == "main");
+    let require_main = entry.path.file_stem().is_some_and(|s| s == "main");
     let opts = CompileOptions {
         file: &entry.path,
         emit_llvm: false,
@@ -841,7 +877,7 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     };
     let pb = new_progress_bar(quiet, total_steps);
 
-        status(&pb, quiet, "Compiling", &gpath(file).to_string());
+    status(&pb, quiet, "Compiling", &gpath(file).to_string());
 
     // ── Read ─────────────────────────────────────────────────────────
     pb.set_message("Reading");
@@ -852,7 +888,9 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     let filename = file.display().to_string();
     pb.inc(1);
     if opts.verbose {
-        status(&pb, quiet,
+        status(
+            &pb,
+            quiet,
             "Reading",
             &format!("{} ({} bytes)", gpath(file), source.len()),
         );
@@ -864,7 +902,9 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     let out = lex(&source);
     pb.inc(1);
     if opts.verbose {
-        status(&pb, quiet,
+        status(
+            &pb,
+            quiet,
             "Lexed",
             &format!(
                 "{} tokens in {}",
@@ -891,7 +931,8 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     let is_empty_program = out.tokens.iter().all(|st| {
         matches!(
             st.token,
-            hella_compiler::token::Token::Newline | hella_compiler::token::Token::Semicolon
+            hella_compiler::token::Token::Newline
+                | hella_compiler::token::Token::Semicolon
         )
     });
     if is_empty_program && out.tokens.is_empty() {
@@ -903,33 +944,37 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // ── Parse ────────────────────────────────────────────────────────
     pb.set_message("Parsing");
     let t_parse = Instant::now();
-    let program =
-        match hella_compiler::parse::parse(out.tokens.clone(), source.clone()) {
-            Ok(p) => {
-                pb.inc(1);
-                if opts.verbose {
-                    status(&pb, quiet,
-                        "Parsed",
-                        &format!(
-                            "{} items in {}",
-                            p.items.len(),
-                            gduration(t_parse.elapsed())
-                        ),
-                    );
-                }
-                p
-            }
-            Err(e) => {
-                let diag = hella_compiler::error::SingleDiagnostic::new(
-                    filename.clone(),
-                    source.clone(),
-                    e.span,
-                    e.message,
+    let program = match hella_compiler::parse::parse(
+        out.tokens.clone(),
+        source.clone(),
+    ) {
+        Ok(p) => {
+            pb.inc(1);
+            if opts.verbose {
+                status(
+                    &pb,
+                    quiet,
+                    "Parsed",
+                    &format!(
+                        "{} items in {}",
+                        p.items.len(),
+                        gduration(t_parse.elapsed())
+                    ),
                 );
-                pb.abandon();
-                fail(Report::new(diag));
             }
-        };
+            p
+        }
+        Err(e) => {
+            let diag = hella_compiler::error::SingleDiagnostic::new(
+                filename.clone(),
+                source.clone(),
+                e.span,
+                e.message,
+            );
+            pb.abandon();
+            fail(Report::new(diag));
+        }
+    };
 
     // ── Import expansion ─────────────────────────────────────────────
     pb.set_message("Resolving imports");
@@ -952,7 +997,9 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     let program = {
         pb.inc(1);
         if opts.verbose {
-            status(&pb, quiet,
+            status(
+                &pb,
+                quiet,
                 "Resolved",
                 &format!(
                     "{} items in {}",
@@ -990,21 +1037,21 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
             "semantic error".into(),
         );
         pb.abandon();
-                fail(Report::new(multi));
+        fail(Report::new(multi));
     }
     if opts.check_only {
         pb.finish_with_message("Finished");
-        status(&pb, quiet,
+        status(
+            &pb,
+            quiet,
             "Checked",
-            &format!(
-                "{} in {}",
-                gpath(file),
-                gduration(start_all.elapsed())
-            ),
+            &format!("{} in {}", gpath(file), gduration(start_all.elapsed())),
         );
         return Ok(None);
     }
-    status(&pb, quiet,
+    status(
+        &pb,
+        quiet,
         "Checked",
         &format!("in {}", seconds(t_check.elapsed())),
     );
@@ -1015,7 +1062,7 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         hella_compiler::codegen::OptLevel::Debug
     };
 
-        // ── Codegen ──────────────────────────────────────────────────────
+    // ── Codegen ──────────────────────────────────────────────────────
     if opts.emit_llvm {
         pb.set_message("Generating LLVM IR");
         status(&pb, quiet, "Generating", "LLVM IR");
@@ -1028,18 +1075,23 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
             }
         };
         pb.inc(1);
-        status(&pb, quiet,
+        status(
+            &pb,
+            quiet,
             "Generated",
             &format!("in {}", gduration(t_ir.elapsed())),
         );
         if let Some(path) = opts.emit_llvm_file {
-            fs::write(path, &ir).map_err(|e| miette::miette!("failed to write IR: {e}"))?;
+            fs::write(path, &ir)
+                .map_err(|e| miette::miette!("failed to write IR: {e}"))?;
             status(&pb, quiet, "Exported", &gpath(path).to_string());
         } else {
             println!("{ir}");
         }
         pb.finish_with_message("Finished");
-        status(&pb, quiet,
+        status(
+            &pb,
+            quiet,
             "Compiled",
             &format!("in {}", gduration(start_all.elapsed())),
         );
@@ -1055,7 +1107,10 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         if let Some(parent) = p.parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent).map_err(|e| {
-                    miette::miette!("failed to create {}: {e}", parent.display())
+                    miette::miette!(
+                        "failed to create {}: {e}",
+                        parent.display()
+                    )
                 })?;
             }
         }
@@ -1068,33 +1123,41 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // persists between invocations and only rebuilds on change.
     if !opts.force && is_fresh(&exe_path, &source_files, opts.release) {
         pb.finish_with_message("Finished");
-        status(&pb, quiet,
+        status(
+            &pb,
+            quiet,
             "Fresh",
-            &format!(
-                "{} (up to date)",
-                gpath(&exe_path),
-            ),
+            &format!("{} (up to date)", gpath(&exe_path),),
         );
         return Ok(Some(exe_path));
     }
 
     pb.set_message(format!("Compiling {}", obj_path.display()));
     let build_kind = if opts.release { "release" } else { "debug" };
-    status(&pb, quiet, "Compiling", &format!("{} ({build_kind})", gpath(&obj_path)));
+    status(
+        &pb,
+        quiet,
+        "Compiling",
+        &format!("{} ({build_kind})", gpath(&obj_path)),
+    );
     let t_cg = Instant::now();
-    if let Err(e) = codegen_to_object(&program, &obj_path, &filename, &source, opt) {
+    if let Err(e) =
+        codegen_to_object(&program, &obj_path, &filename, &source, opt)
+    {
         pb.abandon();
         return Err(e);
     }
     pb.inc(1);
     if opts.verbose {
-        status(&pb, quiet,
+        status(
+            &pb,
+            quiet,
             "Compiled",
             &format!("{} in {}", gpath(&obj_path), gduration(t_cg.elapsed())),
         );
     }
 
-            // ── Link ─────────────────────────────────────────────────────────
+    // ── Link ─────────────────────────────────────────────────────────
     pb.set_message(format!("Linking {}", exe_path.display()));
     let t_link = Instant::now();
     let link_status = Command::new("clang")
@@ -1104,7 +1167,9 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         .status()
         .map_err(|e| {
             pb.abandon();
-            miette::miette!("failed to invoke clang: {e} — is Xcode CLT installed?")
+            miette::miette!(
+                "failed to invoke clang: {e} — is Xcode CLT installed?"
+            )
         })?;
     if !link_status.success() {
         pb.abandon();
@@ -1112,7 +1177,9 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     }
     pb.inc(1);
     if opts.verbose {
-        status(&pb, quiet,
+        status(
+            &pb,
+            quiet,
             "Linked",
             &format!("{} in {}", gpath(&exe_path), gduration(t_link.elapsed())),
         );
@@ -1127,7 +1194,9 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     write_build_stamp(&exe_path, opts.release);
 
     pb.finish_with_message("Finished");
-    status(&pb, quiet,
+    status(
+        &pb,
+        quiet,
         "Compiled",
         &format!(
             "{} → {} in {}",
@@ -1195,8 +1264,10 @@ fn generate_ir_string(
         )
     })?;
     if opt == hella_compiler::codegen::OptLevel::Release {
-        let machine = hella_compiler::codegen::target_machine(opt)
-            .map_err(|e| miette::miette!("failed to create target machine: {e}"))?;
+        let machine =
+            hella_compiler::codegen::target_machine(opt).map_err(|e| {
+                miette::miette!("failed to create target machine: {e}")
+            })?;
         cg.optimize_for_release(&machine)
             .map_err(|e| miette::miette!("release passes failed: {e}"))?;
     }
@@ -1210,7 +1281,9 @@ fn codegen_to_object(
     source: &str,
     opt: hella_compiler::codegen::OptLevel,
 ) -> miette::Result<()> {
-    if let Err(msg) = hella_compiler::codegen::compile_to_object(program, obj_path, opt) {
+    if let Err(msg) =
+        hella_compiler::codegen::compile_to_object(program, obj_path, opt)
+    {
         let diag = hella_compiler::error::SingleDiagnostic::new(
             filename.to_string(),
             source.to_string(),
@@ -1251,4 +1324,3 @@ fn obj_path_for_exe(exe: &Path) -> PathBuf {
         p
     }
 }
-
