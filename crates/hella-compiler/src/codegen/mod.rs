@@ -84,6 +84,10 @@ pub struct Codegen<'ctx> {
     class_extends: HashMap<String, String>,
     /// Directly implemented traits per class.
     class_implements: HashMap<String, Vec<String>>,
+    /// Release mode (`hella build --release`): `debug_assert` is stripped
+    /// (not emitted; sema still checks it). Set from `OptLevel` before
+    /// `compile_program`.
+    pub release: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -140,6 +144,7 @@ impl<'ctx> Codegen<'ctx> {
             next_class_tag: 1,
             class_extends: HashMap::new(),
             class_implements: HashMap::new(),
+            release: false,
         }
     }
 
@@ -5176,6 +5181,11 @@ impl<'ctx> Codegen<'ctx> {
                 Ok(false)
             }
             Stmt::Assert(a) => {
+                // `debug_assert` compiles to nothing in release builds
+                // (Rust/C-style; sema still checked the condition).
+                if a.is_debug && self.release {
+                    return Ok(false);
+                }
                 let cond_val = self.codegen_expr(&a.cond)?.into_int_value();
                 let cur_fn = self.cur_fn.unwrap();
                 let assert_ok = self.context.append_basic_block(cur_fn, "assert.ok");
@@ -7963,6 +7973,7 @@ pub fn compile_to_object(
 ) -> Result<(), String> {
     let context = Context::create();
     let mut cg = Codegen::new(&context, "hella");
+    cg.release = opt == OptLevel::Release;
     cg.compile_program(program).map_err(|e| {
         format!("{} at {}..{}", e.message, e.span.start, e.span.end)
     })?;

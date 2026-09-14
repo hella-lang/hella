@@ -1255,6 +1255,7 @@ fn generate_ir_string(
     use inkwell::context::Context;
     let ctx = Context::create();
     let mut cg = hella_compiler::codegen::Codegen::new(&ctx, "hella");
+    cg.release = opt == hella_compiler::codegen::OptLevel::Release;
     cg.compile_program(program).map_err(|e| {
         miette::miette!(
             "codegen error: {} at {}..{}",
