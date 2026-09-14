@@ -5356,6 +5356,48 @@ impl<'ctx> Codegen<'ctx> {
                 // Desugar for var in iter do body => index loop over array
                 // iter must be array (int[]); element type is int
                 let func = self.cur_fn.unwrap();
+                // Resolve the iterable once. `Ident` slots are used directly;
+                // any other expression is evaluated once into a temp slot so
+                // array literals, calls, etc. iterate correctly. Anything that
+                // is not an array, vector, map, or string is a codegen error
+                // (sema rejects it first; this is the backstop, replacing the
+                // old silent len-16/var-0 fallback that miscompiled valid
+                // non-`Ident` iters).
+                enum ForIterKind { Array, Vec, Map, Str }
+                let (iter_ptr, iter_ty, iter_kind): (PointerValue<'ctx>, BasicTypeEnum<'ctx>, ForIterKind) = if let ExprKind::Ident(ref arr_name) = f.iter.kind {
+                    let (p, t) = self.lookup_var(arr_name).ok_or(CodegenError{message: format!("undefined variable `{arr_name}`"), span: f.iter.span})?;
+                    if t.is_array_type() {
+                        (p, t, ForIterKind::Array)
+                    } else if t.is_struct_type() && self.is_vec_var(arr_name) {
+                        (p, t, ForIterKind::Vec)
+                    } else if t.is_struct_type() && self.is_map_var(arr_name) {
+                        (p, t, ForIterKind::Map)
+                    } else if t.is_pointer_type() || self.is_string_var(arr_name) {
+                        (p, t, ForIterKind::Str)
+                    } else {
+                        return Err(CodegenError{message: "`for` iterable must be array, vector, map, or string".into(), span: f.iter.span});
+                    }
+                } else {
+                    let v = self.codegen_expr(&f.iter)?;
+                    let vt: BasicTypeEnum<'ctx> = v.get_type();
+                    let tmp = self.create_entry_block_alloca(&format!("__for_iter_{}", f.var), vt);
+                    self.builder.build_store(tmp, v).unwrap();
+                    if vt.is_array_type() {
+                        (tmp, vt, ForIterKind::Array)
+                    } else if vt.is_pointer_type() {
+                        (tmp, vt, ForIterKind::Str)
+                    } else if vt.is_struct_type() {
+                        // Vec is `{buf, len}` (2 fields), map is
+                        // `{keys, vals, len}` (3 fields).
+                        match vt.into_struct_type().count_fields() {
+                            3 => (tmp, vt, ForIterKind::Map),
+                            2 => (tmp, vt, ForIterKind::Vec),
+                            _ => return Err(CodegenError{message: "`for` iterable must be array, vector, map, or string".into(), span: f.iter.span}),
+                        }
+                    } else {
+                        return Err(CodegenError{message: "`for` iterable must be array, vector, map, or string".into(), span: f.iter.span});
+                    }
+                };
                 let cond_bb = self.context.append_basic_block(func, "for.cond");
                 let body_bb = self.context.append_basic_block(func, "for.body");
                 let inc_bb = self.context.append_basic_block(func, "for.inc");
@@ -5365,30 +5407,20 @@ impl<'ctx> Codegen<'ctx> {
                 let idx_ty = self.context.i64_type().as_basic_type_enum();
                 let idx_ptr = self.create_entry_block_alloca(&idx_name, idx_ty);
                 self.builder.build_store(idx_ptr, self.context.i64_type().const_int(0, false)).unwrap();
-                // Determine array to iterate: for now require iter is Ident array variable
+                // Determine array to iterate: resolved above (direct slot for
+                // `Ident`, temp slot otherwise).
                 // Array length comes from the actual LLVM array type (fixed
                 // `arr[N]` uses N; legacy `T[]` uses 16). Vectors iterate to
                 // their loaded length. Maps iterate over their keys.
-                let (iter_len_const, iter_is_vec, iter_is_map): (Option<u64>, bool, bool) = if let ExprKind::Ident(ref arr_name) = f.iter.kind {
-                    if let Some((_, arr_ty)) = self.lookup_var(arr_name) {
-                        if self.is_vec_var(arr_name) && arr_ty.is_struct_type() {
-                            (None, true, false)
-                        } else if self.is_map_var(arr_name) && arr_ty.is_struct_type() {
-                            (None, false, true)
-                        } else if arr_ty.is_array_type() {
-                            (Some(arr_ty.into_array_type().len() as u64), false, false)
-                        } else {
-                            (Some(16), false, false)
-                        }
-                    } else {
-                        (Some(16), false, false)
-                    }
-                } else {
-                    (Some(16), false, false)
+                let iter_is_vec = matches!(iter_kind, ForIterKind::Vec);
+                let iter_is_map = matches!(iter_kind, ForIterKind::Map);
+                let iter_len_const: Option<u64> = match iter_kind {
+                    ForIterKind::Array => Some(iter_ty.into_array_type().len() as u64),
+                    _ => None,
                 };
                 // Strings iterate to their loaded length (strlen), not a
                 // hardcoded size.
-                let iter_is_str_here = matches!(&f.iter.kind, ExprKind::Ident(n) if self.is_string_var(n));
+                let iter_is_str_here = matches!(iter_kind, ForIterKind::Str);
                 // Create initial branch to cond
                 self.builder.build_unconditional_branch(cond_bb).unwrap();
                 self.builder.position_at_end(cond_bb);
@@ -5397,33 +5429,13 @@ impl<'ctx> Codegen<'ctx> {
                 // Maps iterate over keys up to the loaded length. Strings
                 // iterate to their loaded length (strlen).
                 let limit = if iter_is_str_here {
-                    if let ExprKind::Ident(ref arr_name) = f.iter.kind {
-                        if let Some((arr_ptr, arr_ty)) = self.lookup_var(arr_name) {
-                            let sptr = self.builder.build_load(arr_ty, arr_ptr, "for.str.ptr").unwrap().into_pointer_value();
-                            let call = self.builder.build_call(self.get_or_declare_strlen(), &[sptr.into()], "for.str.len").unwrap();
-                            call.try_as_basic_value().basic().unwrap().into_int_value()
-                        } else {
-                            self.context.i64_type().const_int(16, false)
-                        }
-                    } else {
-                        self.context.i64_type().const_int(16, false)
-                    }
+                    let sptr = self.builder.build_load(iter_ty, iter_ptr, "for.str.ptr").unwrap().into_pointer_value();
+                    let call = self.builder.build_call(self.get_or_declare_strlen(), &[sptr.into()], "for.str.len").unwrap();
+                    call.try_as_basic_value().basic().unwrap().into_int_value()
                 } else if iter_is_vec || iter_is_map {
-                    if let ExprKind::Ident(ref arr_name) = f.iter.kind {
-                        if let Some((arr_ptr, arr_ty)) = self.lookup_var(arr_name) {
-                            if arr_ty.is_struct_type() {
-                                let vec_st = arr_ty.into_struct_type();
-                                let len_ptr = self.builder.build_struct_gep(vec_st, arr_ptr, if iter_is_map { 2 } else { 1 }, "for.iter.len.ptr").unwrap();
-                                self.builder.build_load(self.context.i64_type(), len_ptr, "for.iter.len").unwrap().into_int_value()
-                            } else {
-                                self.context.i64_type().const_int(16, false)
-                            }
-                        } else {
-                            self.context.i64_type().const_int(16, false)
-                        }
-                    } else {
-                        self.context.i64_type().const_int(16, false)
-                    }
+                    let vec_st = iter_ty.into_struct_type();
+                    let len_ptr = self.builder.build_struct_gep(vec_st, iter_ptr, if iter_is_map { 2 } else { 1 }, "for.iter.len.ptr").unwrap();
+                    self.builder.build_load(self.context.i64_type(), len_ptr, "for.iter.len").unwrap().into_int_value()
                 } else {
                     self.context.i64_type().const_int(iter_len_const.unwrap_or(16), false)
                 };
@@ -5431,21 +5443,17 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.build_conditional_branch(cond, body_bb, exit_bb).unwrap();
                 self.loop_stack.push(LoopContext{cond_bb: inc_bb, exit_bb, label: f.label.clone(), defer_depth: self.defer_stack.len()});
                 self.builder.position_at_end(body_bb);
-                // Load element: arr[idx]
-                // Resolve array var from iter: expect Ident
-                let iter_val_opt: Option<(PointerValue<'ctx>, BasicTypeEnum<'ctx>)> = if let ExprKind::Ident(ref arr_name) = f.iter.kind {
-                    self.lookup_var(arr_name)
-                } else { None };
+                // Load element from the resolved iterable slot.
                 // Create loop scope for var
                 self.vars.push(HashMap::new());
                 self.defer_stack.push(Vec::new());
                 self.scope_dtors.push(Vec::new());
                 // Declare for var in this scope
-                // If iter is array, element type is int
-                let iter_is_vec_here = matches!(&f.iter.kind, ExprKind::Ident(n) if self.is_vec_var(n));
-                let iter_is_map_here = matches!(&f.iter.kind, ExprKind::Ident(n) if self.is_map_var(n));
-                let elem_val: Option<BasicValueEnum<'ctx>> = if let Some((arr_ptr, arr_ty)) = iter_val_opt {
-                    if arr_ty.is_array_type() {
+                let iter_is_vec_here = iter_is_vec;
+                let iter_is_map_here = iter_is_map;
+                let arr_ty = iter_ty;
+                let arr_ptr = iter_ptr;
+                let elem_val: Option<BasicValueEnum<'ctx>> = if arr_ty.is_array_type() {
                         let arr_ty_a = arr_ty.into_array_type();
                         let elem_ptr = unsafe { self.builder.build_gep(arr_ty_a, arr_ptr, &[self.context.i64_type().const_int(0,false), idx_val], "for.elem.ptr").unwrap() };
                         let elem_ty = arr_ty_a.get_element_type();
@@ -5471,11 +5479,7 @@ impl<'ctx> Codegen<'ctx> {
                         let elem_ptr = unsafe { self.builder.build_gep(self.context.i8_type(), loaded_arr, &[idx_val], "for.str.elem").unwrap() };
                         let ch = self.builder.build_load(self.context.i8_type(), elem_ptr, "for.str.ch").unwrap().into_int_value();
                         Some(self.builder.build_int_z_extend(ch, self.context.i32_type(), "for.elem").unwrap().into())
-                    } else { None }
-                } else {
-                    // For non-ident iter (e.g., string), try to codegen iter as pointer? For now fallback to 0
-                    None
-                };
+                    } else { None };
                 if let Some(v) = elem_val {
                     let elem_ty = v.get_type();
                     let var_ptr = self.create_entry_block_alloca(&f.var, elem_ty);
@@ -5491,23 +5495,17 @@ impl<'ctx> Codegen<'ctx> {
                 // vectors and strings; the value for maps.
                 if let Some((v2, _)) = &f.var2 {
                     if iter_is_map_here {
-                        if let ExprKind::Ident(ref arr_name) = f.iter.kind {
-                            if let Some((arr_ptr, arr_ty)) = self.lookup_var(arr_name) {
-                                if arr_ty.is_struct_type() {
-                                    let map_st = arr_ty.into_struct_type();
-                                    let vals_ptr = self.builder.build_struct_gep(map_st, arr_ptr, 1, "for.map.vals").unwrap();
-                                    if let BasicTypeEnum::ArrayType(vals_arr_ty) = map_st.get_field_type_at_index(1).unwrap() {
-                                        let val_elem_ty = vals_arr_ty.get_element_type();
-                                        let vptr = unsafe {
-                                            self.builder.build_gep(vals_arr_ty, vals_ptr, &[self.context.i64_type().const_int(0, false), idx_val], "for.map.val.ptr").unwrap()
-                                        };
-                                        let vv = self.builder.build_load(val_elem_ty, vptr, "for.map.val").unwrap();
-                                        let v2_ptr = self.create_entry_block_alloca(v2, val_elem_ty);
-                                        self.builder.build_store(v2_ptr, vv).unwrap();
-                                        self.vars.last_mut().unwrap().insert(v2.clone(), (v2_ptr, val_elem_ty));
-                                    }
-                                }
-                            }
+                        let map_st = iter_ty.into_struct_type();
+                        let vals_ptr = self.builder.build_struct_gep(map_st, iter_ptr, 1, "for.map.vals").unwrap();
+                        if let BasicTypeEnum::ArrayType(vals_arr_ty) = map_st.get_field_type_at_index(1).unwrap() {
+                            let val_elem_ty = vals_arr_ty.get_element_type();
+                            let vptr = unsafe {
+                                self.builder.build_gep(vals_arr_ty, vals_ptr, &[self.context.i64_type().const_int(0, false), idx_val], "for.map.val.ptr").unwrap()
+                            };
+                            let vv = self.builder.build_load(val_elem_ty, vptr, "for.map.val").unwrap();
+                            let v2_ptr = self.create_entry_block_alloca(v2, val_elem_ty);
+                            self.builder.build_store(v2_ptr, vv).unwrap();
+                            self.vars.last_mut().unwrap().insert(v2.clone(), (v2_ptr, val_elem_ty));
                         }
                     } else {
                         let i64_ty = self.context.i64_type().into();
