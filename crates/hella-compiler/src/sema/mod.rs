@@ -4895,9 +4895,133 @@ pub struct CheckOptions {
     /// `true` for CLI builds; the LSP sets it only for `main.hll`.
     pub require_main: bool,
 }
-
 impl Default for CheckOptions {
     fn default() -> Self {
         Self { require_main: true }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check_src(src: &str) -> Vec<SemError> {
+        let lexed = crate::lexer::lex(src);
+        assert!(lexed.errors.is_empty(), "lex errors: {:?}", lexed.errors);
+        let prog = crate::parse::parse(lexed.tokens, src.to_string()).unwrap();
+        check(&prog)
+    }
+
+    fn assert_clean(src: &str) {
+        let errors = check_src(src);
+        assert!(errors.is_empty(), "expected no errors, got: {:?}", errors.iter().map(|e| &e.message).collect::<Vec<_>>());
+    }
+
+    fn assert_error_contains(src: &str, needle: &str) {
+        let errors = check_src(src);
+        assert!(
+            errors.iter().any(|e| e.message.contains(needle)),
+            "expected error containing `{needle}`, got: {:?}",
+            errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// T-16: generic bounds enforced at struct instantiation.
+    #[test]
+    fn generic_struct_where_enforced() {
+        assert_clean("struct Box<T> where T: int has\nT value\nend\nvoid show(Box<int> b) do\nend\nvoid main() do\nend\n");
+        assert_error_contains(
+            "struct Box<T> where T: int has\nT value\nend\nvoid show(Box<string> b) do\nend\nvoid main() do\nend\n",
+            "where bound failed",
+        );
+    }
+
+    /// T-16: non-generic types reject type arguments.
+    #[test]
+    fn non_generic_type_rejects_args() {
+        assert_error_contains(
+            "struct Plain has\nint value\nend\nvoid show(Plain<int> p) do\nend\nvoid main() do\nend\n",
+            "is not generic",
+        );
+    }
+
+    /// T-16: `where` subjects must name the declaration's generic params.
+    #[test]
+    fn where_subject_must_be_param() {
+        assert_error_contains(
+            "struct Weird<T> where U: int has\nT value\nend\nvoid main() do\nend\n",
+            "not a generic parameter",
+        );
+    }
+
+    /// T-12: generic trait bounds enforced on `implements Trait<Args>`.
+    #[test]
+    fn generic_trait_implements_enforced() {
+        assert_clean("trait Box<T> where T: int has\nT fetch()\nend\nclass IntBox implements Box<int> has\nint v\nIntBox(int v) initialize\nint fetch() do\nreturn this.v\nend\nend\nvoid main() do\nend\n");
+        assert_error_contains(
+            "trait Box<T> where T: int has\nT fetch()\nend\nclass StrBox implements Box<string> has\nstring v\nStrBox(string v) initialize\nstring fetch() do\nreturn this.v\nend\nend\nvoid main() do\nend\n",
+            "where bound failed",
+        );
+    }
+
+    /// T-11: defaulted params must be trailing; defaults type-checked.
+    #[test]
+    fn param_default_definition_checks() {
+        assert_clean("int add(int a, int b = 10) do\nreturn a + b\nend\nvoid main() do\nend\n");
+        assert_error_contains(
+            "int add(int a = 1, int b) do\nreturn a + b\nend\nvoid main() do\nend\n",
+            "follows a defaulted parameter",
+        );
+        assert_error_contains(
+            "int add(int a, int b = \"x\") do\nreturn a + b\nend\nvoid main() do\nend\n",
+            "default for `b`",
+        );
+    }
+
+    /// T-11: omitted trailing defaulted args accepted; missing required args rejected.
+    #[test]
+    fn param_default_call_arity() {
+        assert_clean("int add(int a, int b = 10) do\nreturn a + b\nend\nvoid main() do\nint x = add(1)\nend\n");
+        assert_error_contains(
+            "int add(int a, int b) do\nreturn a + b\nend\nvoid main() do\nint x = add(1)\nend\n",
+            "expects 2 args, found 1",
+        );
+    }
+
+    /// T-17: exhaustive enum match; qualified variants resolve.
+    #[test]
+    fn enum_match_exhaustive() {
+        assert_clean("enum E has\nA\nB\nend\nvoid use(E e) do\nmatch e do\nE.A -> 1\nE.B -> 2\n_ -> 3\nend\nend\nvoid main() do\nend\n");
+        assert_error_contains(
+            "enum Color has\nRed\nGreen\nBlue\nend\nvoid use(Color c) do\nmatch c do\nColor.Red -> 1\nColor.Green -> 2\nend\nend\nvoid main() do\nend\n",
+            "non-exhaustive match on enum `Color`",
+        );
+    }
+
+    /// Own-P1-5: `new` on a trait is rejected.
+    #[test]
+    fn new_trait_rejected() {
+        assert_error_contains(
+            "trait Speaker has\nstring speak()\nend\nvoid main() do\nown Speaker s = new Speaker()\nend\n",
+            "cannot `new` trait",
+        );
+    }
+
+    /// Own-P1-7: `own` types rejected at the `extern` boundary.
+    #[test]
+    fn extern_own_rejected() {
+        assert_error_contains(
+            "open class User has\nUser() initialize\nend\nextern \"c\" from \"libc\" do\nown User make()\nend\nvoid main() do\nend\n",
+            "cannot return `own` type",
+        );
+    }
+
+    /// Own-P1-2: bare `new` in `defer` is a leak.
+    #[test]
+    fn defer_bare_new_rejected() {
+        assert_error_contains(
+            "open class User has\nUser() initialize\nend\nvoid main() do\ndefer new User()\nend\n",
+            "guaranteed leak",
+        );
     }
 }
