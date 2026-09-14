@@ -5899,26 +5899,29 @@ impl<'ctx> Codegen<'ctx> {
                         )
                         .unwrap()
                         .into(),
-                    BinOp::Is => self
-                        .builder
-                        .build_int_compare(
-                            IntPredicate::EQ,
-                            l.into_int_value(),
-                            r.into_int_value(),
-                            "is",
-                        )
-                        .unwrap()
-                        .into(),
-                    BinOp::IsNot => self
-                        .builder
-                        .build_int_compare(
-                            IntPredicate::NE,
-                            l.into_int_value(),
-                            r.into_int_value(),
-                            "isnot",
-                        )
-                        .unwrap()
-                        .into(),
+                    BinOp::Is => {
+                        // `own` pairs lower to `{data ptr, tag}` structs: identity is data-ptr equality.
+                        if l.is_struct_value() && r.is_struct_value() {
+                            let lptr = self.builder.build_extract_value(l.into_struct_value(), 0, "is.ldata").unwrap().into_pointer_value();
+                            let rptr = self.builder.build_extract_value(r.into_struct_value(), 0, "is.rdata").unwrap().into_pointer_value();
+                            let li = self.builder.build_ptr_to_int(lptr, self.context.i64_type(), "is.li").unwrap();
+                            let ri = self.builder.build_ptr_to_int(rptr, self.context.i64_type(), "is.ri").unwrap();
+                            self.builder.build_int_compare(IntPredicate::EQ, li, ri, "is").unwrap().into()
+                        } else {
+                            self.builder.build_int_compare(IntPredicate::EQ, l.into_int_value(), r.into_int_value(), "is").unwrap().into()
+                        }
+                    }
+                    BinOp::IsNot => {
+                        if l.is_struct_value() && r.is_struct_value() {
+                            let lptr = self.builder.build_extract_value(l.into_struct_value(), 0, "isnot.ldata").unwrap().into_pointer_value();
+                            let rptr = self.builder.build_extract_value(r.into_struct_value(), 0, "isnot.rdata").unwrap().into_pointer_value();
+                            let li = self.builder.build_ptr_to_int(lptr, self.context.i64_type(), "isnot.li").unwrap();
+                            let ri = self.builder.build_ptr_to_int(rptr, self.context.i64_type(), "isnot.ri").unwrap();
+                            self.builder.build_int_compare(IntPredicate::NE, li, ri, "isnot").unwrap().into()
+                        } else {
+                            self.builder.build_int_compare(IntPredicate::NE, l.into_int_value(), r.into_int_value(), "isnot").unwrap().into()
+                        }
+                    }
                     BinOp::And => self
                         .builder
                         .build_and(

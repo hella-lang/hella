@@ -449,6 +449,17 @@ impl Checker {
         }
     }
 
+    /// A `new` with no owner: `New` possibly wrapped in parentheses.
+    /// Such a value in statement/condition position is a guaranteed leak —
+    /// nothing takes ownership (no `own` slot, no call-arg boundary, no delete).
+    fn is_bare_new(expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::New { .. } => true,
+            ExprKind::Paren(e) => Self::is_bare_new(e),
+            _ => false,
+        }
+    }
+
     /// Poison every own-typed variable named in value-forwarding position
     /// within `expr` (a move into an `own` slot transfers ownership out of
     /// each of them; untaken branches merely leak, never dangle).
@@ -2252,7 +2263,7 @@ impl Checker {
             }
             Stmt::Expr(e) => {
                 let _ = self.check_expr(&e.expr);
-                if matches!(e.expr.kind, ExprKind::New { .. }) {
+                if Self::is_bare_new(&e.expr) {
                     self.errors.push(SemError{
                         message: "unused `new` value is a guaranteed leak — assign it to an `own` slot or delete it".into(),
                         span: e.expr.span,
@@ -2286,6 +2297,12 @@ impl Checker {
             }
             Stmt::If(s) => {
                 let cond_ty = self.check_expr(&s.cond);
+                if Self::is_bare_new(&s.cond) {
+                    self.errors.push(SemError{
+                        message: "unused `new` value is a guaranteed leak — assign it to an `own` slot or delete it".into(),
+                        span: s.cond.span,
+                    });
+                }
                 if cond_ty != Ty::Bool {
                     self.errors.push(SemError {
                         message: format!(
@@ -2304,6 +2321,12 @@ impl Checker {
             }
             Stmt::While(s) => {
                 let cond_ty = self.check_expr(&s.cond);
+                if Self::is_bare_new(&s.cond) {
+                    self.errors.push(SemError{
+                        message: "unused `new` value is a guaranteed leak — assign it to an `own` slot or delete it".into(),
+                        span: s.cond.span,
+                    });
+                }
                 if cond_ty != Ty::Bool {
                     self.errors.push(SemError{message: format!("`while` condition must be `bool`, found `{cond_ty}`"), span: s.cond.span});
                 }
@@ -2320,6 +2343,12 @@ impl Checker {
             }
             Stmt::For(f) => {
                 let iter_ty = self.check_expr(&f.iter);
+                if Self::is_bare_new(&f.iter) {
+                    self.errors.push(SemError{
+                        message: "unused `new` value is a guaranteed leak — assign it to an `own` slot or delete it".into(),
+                        span: f.iter.span,
+                    });
+                }
                 let elem_ty = match &iter_ty {
                     Ty::Array(el) => (**el).clone(),
                     Ty::FixedArray { elem, .. } => (**elem).clone(),
@@ -2362,7 +2391,15 @@ impl Checker {
             }
             Stmt::Defer(d) => {
                 match &d.inner {
-                    DeferInner::Expr(e) => { let _ = self.check_expr(e); },
+                    DeferInner::Expr(e) => {
+                        let _ = self.check_expr(e);
+                        if Self::is_bare_new(e) {
+                            self.errors.push(SemError{
+                                message: "unused `new` value is a guaranteed leak — assign it to an `own` slot or delete it".into(),
+                                span: e.span,
+                            });
+                        }
+                    },
                     DeferInner::Block(b) => { let _ = self.check_block(b, ret_ty); },
                 }
                 false
@@ -2615,7 +2652,11 @@ impl Checker {
                         Ty::Array(Box::new(Ty::Int))
                     }
                     BinOp::Is | BinOp::IsNot => {
-                        if lt != rt {
+                        // `own` identity: compare data pointers, not structure.
+                        // Allow `own T is own U` (any inner) and `own is null`.
+                        let own_pair = matches!(&lt, Ty::Own(_)) && (matches!(&rt, Ty::Own(_)) || matches!(&rt, Ty::Any));
+                        let own_pair_rev = matches!(&rt, Ty::Own(_)) && matches!(&lt, Ty::Any);
+                        if !(own_pair || own_pair_rev) && lt != rt {
                             self.errors.push(SemError{message: format!("`is` requires matching types, found `{lt}` and `{rt}`"), span: expr.span});
                         }
                         Ty::Bool
@@ -3691,7 +3732,12 @@ impl Checker {
             ExprKind::New { ty, args, .. } => {
                 let inner = self.resolve_type(ty);
                 match &inner {
-                    Ty::Struct(n) if self.structs.contains_key(n) || self.classes.contains_key(n) || self.traits.contains_key(n) => {},
+                    Ty::Struct(n) if self.structs.contains_key(n) || self.classes.contains_key(n) => {},
+                    Ty::Struct(n) if self.traits.contains_key(n) => {
+                        self.errors.push(SemError{message: format!("cannot `new` trait `{n}` (traits have no constructor; construct a concrete class instead)"), span: expr.span});
+                        for a in args { let _ = self.check_call_arg(a); }
+                        return Ty::Own(Box::new(inner));
+                    }
                     other => {
                         self.errors.push(SemError{message: format!("`new` requires a class, struct, or trait type, found `{other}`"), span: expr.span});
                         for a in args { let _ = self.check_call_arg(a); }
