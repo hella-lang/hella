@@ -5989,6 +5989,12 @@ impl<'ctx> Codegen<'ctx> {
                         let (ptr, ty) = self.lookup_var("this").ok_or(CodegenError{message: "`this` outside method".into(), span: expr.span})?;
                         self.builder.build_load(ty, ptr, "this.load").unwrap().into_pointer_value()
                     }
+                    ExprKind::Super => {
+                        // Same object as `this`; dispatch resolves to the
+                        // parent implementation via `infer_expr_ty`.
+                        let (ptr, ty) = self.lookup_var("this").ok_or(CodegenError{message: "`super` outside method".into(), span: expr.span})?;
+                        self.builder.build_load(ty, ptr, "this.load").unwrap().into_pointer_value()
+                    }
                     ExprKind::MemberAccess{object: inner, field, ..} => {
                         // a.b.method() where a.b is struct field that is class instance
                         let field_ptr = self.codegen_field_ptr(inner, field)?;
@@ -8192,9 +8198,18 @@ impl<'ctx> Codegen<'ctx> {
                 }
                 Err(CodegenError{message: format!("cannot infer type of {name}"), span: expr.span})
             }
-            ExprKind::This | ExprKind::Super => {
+            ExprKind::This => {
                 if let Some(cls) = &self.cur_class { return Ok(crate::sema::Ty::Struct(cls.clone())); }
-                Err(CodegenError{message: "`this`/`super` outside method".into(), span: expr.span})
+                Err(CodegenError{message: "`this` outside method".into(), span: expr.span})
+            }
+            ExprKind::Super => {
+                if let Some(cls) = &self.cur_class {
+                    if let Some(parent) = self.class_extends.get(cls).cloned() {
+                        return Ok(crate::sema::Ty::Struct(parent));
+                    }
+                    return Err(CodegenError{message: "`super` without parent".into(), span: expr.span});
+                }
+                Err(CodegenError{message: "`super` outside method".into(), span: expr.span})
             }
             ExprKind::MemberAccess { object, field, .. } => {
                 let obj_ty = self.infer_expr_ty(object)?;
@@ -8561,6 +8576,15 @@ mod tests {
     fn optional_coalesce_verifies() {
         compile_src(
             "int orElse(int? n, int fallback) do\n  return n ?? fallback\nend\nvoid main() do\n  int? a = 5\n  int x = orElse(a, 99)\nend\n",
+        );
+    }
+
+    /// T-7: `super.method()` dispatches to the parent implementation and
+    /// expression-`Self` behaves as `this`.
+    #[test]
+    fn super_and_self_verifies() {
+        compile_src(
+            "open class Base has\n  public int v\n  Base(int v) initialize\n  public int getv() do\n    return this.v\n  end\nend\nopen class Child extends Base has\n  Child(int v) initialize\n  public override int getv() do\n    return super.getv() + 1\n  end\n  public int viagetv() do\n    return Self.getv()\n  end\nend\nvoid main() do\n  Child c = Child(10)\nend\n",
         );
     }
 

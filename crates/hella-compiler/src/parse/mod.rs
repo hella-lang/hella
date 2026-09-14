@@ -3228,8 +3228,9 @@ impl Parser {
             }
             Token::SelfType => {
                 self.advance();
-                // `Self` as expression — treat as Ident "Self" for type context, or Super-like
-                Ok(Expr{kind: ExprKind::Ident("Self".to_string()), span: st.span})
+                // Expression-position `Self` is the current instance
+                // (EBNF §38 special-name), exactly like `this`.
+                Ok(Expr{kind: ExprKind::This, span: st.span})
             }
             Token::Null => {
                 self.advance();
