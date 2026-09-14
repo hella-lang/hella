@@ -3330,30 +3330,17 @@ impl<'ctx> Codegen<'ctx> {
             }
             _ => {
                 let v = self.codegen_call_arg(arg)?;
-                // Move from `own` source: null the source slot so its
-                // scope destroy becomes a no-op (sema poisoned it).
+                // Move from `own` source: null the source slot(s) so their
+                // scope destroy becomes a no-op (sema poisoned them).
+                // Transparent through `?:`/parens/match arms.
                 if let Some(crate::sema::Ty::Own(_)) = info.params.get(param_idx) {
-                    let src_name: Option<String> = match arg {
-                        CallArg::Expr(e) => match &e.kind {
-                            ExprKind::Ident(n) => Some(n.clone()),
-                            _ => None,
-                        },
-                        CallArg::Named { value, .. } => match &value.kind {
-                            ExprKind::Ident(n) => Some(n.clone()),
-                            _ => None,
-                        },
+                    let src_expr: Option<&Expr> = match arg {
+                        CallArg::Expr(e) => Some(e),
+                        CallArg::Named { value, .. } => Some(value),
                         _ => None,
                     };
-                    if let Some(name) = src_name {
-                        let lookup = name.rsplit("::").next().unwrap_or(&name).to_string();
-                        if let Some((ptr, ty)) = self.lookup_var(&name).or_else(|| self.lookup_var(&lookup)) {
-                            if ty.is_struct_type() {
-                                let st = ty.into_struct_type();
-                                if self.pair_owner_of(st).is_some() {
-                                    self.builder.build_store(ptr, ty.const_zero()).unwrap();
-                                }
-                            }
-                        }
+                    if let Some(e) = src_expr {
+                        self.null_moved_sources(e, None);
                     }
                 }
                 let v = self.box_arg_for_param(v, info, param_idx, arg.span())?;
@@ -3791,18 +3778,7 @@ impl<'ctx> Codegen<'ctx> {
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
                     // Track `own` params for destruction at function exit.
-                    if let Type::Own(inner, _) = &param.ty {
-                        let inner_name = match inner.as_ref() {
-                            Type::Named(n, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
-                            Type::Generic(n, _, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
-                            _ => String::new(),
-                        };
-                        if !inner_name.is_empty() {
-                            if let Some(top) = self.own_slots.last_mut() {
-                                top.push((alloca, inner_name));
-                            }
-                        }
-                    }
+                    self.track_own_param(alloca, &param.ty);
                 }
             }
 
@@ -4010,6 +3986,7 @@ impl<'ctx> Codegen<'ctx> {
         let entry = self.context.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
         self.vars.push(HashMap::new());
+        self.own_slots.push(Vec::new());
         let this_ty: BasicTypeEnum<'ctx> = self.context.ptr_type(inkwell::AddressSpace::default()).into();
         let this_param = func.get_nth_param(0).unwrap();
         let this_alloca = self.create_entry_block_alloca("this", this_ty);
@@ -4052,6 +4029,7 @@ impl<'ctx> Codegen<'ctx> {
                 let alloca = self.create_entry_block_alloca(&param.name, llvm_ty);
                 self.builder.build_store(alloca, param_val).unwrap();
                 self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, llvm_ty));
+                self.track_own_param(alloca, &param.ty);
             }
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
@@ -4059,11 +4037,15 @@ impl<'ctx> Codegen<'ctx> {
         }
         let always_returns = self.codegen_block(&method.body)?;
         if !always_returns && self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+            // Destroy owned params still live at fall-through exit (early
+            // `return` already ran `emit_all_owns`).
+            self.emit_current_scope_owns();
             match self.default_return_value(&info.ret) {
                 Some(zero) => { self.builder.build_return(Some(&zero)).unwrap(); }
                 None => { self.builder.build_return(None).unwrap(); }
             }
         }
+        self.own_slots.pop();
         self.vars.pop();
         self.cur_fn = None;
         self.cur_class = None;
@@ -4081,6 +4063,7 @@ impl<'ctx> Codegen<'ctx> {
         let entry = self.context.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
         self.vars.push(HashMap::new());
+        self.own_slots.push(Vec::new());
         let this_ty: BasicTypeEnum<'ctx> = self.context.ptr_type(inkwell::AddressSpace::default()).into();
         let this_param = func.get_nth_param(0).unwrap();
         let this_alloca = self.create_entry_block_alloca("this", this_ty);
@@ -4120,6 +4103,7 @@ impl<'ctx> Codegen<'ctx> {
                 let alloca = self.create_entry_block_alloca(&param.name, llvm_ty);
                 self.builder.build_store(alloca, val).unwrap();
                 self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, llvm_ty));
+                self.track_own_param(alloca, &param.ty);
             }
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
@@ -4145,8 +4129,10 @@ impl<'ctx> Codegen<'ctx> {
             let _ = self.codegen_block(body)?;
         }
         if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+            self.emit_current_scope_owns();
             self.builder.build_return(None).unwrap();
         }
+        self.own_slots.pop();
         self.vars.pop();
         self.cur_fn = None;
         self.cur_class = None;
@@ -4288,6 +4274,78 @@ impl<'ctx> Codegen<'ctx> {
         for scope in owned.iter().rev() {
             for (ptr, inner) in scope.iter().rev() {
                 self.emit_own_destroy(*ptr, inner);
+            }
+        }
+    }
+
+    /// Null every `own` slot named in value-forwarding position within `expr`
+    /// (a move into an `own` slot transfers ownership out of each of them).
+    /// Mirrors `sema::Checker::moved_ident_names`: transparent through
+    /// parentheses, conditional branches, and match arm bodies; stops at
+    /// calls, member access, and closures. Nulling is unconditional, hence
+    /// leak-leaning for untaken branches (sema poisoned every named source,
+    /// so none of them can be read afterwards) — but the taken branch never
+    /// double-frees. `except` skips one variable (self-assignment guard).
+    fn null_moved_sources(&mut self, expr: &Expr, except: Option<&str>) {
+        let mut names = Vec::new();
+        Self::collect_moved_names(expr, &mut names);
+        for name in names {
+            if Some(name.as_str()) == except {
+                continue;
+            }
+            let lookup = name.rsplit("::").next().unwrap_or(&name);
+            if let Some((ptr, ty)) = self.lookup_var(&name).or_else(|| self.lookup_var(lookup)) {
+                if ty.is_struct_type() {
+                    let st = ty.into_struct_type();
+                    if self.pair_owner_of(st).is_some() {
+                        self.builder.build_store(ptr, ty.const_zero()).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Identifier names in transparent value-forwarding positions: the
+    /// expression itself, parentheses, conditional branches, and match arm
+    /// bodies. Must stay in sync with `sema::Checker::moved_ident_names`.
+    fn collect_moved_names(expr: &Expr, out: &mut Vec<String>) {
+        match &expr.kind {
+            ExprKind::Ident(n) => out.push(n.clone()),
+            ExprKind::Paren(e) => Self::collect_moved_names(e, out),
+            ExprKind::Conditional {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::collect_moved_names(then_branch, out);
+                Self::collect_moved_names(else_branch, out);
+            }
+            ExprKind::Match(m) => {
+                for arm in &m.arms {
+                    if let MatchArmBody::Expr(e) = &arm.body {
+                        Self::collect_moved_names(e, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Track an `own` parameter in the current (outermost) own-scope so an
+    /// early `return` (`emit_all_owns`) and the fall-through exit destroy it.
+    /// Callers must have pushed an outer scope first; `ref`/`out` params must
+    /// not be tracked (caller-owned). Mirrors the free-function prologue.
+    fn track_own_param(&mut self, alloca: PointerValue<'ctx>, ty: &Type) {
+        if let Type::Own(inner, _) = ty {
+            let inner_name = match inner.as_ref() {
+                Type::Named(n, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
+                Type::Generic(n, _, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
+                _ => String::new(),
+            };
+            if !inner_name.is_empty() {
+                if let Some(top) = self.own_slots.last_mut() {
+                    top.push((alloca, inner_name));
+                }
             }
         }
     }
@@ -4460,6 +4518,7 @@ impl<'ctx> Codegen<'ctx> {
         let entry = self.context.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
         self.vars.push(std::collections::HashMap::new());
+        self.own_slots.push(Vec::new());
         let this_ty: BasicTypeEnum<'ctx> = self.context.ptr_type(inkwell::AddressSpace::default()).into();
         let this_param = func.get_nth_param(0).unwrap();
         let this_alloca = self.create_entry_block_alloca("this", this_ty);
@@ -4477,6 +4536,7 @@ impl<'ctx> Codegen<'ctx> {
                 let alloca = self.create_entry_block_alloca(&param.name, llvm_ty);
                 self.builder.build_store(alloca, val).unwrap();
                 self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, llvm_ty));
+                self.track_own_param(alloca, &param.ty);
             }
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
@@ -4484,8 +4544,10 @@ impl<'ctx> Codegen<'ctx> {
         }
         let _ = self.codegen_block(&op.body)?;
         if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+            self.emit_current_scope_owns();
             self.builder.build_return(Some(&self.context.i64_type().const_int(0,false))).unwrap();
         }
+        self.own_slots.pop();
         self.vars.pop();
         self.cur_fn = None;
         self.cur_class = None;
@@ -4827,20 +4889,12 @@ impl<'ctx> Codegen<'ctx> {
                         let val = self.box_trait_value(val, ty, d.span)?;
                         let coerced = self.coerce_to_ty(val, ty);
                         self.builder.build_store(alloca, coerced).unwrap();
-                        // Move from `own` source: null the source slot so its
+                        // Move from `own` source: null the source slot(s) so their
                         // scope destroy becomes a no-op (poison is checked in sema).
+                        // Transparent through `?:`/parens/match arms (see
+                        // `null_moved_sources`); untaken branches merely leak.
                         if let Type::Own(_, _) = &d.ty {
-                            if let ExprKind::Ident(name) = &init.kind {
-                                let lookup = name.rsplit("::").next().unwrap_or(name);
-                                if let Some((ptr, ty)) = self.lookup_var(name).or_else(|| self.lookup_var(lookup)) {
-                                    if ty.is_struct_type() {
-                                        let st = ty.into_struct_type();
-                                        if self.pair_owner_of(st).is_some() {
-                                            self.builder.build_store(ptr, ty.const_zero()).unwrap();
-                                        }
-                                    }
-                                }
-                            }
+                            self.null_moved_sources(init, None);
                         }
                     }
                 } else {
@@ -5166,22 +5220,13 @@ impl<'ctx> Codegen<'ctx> {
                     }
                 } else if let Some(expr) = &r.value {
                     let val = self.codegen_expr(expr)?;
-                    // Move from `own` source: null the source slot so its
-                    // scope destroy becomes a no-op (sema poisoned it).
-                    if let ExprKind::Ident(name) = &expr.kind {
-                        let lookup = name.rsplit("::").next().unwrap_or(name);
-                        if let Some((ptr, ty)) = self.lookup_var(name).or_else(|| self.lookup_var(lookup)) {
-                            if ty.is_struct_type() {
-                                let st = ty.into_struct_type();
-                                if self.pair_owner_of(st).is_some() {
-                                    if let Some(cur) = self.cur_fn {
-                                        if let Some(ret_ty) = cur.get_type().get_return_type() {
-                                            if ret_ty.is_struct_type() && self.pair_owner_of(ret_ty.into_struct_type()).is_some() {
-                                                self.builder.build_store(ptr, ty.const_zero()).unwrap();
-                                            }
-                                        }
-                                    }
-                                }
+                    // Move from `own` source: null the source slot(s) so their
+                    // scope destroy becomes a no-op (sema poisoned them).
+                    // Transparent through `?:`/parens/match arms.
+                    if let Some(cur) = self.cur_fn {
+                        if let Some(ret_ty) = cur.get_type().get_return_type() {
+                            if ret_ty.is_struct_type() && self.pair_owner_of(ret_ty.into_struct_type()).is_some() {
+                                self.null_moved_sources(expr, None);
                             }
                         }
                     }
@@ -5973,20 +6018,23 @@ impl<'ctx> Codegen<'ctx> {
             ExprKind::Conditional { cond, then_branch, else_branch } => {
                 let cond_val = self.codegen_expr(cond)?.into_int_value();
                 let func = self.cur_fn.unwrap();
-                // Allocate result slot in entry block before branching
-                let result_ty = self.context.i64_type();
-                let result_ptr = self.create_entry_block_alloca("cond.result", result_ty.into());
                 let then_bb = self.context.append_basic_block(func, "cond.then");
                 let else_bb = self.context.append_basic_block(func, "cond.else");
                 let merge_bb = self.context.append_basic_block(func, "cond.merge");
                 self.builder.build_conditional_branch(cond_val, then_bb, else_bb).unwrap();
+                // Evaluate the taken branch first to learn the result type
+                // (branch values may be `own` pairs or structs, not just
+                // ints), then materialize the entry-block result slot.
                 self.builder.position_at_end(then_bb);
                 let then_val = self.codegen_expr(then_branch)?;
+                let result_ty = then_val.get_type();
+                let result_ptr = self.create_entry_block_alloca("cond.result", result_ty);
                 self.builder.build_store(result_ptr, then_val).unwrap();
                 self.builder.build_unconditional_branch(merge_bb).unwrap();
                 self.builder.position_at_end(else_bb);
                 let else_val = self.codegen_expr(else_branch)?;
-                self.builder.build_store(result_ptr, else_val).unwrap();
+                let else_coerced = self.coerce_to_ty(else_val, result_ty);
+                self.builder.build_store(result_ptr, else_coerced).unwrap();
                 self.builder.build_unconditional_branch(merge_bb).unwrap();
                 self.builder.position_at_end(merge_bb);
                 Ok(self.builder.build_load(result_ty, result_ptr, "cond.result.load").unwrap())
@@ -6085,21 +6133,13 @@ impl<'ctx> Codegen<'ctx> {
                         let val = self.box_trait_value(val, dest_ty, expr.span)?;
                         let coerced = self.coerce_to_ty(val, dest_ty);
                         self.builder.build_store(ptr, coerced).unwrap();
-                        // Move from `own` source: null the source slot.
+                        // Move from `own` source: null the source slot(s).
+                        // Transparent through `?:`/parens/match arms; skips
+                        // the destination itself (self-assignment guard).
                         if dest_ty.is_struct_type() {
                             let st = dest_ty.into_struct_type();
                             if self.pair_owner_of(st).is_some() {
-                                if let ExprKind::Ident(src_name) = &value.kind {
-                                    let lookup = src_name.rsplit("::").next().unwrap_or(src_name);
-                                    if let Some((src_ptr, src_ty)) = self.lookup_var(src_name).or_else(|| self.lookup_var(lookup)) {
-                                        if src_ty.is_struct_type() {
-                                            let src_st = src_ty.into_struct_type();
-                                            if self.pair_owner_of(src_st).is_some() && src_name != name {
-                                                self.builder.build_store(src_ptr, src_ty.const_zero()).unwrap();
-                                            }
-                                        }
-                                    }
-                                }
+                                self.null_moved_sources(value, Some(name.as_str()));
                             }
                         }
                         Ok(coerced)
@@ -6855,22 +6895,44 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.position_at_end(entry);
                 self.cur_fn = Some(func);
                 self.vars.push(std::collections::HashMap::new());
+                self.own_slots.push(Vec::new());
                 for (i, p) in params.iter().enumerate() {
                     let llvm_ty = self.llvm_ty_for(&p.ty);
                     let alloca = self.create_entry_block_alloca(&p.name, llvm_ty);
                     let param_val = func.get_nth_param(i as u32).unwrap();
                     self.builder.build_store(alloca, param_val).unwrap();
                     self.vars.last_mut().unwrap().insert(p.name.clone(), (alloca, llvm_ty));
+                    self.track_own_param(alloca, &p.ty);
                 }
                 let ret_val = match body.as_ref() {
                     ClosureBody::Expr(e) => Some(self.codegen_expr(e)?),
                     ClosureBody::Block(b) => { let _ = self.codegen_block(b)?; None },
                 };
                 if let Some(v) = ret_val {
-                    self.builder.build_return(Some(&v)).unwrap();
+                    // Move-out: if the body is a bare `own` param, ownership
+                    // transfers to the caller — drop its slot without destroying.
+                    if let ClosureBody::Expr(e) = body.as_ref() {
+                        if let ExprKind::Ident(name) = &e.kind {
+                            if let Some((ptr, _)) = self.lookup_var(name) {
+                                if let Some(top) = self.own_slots.last_mut() {
+                                    if let Some(pos) = top.iter().position(|(p, _)| *p == ptr) {
+                                        top.remove(pos);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                        self.emit_current_scope_owns();
+                    }
+                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                        self.builder.build_return(Some(&v)).unwrap();
+                    }
                 } else if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                    self.emit_current_scope_owns();
                     self.builder.build_return(Some(&self.context.i64_type().const_int(0,false))).unwrap();
                 }
+                self.own_slots.pop();
                 self.vars.pop();
                 self.cur_fn = prev_fn;
                 if let Some(bb) = prev_block { self.builder.position_at_end(bb); }
