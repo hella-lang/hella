@@ -1941,8 +1941,12 @@ impl<'ctx> Codegen<'ctx> {
                 }
                 crate::ast::ExtensionMember::Conversion(conv) => {
                     let mangled = format!("{}__conv_{}_to_{}", target, conv.from_ty.name().replace("<","_").replace(">","_").replace(",","_"), conv.to_ty.name().replace("<","_").replace(">","_").replace(",","_"));
+                    // Type by declared target (see `codegen_conversion`).
+                    let to_sema: crate::sema::Ty = (&conv.to_ty).into();
+                    let to_resolved = self.resolve_ty_for_codegen(&to_sema);
+                    let ret_llvm: BasicTypeEnum<'ctx> = self.llvm_ty_for_sema(&to_resolved).unwrap_or_else(|| self.context.i64_type().into());
                     let func = self.module.get_function(&mangled).unwrap_or_else(|| {
-                        let fn_ty = self.context.i64_type().fn_type(&[self.context.ptr_type(inkwell::AddressSpace::default()).into()], false);
+                        let fn_ty = ret_llvm.fn_type(&[self.context.ptr_type(inkwell::AddressSpace::default()).into()], false);
                         self.module.add_function(&mangled, fn_ty, None)
                     });
                     self.cur_fn = Some(func);
@@ -1950,13 +1954,28 @@ impl<'ctx> Codegen<'ctx> {
                     let entry = self.context.append_basic_block(func, "entry");
                     self.builder.position_at_end(entry);
                     self.vars.push(HashMap::new());
+                    self.own_slots.push(Vec::new());
                     let this_ty: BasicTypeEnum<'ctx> = self.context.ptr_type(inkwell::AddressSpace::default()).into();
                     let this_param = func.get_nth_param(0).unwrap();
                     let this_alloca = self.create_entry_block_alloca("this", this_ty);
                     self.builder.build_store(this_alloca, this_param).unwrap();
                     self.vars.last_mut().unwrap().insert("this".to_string(), (this_alloca, this_ty));
                     let _ = self.codegen_block(&conv.body)?;
-                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() { self.builder.build_return(Some(&self.context.i64_type().const_int(0,false))).unwrap(); }
+                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                        self.emit_current_scope_owns();
+                        match self.default_return_value(&to_resolved) {
+                            Some(zero) => {
+                                let cz = self.coerce_to_ty(zero, ret_llvm);
+                                self.builder.build_return(Some(&cz)).unwrap();
+                            }
+                            None => {
+                                let z: BasicValueEnum<'ctx> = self.context.i64_type().const_zero().into();
+                                let cz = self.coerce_to_ty(z, ret_llvm);
+                                self.builder.build_return(Some(&cz)).unwrap();
+                            }
+                        }
+                    }
+                    self.own_slots.pop();
                     self.vars.pop();
                     self.cur_fn = None;
                     self.cur_class = None;
@@ -4681,8 +4700,12 @@ impl<'ctx> Codegen<'ctx> {
 
     fn codegen_conversion(&mut self, class: &ClassDecl, conv: &ConversionDecl) -> Result<(), CodegenError> {
         let mangled = format!("{}__conv_{}_to_{}", class.name, conv.from_ty.name().replace("<","_").replace(">","_").replace(",","_"), conv.to_ty.name().replace("<","_").replace(">","_").replace(",","_"));
+        // Type the function by its declared target type (previously a hardcoded `i64` stub).
+        let to_sema: crate::sema::Ty = (&conv.to_ty).into();
+        let to_resolved = self.resolve_ty_for_codegen(&to_sema);
+        let ret_llvm: BasicTypeEnum<'ctx> = self.llvm_ty_for_sema(&to_resolved).unwrap_or_else(|| self.context.i64_type().into());
         let func = self.module.get_function(&mangled).unwrap_or_else(|| {
-            let fn_ty = self.context.i64_type().fn_type(&[self.context.ptr_type(inkwell::AddressSpace::default()).into()], false);
+            let fn_ty = ret_llvm.fn_type(&[self.context.ptr_type(inkwell::AddressSpace::default()).into()], false);
             self.module.add_function(&mangled, fn_ty, None)
         });
         self.cur_fn = Some(func);
@@ -4690,6 +4713,7 @@ impl<'ctx> Codegen<'ctx> {
         let entry = self.context.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
         self.vars.push(std::collections::HashMap::new());
+        self.own_slots.push(Vec::new());
         let this_ty: BasicTypeEnum<'ctx> = self.context.ptr_type(inkwell::AddressSpace::default()).into();
         let this_param = func.get_nth_param(0).unwrap();
         let this_alloca = self.create_entry_block_alloca("this", this_ty);
@@ -4697,8 +4721,22 @@ impl<'ctx> Codegen<'ctx> {
         self.vars.last_mut().unwrap().insert("this".to_string(), (this_alloca, this_ty));
         let _ = self.codegen_block(&conv.body)?;
         if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
-            self.builder.build_return(Some(&self.context.i64_type().const_int(0,false))).unwrap();
+            self.emit_current_scope_owns();
+            // `void` targets have no LLVM value type (`llvm_ty_for_sema`
+            // yields `None` → `ret_llvm` fell back to `i64`); return zero.
+            match self.default_return_value(&to_resolved) {
+                Some(zero) => {
+                    let cz = self.coerce_to_ty(zero, ret_llvm);
+                    self.builder.build_return(Some(&cz)).unwrap();
+                }
+                None => {
+                    let z: BasicValueEnum<'ctx> = self.context.i64_type().const_zero().into();
+                    let cz = self.coerce_to_ty(z, ret_llvm);
+                    self.builder.build_return(Some(&cz)).unwrap();
+                }
+            }
         }
+        self.own_slots.pop();
         self.vars.pop();
         self.cur_fn = None;
         self.cur_class = None;
