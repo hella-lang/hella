@@ -53,6 +53,9 @@ pub struct Codegen<'ctx> {
     /// `codegen_block` scope (plus the manual `for`-var scope). Each entry
     /// is `(alloca, class_name)`.
     scope_dtors: Vec<Vec<(PointerValue<'ctx>, String)>>,
+    /// Owned heap slots per scope: `(alloca of pair, inner type name)`.
+    /// Destroyed (dtor + free) at scope exit with a null-data guard.
+    own_slots: Vec<Vec<(PointerValue<'ctx>, String)>>,
     cur_fn: Option<FunctionValue<'ctx>>,
     cur_is_main: bool,
     cur_class: Option<String>,
@@ -68,12 +71,13 @@ pub struct Codegen<'ctx> {
     /// tracked so `len()`/`is_empty()` lower instead of falling through to
     /// class-method resolution.
     string_vars: HashSet<String>,
-    /// Trait names declared in the program. Trait-typed slots lower to a
-    /// `{data ptr, type tag}` pair (trait objects, closed-world dispatch).
+    /// Trait names declared in the program (for trait-object lowering).
     trait_names: HashSet<String>,
-    /// Pair struct type per trait, created in the declare phase.
-    trait_obj_types: HashMap<String, StructType<'ctx>>,
-    /// Dynamic-type tag per class (assigned on demand, stable within a build).
+    /// `{data ptr, type tag}` pair struct type per named type that can
+    /// back an `own` slot or trait object (traits, classes, structs),
+    /// created in the declare phase.
+    pair_types: HashMap<String, StructType<'ctx>>,
+    /// Dynamic-type tag per class (stable within a build).
     class_tags: HashMap<String, u64>,
     next_class_tag: u64,
     /// Direct `extends` parent per class (for transitive implementors).
@@ -123,6 +127,7 @@ impl<'ctx> Codegen<'ctx> {
             loop_stack: Vec::new(),
             defer_stack: Vec::new(),
             scope_dtors: Vec::new(),
+            own_slots: Vec::new(),
             cur_fn: None,
             cur_is_main: false,
             cur_class: None,
@@ -130,7 +135,7 @@ impl<'ctx> Codegen<'ctx> {
             map_vars: HashSet::new(),
             string_vars: HashSet::new(),
             trait_names: HashSet::new(),
-            trait_obj_types: HashMap::new(),
+            pair_types: HashMap::new(),
             class_tags: HashMap::new(),
             next_class_tag: 1,
             class_extends: HashMap::new(),
@@ -222,6 +227,10 @@ impl<'ctx> Codegen<'ctx> {
     /// (directly or via `extends`), in sorted order for deterministic
     /// modules. Runs once after the declare phase, before any body
     /// codegen, so forward references resolve.
+    /// Assign a dynamic-type tag to every declared class (sorted, so
+    /// modules are deterministic). Tags back `own` pairs and trait
+    /// dispatch; classes never flow into either path simply never use
+    /// their tag.
     fn assign_class_tags(&mut self) {
         let mut names: Vec<String> = self.class_methods.keys().cloned().collect();
         names.sort();
@@ -229,11 +238,9 @@ impl<'ctx> Codegen<'ctx> {
             if self.class_tags.contains_key(&name) {
                 continue;
             }
-            if self.class_transitively_implements_any(&name) {
-                let t = self.next_class_tag;
-                self.next_class_tag += 1;
-                self.class_tags.insert(name, t);
-            }
+            let t = self.next_class_tag;
+            self.next_class_tag += 1;
+            self.class_tags.insert(name, t);
         }
     }
 
@@ -297,12 +304,66 @@ impl<'ctx> Codegen<'ctx> {
             .cloned()
     }
 
-    /// Which trait (if any) owns this pair struct type?
-    fn trait_name_of_pair(&self, st: StructType<'ctx>) -> Option<String> {
-        self.trait_obj_types
+    /// Which named type (if any) owns this pair struct type?
+    fn pair_owner_of(&self, st: StructType<'ctx>) -> Option<String> {
+        self.pair_types
             .iter()
             .find(|(_, v)| **v == st)
             .map(|(k, _)| k.clone())
+    }
+
+    /// Pair struct type for an `own` inner type. Panics on invalid inner
+    /// types (sema validates; mirrors neighboring `unwrap()`s).
+    fn own_pair_type(&self, inner: &crate::sema::Ty) -> StructType<'ctx> {
+        match inner {
+            crate::sema::Ty::Struct(n) => {
+                let lookup = n.rsplit("::").next().unwrap_or(n);
+                *self
+                    .pair_types
+                    .get(lookup)
+                    .unwrap_or_else(|| panic!("no pair type for {n}"))
+            }
+            _ => panic!("own requires a class, struct, or trait type"),
+        }
+    }
+
+    /// Pair type when `name` is a TRAIT (classes/structs have pair types
+    /// too, but lower to their data structs unless trait-dispatched).
+    fn trait_pair_of(&self, name: &str) -> Option<StructType<'ctx>> {
+        if self.trait_names.contains(name) {
+            self.pair_types.get(name).cloned()
+        } else {
+            None
+        }
+    }
+
+    /// Size in bytes of a struct type via GEP on null.
+    fn struct_byte_size(&self, st: StructType<'ctx>) -> inkwell::values::IntValue<'ctx> {
+        let ptr_ty = st.ptr_type(inkwell::AddressSpace::default());
+        let null = ptr_ty.const_null();
+        let gep = unsafe {
+            self.builder
+                .build_gep(st, null, &[self.context.i32_type().const_int(1, false)], "sizeof.gep")
+                .unwrap()
+        };
+        self.builder
+            .build_ptr_to_int(gep, self.context.i64_type(), "sizeof")
+            .unwrap()
+    }
+
+    /// Pre-create the `{data ptr, type tag}` pair type for a named type
+    /// (trait, class, or struct). Backs every `own` slot and trait object
+    /// of that type.
+    fn declare_pair_type(&mut self, name: &str) {
+        if self.pair_types.contains_key(name) {
+            return;
+        }
+        let pair = self
+            .context
+            .opaque_struct_type(&format!("__pair_{name}"));
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        pair.set_body(&[ptr_ty.into(), self.context.i64_type().into()], false);
+        self.pair_types.insert(name.to_string(), pair);
     }
 
     /// Box a class-typed VALUE into a trait-pair value for a trait-typed
@@ -322,7 +383,7 @@ impl<'ctx> Codegen<'ctx> {
         // Erasure into `any`/opaque pointer: keep the data pointer.
         if let BasicTypeEnum::PointerType(_) = dest {
             if let BasicValueEnum::StructValue(sv) = val {
-                if self.trait_name_of_pair(sv.get_type()).is_some() {
+                if self.pair_owner_of(sv.get_type()).is_some() {
                     let data = self
                         .builder
                         .build_extract_value(sv, 0, "trait.erase")
@@ -335,7 +396,7 @@ impl<'ctx> Codegen<'ctx> {
         let BasicTypeEnum::StructType(dest_st) = dest else {
             return Ok(val);
         };
-        let Some(trait_name) = self.trait_name_of_pair(dest_st) else {
+        let Some(trait_name) = self.pair_owner_of(dest_st) else {
             return Ok(val);
         };
         let BasicValueEnum::StructValue(val_st) = val else {
@@ -344,11 +405,17 @@ impl<'ctx> Codegen<'ctx> {
                 span,
             });
         };
-        if self.trait_name_of_pair(val_st.get_type()).is_some() {
-            return Err(CodegenError {
-                message: format!("cannot convert trait value to trait `{trait_name}`"),
-                span,
-            });
+        if let Some(src_owner) = self.pair_owner_of(val_st.get_type()) {
+            // Own-to-own trait upcast: allow when src class implements dest trait,
+            // otherwise still copy data/tag (sema already validated).
+            let data = self.builder.build_extract_value(val_st, 0, "own.convert.data").unwrap().into_pointer_value();
+            let tag = self.builder.build_extract_value(val_st, 1, "own.convert.tag").unwrap();
+            let mut new_pair: BasicValueEnum<'ctx> = dest_st.const_zero().into();
+            let tmp = self.builder.build_insert_value(new_pair.into_struct_value(), data.as_basic_value_enum(), 0, "own.convert.data").unwrap();
+            new_pair = tmp.as_basic_value_enum();
+            let tmp2 = self.builder.build_insert_value(new_pair.into_struct_value(), tag, 1, "own.convert.tag").unwrap();
+            new_pair = tmp2.as_basic_value_enum();
+            return Ok(new_pair);
         }
         let class_name = self.ty_to_struct_name(&val.get_type())?;
         if !self.class_transitively_implements_any(&class_name)
@@ -394,14 +461,7 @@ impl<'ctx> Codegen<'ctx> {
     /// pair type is pre-created so value lowering stays `&self`.
     fn declare_trait(&mut self, t: &TraitDecl) {
         self.trait_names.insert(t.name.clone());
-        if !self.trait_obj_types.contains_key(&t.name) {
-            let pair = self
-                .context
-                .opaque_struct_type(&format!("__trait_obj_{}", t.name));
-            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-            pair.set_body(&[ptr_ty.into(), self.context.i64_type().into()], false);
-            self.trait_obj_types.insert(t.name.clone(), pair);
-        }
+        self.declare_pair_type(&t.name);
     }
 
     fn declare_struct(&mut self, s: &StructDecl) -> Result<(), CodegenError> {
@@ -414,6 +474,7 @@ impl<'ctx> Codegen<'ctx> {
         let opaque = self.context.opaque_struct_type(&s.name);
         // Insert early to allow self-reference (not needed Phase 2) and duplicate check
         self.struct_types.insert(s.name.clone(), opaque);
+        self.declare_pair_type(&s.name);
         // Collect field LLVM types
         let mut field_map = HashMap::new();
         let mut field_tys: Vec<BasicTypeEnum<'ctx>> = Vec::new();
@@ -438,6 +499,7 @@ impl<'ctx> Codegen<'ctx> {
         }
         let opaque = self.context.opaque_struct_type(&c.name);
         self.struct_types.insert(c.name.clone(), opaque);
+        self.declare_pair_type(&c.name);
         let mut field_map = HashMap::new();
         let mut field_tys = Vec::new();
         // For extends: prepend parent fields if parent already declared (otherwise defer)
@@ -559,12 +621,15 @@ impl<'ctx> Codegen<'ctx> {
                 crate::sema::Ty::Char => self.context.i32_type().fn_type(&param_llvm, false),
                 crate::sema::Ty::String => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, false),
                 crate::sema::Ty::Struct(ref n) => {
-                    if let Some(pair) = self.trait_obj_types.get(n) {
+                    if let Some(pair) = self.trait_pair_of(n) {
                         pair.fn_type(&param_llvm, false)
                     } else {
                         let st = self.struct_types.get(n).unwrap();
                         st.fn_type(&param_llvm, false)
                     }
+                }
+                crate::sema::Ty::Own(ref inner) => {
+                    self.own_pair_type(inner).fn_type(&param_llvm, false)
                 }
                 crate::sema::Ty::Array(_) => self.context.i64_type().array_type(16).fn_type(&param_llvm, false),
                 crate::sema::Ty::FixedArray { elem: ref elem, size: ref size } => {
@@ -960,12 +1025,15 @@ impl<'ctx> Codegen<'ctx> {
                         crate::sema::Ty::Float => self.context.f32_type().fn_type(&param_llvm, false),
                         crate::sema::Ty::Double => self.context.f64_type().fn_type(&param_llvm, false),
                         crate::sema::Ty::Struct(ref n) => {
-                            if let Some(pair) = self.trait_obj_types.get(n) {
+                            if let Some(pair) = self.trait_pair_of(n) {
                                 pair.fn_type(&param_llvm, false)
                             } else {
                                 let st = self.struct_types.get(n).unwrap();
                                 st.fn_type(&param_llvm, false)
                             }
+                        }
+                        crate::sema::Ty::Own(ref inner) => {
+                            self.own_pair_type(inner).fn_type(&param_llvm, false)
                         }
                         crate::sema::Ty::Enum(ref n) => {
                             let et = self.enum_types.get(n).unwrap();
@@ -2646,7 +2714,7 @@ impl<'ctx> Codegen<'ctx> {
                     st.as_basic_type_enum().into()
                 } else if let Some(et) = self.enum_types.get(lookup) {
                     et.as_basic_type_enum().into()
-                } else if let Some(pair) = self.trait_obj_types.get(lookup) {
+                } else if let Some(pair) = self.trait_pair_of(lookup) {
                     // Trait-typed slots lower to `{data ptr, type tag}` pairs.
                     pair.as_basic_type_enum().into()
                 } else {
@@ -2719,6 +2787,17 @@ impl<'ctx> Codegen<'ctx> {
                 .context
                 .ptr_type(inkwell::AddressSpace::default())
                 .into(),
+            Type::Own(inner, _) => {
+                // Every `own` slot is a pair (uniform with trait objects).
+                let lookup = match inner.as_ref() {
+                    Type::Named(n, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
+                    _ => String::new(),
+                };
+                match self.pair_types.get(&lookup) {
+                    Some(pair) => pair.as_basic_type_enum().into(),
+                    None => panic!("no pair type for own slot"),
+                }
+            }
             Type::Optional(el, _) => {
                 let inner = self.llvm_ty_for(el);
                 self.context
@@ -2761,12 +2840,16 @@ impl<'ctx> Codegen<'ctx> {
                     Some(st.as_basic_type_enum().into())
                 } else if let Some(et) = self.enum_types.get(lookup) {
                     Some(et.as_basic_type_enum().into())
-                } else if let Some(pair) = self.trait_obj_types.get(lookup) {
+                } else if let Some(pair) = self.trait_pair_of(lookup) {
                     // Trait-typed slots lower to `{data ptr, type tag}` pairs.
                     Some(pair.as_basic_type_enum().into())
                 } else {
                     panic!("unknown struct {n} in llvm_ty_for_sema")
                 }
+            }
+            crate::sema::Ty::Own(inner) => {
+                // Every `own` slot is a pair (uniform with trait objects).
+                Some(self.own_pair_type(inner).as_basic_type_enum().into())
             }
             crate::sema::Ty::Float => Some(self.context.f32_type().into()),
             crate::sema::Ty::Double => Some(self.context.f64_type().into()),
@@ -2973,8 +3056,11 @@ impl<'ctx> Codegen<'ctx> {
                 crate::sema::Ty::Struct(ref n) if n.len()==1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) => {
                     self.context.i64_type().fn_type(&param_types, is_c_varargs)
                 }
+                crate::sema::Ty::Own(ref inner) => {
+                    self.own_pair_type(inner).fn_type(&param_types, is_c_varargs)
+                }
                 crate::sema::Ty::Struct(ref n) => {
-                    if let Some(pair) = self.trait_obj_types.get(n) {
+                    if let Some(pair) = self.trait_pair_of(n) {
                         pair.fn_type(&param_types, is_c_varargs)
                     } else {
                         let st = self.struct_types.get(n).ok_or(CodegenError {
@@ -3111,6 +3197,17 @@ impl<'ctx> Codegen<'ctx> {
         let fn_ty = ptr_ty.fn_type(&[ptr_ty.into()], false);
         self.module.add_function("strdup", fn_ty, None)
     }
+    fn get_or_declare_malloc(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("malloc") { return f; }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = ptr_ty.fn_type(&[self.context.i64_type().into()], false);
+        self.module.add_function("malloc", fn_ty, None)
+    }
+    fn get_or_declare_free(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("free") { return f; }
+        let fn_ty = self.context.void_type().fn_type(&[self.context.ptr_type(inkwell::AddressSpace::default()).into()], false);
+        self.module.add_function("free", fn_ty, None)
+    }
 
     // NOTE (real stdlib): no `is_stdlib_io_intrinsic` /
     // `codegen_stdlib_io_body`. User-facing IO (`print`, `println`,
@@ -3233,6 +3330,32 @@ impl<'ctx> Codegen<'ctx> {
             }
             _ => {
                 let v = self.codegen_call_arg(arg)?;
+                // Move from `own` source: null the source slot so its
+                // scope destroy becomes a no-op (sema poisoned it).
+                if let Some(crate::sema::Ty::Own(_)) = info.params.get(param_idx) {
+                    let src_name: Option<String> = match arg {
+                        CallArg::Expr(e) => match &e.kind {
+                            ExprKind::Ident(n) => Some(n.clone()),
+                            _ => None,
+                        },
+                        CallArg::Named { value, .. } => match &value.kind {
+                            ExprKind::Ident(n) => Some(n.clone()),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(name) = src_name {
+                        let lookup = name.rsplit("::").next().unwrap_or(&name).to_string();
+                        if let Some((ptr, ty)) = self.lookup_var(&name).or_else(|| self.lookup_var(&lookup)) {
+                            if ty.is_struct_type() {
+                                let st = ty.into_struct_type();
+                                if self.pair_owner_of(st).is_some() {
+                                    self.builder.build_store(ptr, ty.const_zero()).unwrap();
+                                }
+                            }
+                        }
+                    }
+                }
                 let v = self.box_arg_for_param(v, info, param_idx, arg.span())?;
                 if let Some(pt) = info.params.get(param_idx) {
                     if let Some(dest) = self.llvm_ty_for_sema(pt) {
@@ -3364,7 +3487,7 @@ impl<'ctx> Codegen<'ctx> {
                 })
             }
         };
-        if self.trait_name_of_pair(pair_st).as_deref() != Some(trait_name) {
+        if self.pair_owner_of(pair_st).as_deref() != Some(trait_name) {
             return Err(CodegenError {
                 message: format!("trait receiver type mismatch for `{trait_name}`"),
                 span,
@@ -3521,7 +3644,7 @@ impl<'ctx> Codegen<'ctx> {
         let pair_val = self.codegen_expr(object)?;
         let data = match pair_val.get_type() {
             BasicTypeEnum::StructType(st)
-                if self.trait_name_of_pair(st).as_deref() == Some(tname) =>
+                if self.pair_owner_of(st).as_deref() == Some(tname) =>
             {
                 self.builder
                     .build_extract_value(pair_val.into_struct_value(), 0, "trait.data")
@@ -3619,6 +3742,7 @@ impl<'ctx> Codegen<'ctx> {
         self.builder.position_at_end(entry);
 
         self.vars.push(HashMap::new());
+        self.own_slots.push(Vec::new());
         // Special handling for `int main(string[] args)` where `args` is `string[]` and function is `i32 ()` with no LLVM params
         let is_main_with_args = f.name == "main"
             && f.params.len() == 1
@@ -3658,7 +3782,7 @@ impl<'ctx> Codegen<'ctx> {
                 // For `...T vda` where `vda` is `T[]`, the LLVM param is array type, so param_val is array value
                 self.builder.build_store(alloca, param_val).unwrap();
                 self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, arr_ty));
-            } else {
+                } else {
                 let llvm_ty = self.llvm_ty_for(&param.ty);
                 let alloca = self.create_entry_block_alloca(&param.name, llvm_ty);
                     self.builder.build_store(alloca, param_val).unwrap();
@@ -3666,10 +3790,23 @@ impl<'ctx> Codegen<'ctx> {
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
+                    // Track `own` params for destruction at function exit.
+                    if let Type::Own(inner, _) = &param.ty {
+                        let inner_name = match inner.as_ref() {
+                            Type::Named(n, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
+                            Type::Generic(n, _, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
+                            _ => String::new(),
+                        };
+                        if !inner_name.is_empty() {
+                            if let Some(top) = self.own_slots.last_mut() {
+                                top.push((alloca, inner_name));
+                            }
+                        }
+                    }
                 }
             }
-        }
 
+        }
         let always_returns = self.codegen_block(&f.body)?;
 
         if !always_returns
@@ -3680,6 +3817,8 @@ impl<'ctx> Codegen<'ctx> {
                 .get_terminator()
                 .is_none()
         {
+            // Destroy owned params still live at fall-through exit
+            self.emit_current_scope_owns();
             if self.cur_is_main {
                 let zero = self.context.i32_type().const_int(0, false);
                 self.builder.build_return(Some(&zero)).unwrap();
@@ -3708,11 +3847,14 @@ impl<'ctx> Codegen<'ctx> {
                         .const_null()
                         .into(),
                     crate::sema::Ty::Struct(ref n) => {
-                        if let Some(pair) = self.trait_obj_types.get(n) {
+                        if let Some(pair) = self.trait_pair_of(n) {
                             pair.const_zero().into()
                         } else {
                             self.struct_types.get(n).unwrap().const_zero().into()
                         }
+                    }
+                    crate::sema::Ty::Own(inner) => {
+                        self.own_pair_type(inner.as_ref()).const_zero().into()
                     }
                     crate::sema::Ty::Array(_) => self
                         .context
@@ -3780,6 +3922,7 @@ impl<'ctx> Codegen<'ctx> {
             }
         }
 
+        self.own_slots.pop();
         self.vars.pop();
         self.cur_fn = None;
         self.cur_is_main = false;
@@ -3805,11 +3948,14 @@ impl<'ctx> Codegen<'ctx> {
             crate::sema::Ty::Char => Some(self.context.i32_type().const_int(0, false).into()),
             crate::sema::Ty::String => Some(self.context.ptr_type(inkwell::AddressSpace::default()).const_null().into()),
             crate::sema::Ty::Struct(n) => Some(
-                self.trait_obj_types
+                self.pair_types
                     .get(n)
                     .map(|pair| pair.const_zero().into())
                     .unwrap_or_else(|| self.struct_types.get(n).unwrap().const_zero().into()),
             ),
+            crate::sema::Ty::Own(inner) => {
+                Some(self.own_pair_type(inner.as_ref()).const_zero().into())
+            }
             crate::sema::Ty::Array(_) => Some(self.context.i64_type().array_type(16).const_zero().into()),
             crate::sema::Ty::FixedArray { elem, size } => {
                 let n = size.unwrap_or(16) as u32;
@@ -4069,11 +4215,88 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    /// Destroy an `own` slot: load the `{data, tag}` pair, guard on
+    /// non-null data, dispatch destructor (static for concrete, switch
+    /// for trait), then `free` and poison the slot.
+    fn emit_own_destroy(&mut self, pair_slot: PointerValue<'ctx>, inner: &str) {
+        let pair_ty = match self.pair_types.get(inner) {
+            Some(ty) => *ty,
+            None => return,
+        };
+        let pair_val = self.builder.build_load(pair_ty.as_basic_type_enum(), pair_slot, "own.load").unwrap();
+        let data = self.builder.build_extract_value(pair_val.into_struct_value(), 0, "own.data").unwrap().into_pointer_value();
+        let func = match self.cur_fn { Some(f) => f, None => return };
+        let cur_bb = self.builder.get_insert_block().unwrap();
+        let done_bb = self.context.append_basic_block(func, "own.done");
+        let is_null = self.builder.build_is_null(data, "own.is_null").unwrap();
+        let work_bb = self.context.append_basic_block(func, "own.work");
+        self.builder.build_conditional_branch(is_null, done_bb, work_bb).unwrap();
+        self.builder.position_at_end(work_bb);
+        let is_trait = self.trait_names.contains(inner);
+        if is_trait {
+            let tag = self.builder.build_extract_value(pair_val.into_struct_value(), 1, "own.tag").unwrap().into_int_value();
+            let default_bb = self.context.append_basic_block(func, "own.dtor.default");
+            let mut cases: Vec<(inkwell::values::IntValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
+            for cls in self.implementors_of(inner) {
+                let Some(dtors) = self.class_destructors.get(&cls).cloned() else { continue };
+                if dtors.is_empty() { continue; }
+                let Some(tag_const) = self.class_tags.get(&cls).cloned() else { continue };
+                let arm_bb = self.context.append_basic_block(func, "own.dtor.arm");
+                cases.push((self.context.i64_type().const_int(tag_const, false), arm_bb));
+                self.builder.position_at_end(arm_bb);
+                for (dtor_fn, _) in &dtors {
+                    let _ = self.builder.build_call(*dtor_fn, &[data.into()], "own.dtor.call");
+                }
+                let free = self.get_or_declare_free();
+                self.builder.build_call(free, &[data.into()], "own.free.arm").unwrap();
+                self.builder.build_unconditional_branch(done_bb).unwrap();
+            }
+            self.builder.position_at_end(default_bb);
+            let free = self.get_or_declare_free();
+            self.builder.build_call(free, &[data.into()], "own.free.default").unwrap();
+            self.builder.build_unconditional_branch(done_bb).unwrap();
+            self.builder.position_at_end(work_bb);
+            if cases.is_empty() {
+                let free = self.get_or_declare_free();
+                self.builder.build_call(free, &[data.into()], "own.free").unwrap();
+                self.builder.build_unconditional_branch(done_bb).unwrap();
+            } else {
+                self.builder.build_switch(tag, default_bb, &cases).unwrap();
+            }
+        } else {
+            if let Some(dtors) = self.class_destructors.get(inner).cloned() {
+                for (dtor_fn, _) in &dtors {
+                    let _ = self.builder.build_call(*dtor_fn, &[data.into()], "own.dtor.call");
+                }
+            }
+            let free = self.get_or_declare_free();
+            self.builder.build_call(free, &[data.into()], "own.free").unwrap();
+            self.builder.build_unconditional_branch(done_bb).unwrap();
+        }
+        self.builder.position_at_end(done_bb);
+        self.builder.build_store(pair_slot, pair_ty.const_zero()).unwrap();
+    }
+    fn emit_current_scope_owns(&mut self) {
+        if let Some(slots) = self.own_slots.last().cloned() {
+            for (ptr, inner) in slots.iter().rev() {
+                self.emit_own_destroy(*ptr, inner);
+            }
+        }
+    }
+    fn emit_all_owns(&mut self) {
+        let owned = self.own_slots.clone();
+        for scope in owned.iter().rev() {
+            for (ptr, inner) in scope.iter().rev() {
+                self.emit_own_destroy(*ptr, inner);
+            }
+        }
+    }
+
     /// Destroy a trait-typed slot: load the `{data, tag}` pair and switch
     /// over implementors that declare destructors. Implementors without
     /// one take the (safe, empty) default branch.
     fn emit_trait_dtor_call(&mut self, pair_slot: PointerValue<'ctx>, tname: &str) {
-        let Some(pair_ty) = self.trait_obj_types.get(tname).cloned() else {
+        let Some(pair_ty) = self.pair_types.get(tname).cloned() else {
             return;
         };
         let Some(func) = self.cur_fn else {
@@ -4376,6 +4599,7 @@ impl<'ctx> Codegen<'ctx> {
         self.vars.push(HashMap::new());
         self.defer_stack.push(Vec::new());
         self.scope_dtors.push(Vec::new());
+        self.own_slots.push(Vec::new());
         let mut always_returns = false;
         for stmt in &block.stmts {
             if self
@@ -4402,10 +4626,15 @@ impl<'ctx> Codegen<'ctx> {
             if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
                 self.emit_current_scope_dtors();
             }
+            if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                self.emit_current_scope_owns();
+            }
         } else {
             // already terminated, just clear any remaining defers for this scope (they were emitted via return/break)
             if let Some(v) = self.defer_stack.last_mut() { v.clear(); }
+            if let Some(v) = self.own_slots.last_mut() { v.clear(); }
         }
+        self.own_slots.pop();
         self.scope_dtors.pop();
         self.defer_stack.pop();
         self.vars.pop();
@@ -4500,6 +4729,19 @@ impl<'ctx> Codegen<'ctx> {
                             top.push((alloca, class_name));
                         }
                     }
+                    // Track `own` slots for heap destruction (pair + free).
+                    if let Type::Own(inner, _) = &d.ty {
+                        let inner_name = match inner.as_ref() {
+                            Type::Named(n, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
+                            Type::Generic(n, _, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
+                            _ => String::new(),
+                        };
+                        if !inner_name.is_empty() {
+                            if let Some(top) = self.own_slots.last_mut() {
+                                top.push((alloca, inner_name));
+                            }
+                        }
+                    }
                 }
                 if let Some(init) = &d.init {
                     // Fixed-array initializer: store each element via GEP so
@@ -4585,6 +4827,21 @@ impl<'ctx> Codegen<'ctx> {
                         let val = self.box_trait_value(val, ty, d.span)?;
                         let coerced = self.coerce_to_ty(val, ty);
                         self.builder.build_store(alloca, coerced).unwrap();
+                        // Move from `own` source: null the source slot so its
+                        // scope destroy becomes a no-op (poison is checked in sema).
+                        if let Type::Own(_, _) = &d.ty {
+                            if let ExprKind::Ident(name) = &init.kind {
+                                let lookup = name.rsplit("::").next().unwrap_or(name);
+                                if let Some((ptr, ty)) = self.lookup_var(name).or_else(|| self.lookup_var(lookup)) {
+                                    if ty.is_struct_type() {
+                                        let st = ty.into_struct_type();
+                                        if self.pair_owner_of(st).is_some() {
+                                            self.builder.build_store(ptr, ty.const_zero()).unwrap();
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 } else {
                     // zero init for all types
@@ -4612,6 +4869,24 @@ impl<'ctx> Codegen<'ctx> {
                             } else {
                                 let st = self.struct_types.get(n).unwrap();
                                 st.const_zero().into()
+                            }
+                        }
+                        Type::Own(inner, _) => {
+                            // Null pair (sema poisons uninitialized `own`
+                            // slots, so this is never observably read).
+                            let lookup = match inner.as_ref() {
+                                Type::Named(n, _) => {
+                                    n.rsplit("::").next().unwrap_or(n).to_string()
+                                }
+                                _ => String::new(),
+                            };
+                            match self.pair_types.get(&lookup) {
+                                Some(pair) => pair.const_zero().into(),
+                                None => self
+                                    .context
+                                    .ptr_type(inkwell::AddressSpace::default())
+                                    .const_null()
+                                    .into(),
                             }
                         }
                         Type::Generic(_, _, _) => self.context.ptr_type(inkwell::AddressSpace::default()).const_null().into(),
@@ -4848,6 +5123,9 @@ impl<'ctx> Codegen<'ctx> {
                 if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
                     self.emit_all_dtors();
                 }
+                if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                    self.emit_all_owns();
+                }
                 if self.cur_is_main {
                     if let Some(expr) = &r.value {
                         let val = self.codegen_expr(expr)?;
@@ -4888,6 +5166,25 @@ impl<'ctx> Codegen<'ctx> {
                     }
                 } else if let Some(expr) = &r.value {
                     let val = self.codegen_expr(expr)?;
+                    // Move from `own` source: null the source slot so its
+                    // scope destroy becomes a no-op (sema poisoned it).
+                    if let ExprKind::Ident(name) = &expr.kind {
+                        let lookup = name.rsplit("::").next().unwrap_or(name);
+                        if let Some((ptr, ty)) = self.lookup_var(name).or_else(|| self.lookup_var(lookup)) {
+                            if ty.is_struct_type() {
+                                let st = ty.into_struct_type();
+                                if self.pair_owner_of(st).is_some() {
+                                    if let Some(cur) = self.cur_fn {
+                                        if let Some(ret_ty) = cur.get_type().get_return_type() {
+                                            if ret_ty.is_struct_type() && self.pair_owner_of(ret_ty.into_struct_type()).is_some() {
+                                                self.builder.build_store(ptr, ty.const_zero()).unwrap();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // Coerce int return to the function's declared return width
                     // (e.g. `i32 foo() do return 5 end` — literal is i64).
                     // Class values returning through a trait-typed slot are
@@ -5216,6 +5513,24 @@ impl<'ctx> Codegen<'ctx> {
                 }
                 Ok(false)
             }
+            Stmt::Delete(d) => {
+                // `delete` on an `own` slot: immediate destroy + free + poison
+                if let ExprKind::Ident(name) = &d.target.kind {
+                    let lookup = name.rsplit("::").next().unwrap_or(name);
+                    if let Some((ptr, ty)) = self.lookup_var(name).or_else(|| self.lookup_var(lookup)) {
+                        if ty.is_struct_type() {
+                            let st = ty.into_struct_type();
+                            if let Some(inner) = self.pair_owner_of(st) {
+                                self.emit_own_destroy(ptr, &inner);
+                                return Ok(false);
+                            }
+                        }
+                    }
+                }
+                // Fallback: evaluate for side effects (sema already diagnosed)
+                let _ = self.codegen_expr(&d.target)?;
+                Ok(false)
+            }
             Stmt::Break(b) => {
                 let target_idx = if let Some(label) = &b.label {
                     self.loop_stack.iter().rposition(|lc| lc.label.as_ref() == Some(label))
@@ -5338,8 +5653,14 @@ impl<'ctx> Codegen<'ctx> {
                     ExprKind::Ident(name) => {
                         if let Some((ptr, ty)) = self.lookup_var(name) {
                             if ty.is_struct_type() {
-                                // p is struct value instance, its alloca is the instance pointer
-                                ptr
+                                let st = ty.into_struct_type();
+                                if let Some(_inner) = self.pair_owner_of(st) {
+                                    let pair_val = self.builder.build_load(ty, ptr, "own.load").unwrap();
+                                    self.builder.build_extract_value(pair_val.into_struct_value(), 0, "own.data").unwrap().into_pointer_value()
+                                } else {
+                                    // p is struct value instance, its alloca is the instance pointer
+                                    ptr
+                                }
                             } else if ty.is_pointer_type() {
                                 self.builder.build_load(ty, ptr, "this.load").unwrap().into_pointer_value()
                             } else {
@@ -5751,9 +6072,33 @@ impl<'ctx> Codegen<'ctx> {
                                 message: format!("undefined var {name}"),
                                 span: lhs.span,
                             })?;
+                        // Destroy old `own` value before overwriting (avoid leak).
+                        if dest_ty.is_struct_type() {
+                            if let Some(inner) = self.pair_owner_of(dest_ty.into_struct_type()) {
+                                // Only for `own` slots (pair types).
+                                self.emit_own_destroy(ptr, &inner);
+                            }
+                        }
                         let val = self.box_trait_value(val, dest_ty, expr.span)?;
                         let coerced = self.coerce_to_ty(val, dest_ty);
                         self.builder.build_store(ptr, coerced).unwrap();
+                        // Move from `own` source: null the source slot.
+                        if dest_ty.is_struct_type() {
+                            let st = dest_ty.into_struct_type();
+                            if self.pair_owner_of(st).is_some() {
+                                if let ExprKind::Ident(src_name) = &value.kind {
+                                    let lookup = src_name.rsplit("::").next().unwrap_or(src_name);
+                                    if let Some((src_ptr, src_ty)) = self.lookup_var(src_name).or_else(|| self.lookup_var(lookup)) {
+                                        if src_ty.is_struct_type() {
+                                            let src_st = src_ty.into_struct_type();
+                                            if self.pair_owner_of(src_st).is_some() && src_name != name {
+                                                self.builder.build_store(src_ptr, src_ty.const_zero()).unwrap();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         Ok(coerced)
                     }
                     ExprKind::MemberAccess { object, field, .. } => {
@@ -6611,6 +6956,64 @@ impl<'ctx> Codegen<'ctx> {
                 } else { Err(CodegenError{message: "`super` outside class".into(), span: expr.span}) }
             }
             ExprKind::Paren(inner) => self.codegen_expr(inner),
+            ExprKind::New { ty, args, .. } => {
+                // Heap construction: `new Type(args)` -> `own Type` pair.
+                let inner_name = match ty {
+                    Type::Named(n, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
+                    Type::Generic(n, _, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
+                    _ => {
+                        return Err(CodegenError{message: format!("`new` requires a named type"), span: expr.span});
+                    }
+                };
+                let st = *self.struct_types.get(&inner_name).ok_or(CodegenError{message: format!("unknown type `{inner_name}` for `new`"), span: expr.span})?;
+                let pair_ty = *self.pair_types.get(&inner_name).ok_or(CodegenError{message: format!("no pair type for `{inner_name}`"), span: expr.span})?;
+                let size = self.struct_byte_size(st);
+                let malloc = self.get_or_declare_malloc();
+                let call = self.builder.build_call(malloc, &[size.into()], "new.malloc").unwrap();
+                let raw = call.try_as_basic_value().basic().unwrap().into_pointer_value();
+                let heap_ptr = self.builder.build_bit_cast(raw, st.ptr_type(inkwell::AddressSpace::default()), "new.cast").unwrap().into_pointer_value();
+                // Initialize via constructor or direct field stores.
+                if let Some(ctors) = self.class_constructors.get(&inner_name).cloned() {
+                    // Pick ctor by arity (same rule as `Type(args)` calls).
+                    let mut chosen: Option<(inkwell::values::FunctionValue<'ctx>, TyInfo)> = None;
+                    for (func, info) in &ctors {
+                        if info.params.len() == args.len() + 1 { chosen = Some((*func, info.clone())); break; }
+                    }
+                    let (ctor_fn, info) = chosen.or_else(|| ctors.first().cloned()).ok_or(CodegenError{message: format!("no constructor for `{inner_name}`"), span: expr.span})?;
+                    let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = vec![heap_ptr.into()];
+                    for (i, a) in args.iter().enumerate() {
+                        let v = self.codegen_call_arg(a)?;
+                        let v = self.box_arg_for_param(v, &info, i+1, a.span())?;
+                        arg_vals.push(v.into());
+                    }
+                    self.builder.build_call(ctor_fn, &arg_vals, "new.ctor").unwrap();
+                } else if let Some(field_map) = self.struct_fields.get(&inner_name).cloned() {
+                    let field_count = field_map.len();
+                    if field_count > 0 && args.len() == field_count {
+                        let mut sorted: Vec<(String, u32)> = field_map.into_iter().collect();
+                        sorted.sort_by_key(|(_, idx)| *idx);
+                        for (i, a) in args.iter().enumerate() {
+                            let v = self.codegen_call_arg(a)?;
+                            let idx = sorted[i].1;
+                            let field_ptr = self.builder.build_struct_gep(st, heap_ptr, idx, "new.field").unwrap();
+                            self.builder.build_store(field_ptr, v).unwrap();
+                        }
+                    } else if !args.is_empty() {
+                        for a in args { let _ = self.codegen_call_arg(a)?; }
+                    }
+                } else {
+                    for a in args { let _ = self.codegen_call_arg(a)?; }
+                }
+                let tag = self.class_tags.get(&inner_name).cloned().unwrap_or(0);
+                let mut pair_val: BasicValueEnum<'ctx> = pair_ty.get_undef().into();
+                let data = heap_ptr.as_basic_value_enum();
+                let tmp = self.builder.build_insert_value(pair_val.into_struct_value(), data, 0, "own.data").unwrap();
+                pair_val = tmp.as_basic_value_enum();
+                let tag_val = self.context.i64_type().const_int(tag, false);
+                let tmp2 = self.builder.build_insert_value(pair_val.into_struct_value(), tag_val, 1, "own.tag").unwrap();
+                pair_val = tmp2.as_basic_value_enum();
+                Ok(pair_val)
+            }
             _ => todo!("unhandled expr {:?}", expr.kind),
         }
     }
@@ -7126,6 +7529,15 @@ impl<'ctx> Codegen<'ctx> {
             ExprKind::Ident(name) => {
                 let lookup = name.rsplit("::").next().unwrap_or(name);
                 let (ptr, ty) = self.lookup_var(name).or_else(|| self.lookup_var(lookup)).ok_or(CodegenError{message: format!("undefined var {name}"), span: object.span})?;
+                if ty.is_struct_type() {
+                    let st = ty.into_struct_type();
+                    if let Some(inner) = self.pair_owner_of(st) {
+                        // `own` pair: load and extract heap data pointer
+                        let pair_val = self.builder.build_load(ty, ptr, "own.load").unwrap();
+                        let data = self.builder.build_extract_value(pair_val.into_struct_value(), 0, "own.data").unwrap().into_pointer_value();
+                        return Ok((data, inner));
+                    }
+                }
                 let sname = self.ty_to_struct_name(&ty)?;
                 Ok((ptr, sname))
             }
@@ -7230,7 +7642,7 @@ impl<'ctx> Codegen<'ctx> {
             }
         } else if fty.is_struct_type() {
             let st = fty.into_struct_type();
-            if let Some(tn) = self.trait_name_of_pair(st) {
+            if let Some(tn) = self.pair_owner_of(st) {
                 return Ok(crate::sema::Ty::Struct(tn));
             }
             let sname2 = self.ty_to_struct_name(&fty)?;
@@ -7297,7 +7709,7 @@ impl<'ctx> Codegen<'ctx> {
                         if ty.is_struct_type() {
                             // Trait-object pair: report the trait name so
                             // member/method resolution takes the trait path.
-                            if let Some(tn) = self.trait_name_of_pair(ty.into_struct_type()) {
+                            if let Some(tn) = self.pair_owner_of(ty.into_struct_type()) {
                                 return Ok(crate::sema::Ty::Struct(tn));
                             }
                             let sname = self.ty_to_struct_name(ty).unwrap();

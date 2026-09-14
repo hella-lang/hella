@@ -736,6 +736,7 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
                 ast::DeferInner::Expr(e) => self.collect_expr(e),
                 ast::DeferInner::Block(b) => self.collect_block(b, scope),
             },
+            Stmt::Delete(d) => self.collect_expr(&d.target),
         }
     }
 
@@ -805,6 +806,7 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
                 self.collect_call_args(args);
             }
             ExprKind::Call { args, .. } => self.collect_call_args(args),
+            ExprKind::New { args, .. } => self.collect_call_args(args),
             ExprKind::Index { object, index } => {
                 self.collect_expr(object);
                 self.collect_expr(index);
@@ -1202,11 +1204,12 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
             .min_by_key(|l| l.name_span.end - l.name_span.start)
         {
             let ty = local.ty.as_deref()?;
-            let resolved = self.resolve_named_type(ty)?;
+            let inner = ty.strip_prefix("own ").unwrap_or(ty);
+            let resolved = self.resolve_named_type(inner)?;
             match resolved.kind {
                 SymKind::Struct | SymKind::Class => {
                     let mut out: Vec<&Symbol> = resolved.children.iter().collect();
-                    out.extend(self.unlinked_members(ty));
+                    out.extend(self.unlinked_members(inner));
                     out
                 }
                 // Trait-typed value: the interface methods are the members.

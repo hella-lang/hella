@@ -105,6 +105,8 @@ pub enum Token {
     DebugAssert,
     #[token("defer")]
     Defer,
+    #[token("delete")]
+    Delete,
     #[token("distinct")]
     Distinct,
     #[token("do")]
@@ -149,6 +151,8 @@ pub enum Token {
     Loop,
     #[token("match")]
     Match,
+    #[token("new")]
+    New,
     #[token("not")]
     Not,
     #[token("null")]
@@ -161,6 +165,8 @@ pub enum Token {
     Or,
     #[token("out")]
     Out,
+    #[token("own")]
+    Own,
     #[token("override")]
     Override,
     #[token("private")]
@@ -365,6 +371,7 @@ impl std::fmt::Display for Token {
             Self::Continue => "continue",
             Self::DebugAssert => "debug_assert",
             Self::Defer => "defer",
+            Self::Delete => "delete",
             Self::Distinct => "distinct",
             Self::Do => "do",
             Self::Double => "double",
@@ -387,12 +394,14 @@ impl std::fmt::Display for Token {
             Self::Is => "is",
             Self::Loop => "loop",
             Self::Match => "match",
+            Self::New => "new",
             Self::Not => "not",
             Self::Null => "null",
             Self::Open => "open",
             Self::OperatorKw => "operator",
             Self::Or => "or",
             Self::Out => "out",
+            Self::Own => "own",
             Self::Override => "override",
             Self::Private => "private",
             Self::Public => "public",

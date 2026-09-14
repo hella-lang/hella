@@ -623,6 +623,7 @@ impl<'a> Formatter<'a> {
             Type::Float(_) => "float".into(),
             Type::Double(_) => "double".into(),
             Type::Any(_) => "any".into(),
+            Type::Own(el, _) => format!("own {}", self.fmt_type(el)),
             Type::Named(n, _) => n.clone(),
             Type::Generic(n, args, _) => {
                 format!("{}<{}>", n, args.iter().map(|a| self.fmt_type(a)).collect::<Vec<_>>().join(", "))
@@ -1741,6 +1742,7 @@ impl<'a> Formatter<'a> {
                 DeferInner::Expr(e) => format!("defer {}", self.fmt_expr_compact(e)),
                 DeferInner::Block(b) => format!("defer do\n{}end", self.fmt_block_contents(b)),
             },
+            Stmt::Delete(d) => format!("delete {}", self.fmt_expr_wrapped(&d.target, 0)),
         }
     }
 
@@ -1872,6 +1874,10 @@ impl<'a> Formatter<'a> {
             ExprKind::MethodCall { object, method, args, .. } => {
                 let ac: Vec<String> = args.iter().map(|a| self.fmt_call_arg(a)).collect();
                 format!("{}.{}({})", self.fmt_expr_compact(object), method, ac.join(", "))
+            }
+            ExprKind::New { ty, args, .. } => {
+                let ac: Vec<String> = args.iter().map(|a| self.fmt_call_arg(a)).collect();
+                format!("new {}({})", self.fmt_type(ty), ac.join(", "))
             }
             ExprKind::MemberAccess { object, field, .. } => {
                 format!("{}.{}", self.fmt_expr_compact(object), field)
@@ -2300,6 +2306,7 @@ fn stmt_span(st: &Stmt) -> Span {
         Stmt::Break(d) => d.span,
         Stmt::Continue(d) => d.span,
         Stmt::Defer(d) => d.span,
+        Stmt::Delete(d) => d.span,
     }
 }
 

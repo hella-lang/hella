@@ -53,6 +53,7 @@ keyword =
     | "continue"
     | "debug_assert"
     | "defer"
+    | "delete"
     | "distinct"
     | "do"
     | "double"
@@ -73,12 +74,14 @@ keyword =
     | "is"
     | "loop"
     | "match"
+    | "new"
     | "not"
     | "null"
     | "open"
     | "operator"
     | "or"
     | "out"
+    | "own"
     | "override"
     | "private"
     | "public"
@@ -264,6 +267,7 @@ primary-type =
     | fixed-array-type
     | vector-type
     | map-type
+    | own-type
     | parenthesized-type ;
 
 
@@ -330,6 +334,14 @@ vector-type =
 map-type =
     type , ":" , type ;
 
+
+own-type =
+    "own" , type ;
+
+(* `own T` is an owning heap pointer: moves on assignment/return/argument
+   passing, `null` never flows into it, `delete` is early destroy + poison,
+   scope exit destroys remaining live `own` slots. `own` never nests inside
+   other types in phase 1 and `own` fields/globals are rejected. *)
 
 type-modifier =
       "?"
@@ -565,6 +577,7 @@ primary-expression =
     | array-literal
     | empty-vector
     | map-literal
+    | new-expression
     | parenthesized-expression ;
 
 
@@ -709,6 +722,10 @@ struct-field-initializer =
     statement-terminator ;
 
 
+new-expression =
+    "new" , type , "(" , [ argument-list ] , ")" ;
+
+
 
 (* ---------------------------------------------------------------- *)
 (* 12. Enum Variant Construction                                    *)
@@ -742,6 +759,7 @@ statement =
     | continue-statement
     | return-statement
     | defer-statement
+    | delete-statement
     | assert-statement
     | block ;
 
@@ -874,6 +892,10 @@ return-statement =
 defer-statement =
     "defer" ,
     ( expression , statement-terminator | block ) ;
+
+
+delete-statement =
+    "delete" , expression , statement-terminator ;
 
 
 

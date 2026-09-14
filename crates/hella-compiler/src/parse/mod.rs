@@ -1483,6 +1483,13 @@ impl Parser {
     /// constraints use `allow_map = false` so the constraint colon is not
     /// consumed as a `KEY:VALUE` map operator.
     fn parse_type_impl(&mut self, allow_map: bool) -> Result<Type, ParseError> {
+        // Owning heap pointer: `own T` prefix (validated in sema).
+        if self.peek_token() == Some(&Token::Own) {
+            let own_tok = self.advance().unwrap();
+            let inner = self.parse_type_impl(allow_map)?;
+            let span = Span::new(own_tok.span.start, inner.span().end);
+            return Ok(Type::Own(Box::new(inner), span));
+        }
         // primary-type
         let mut ty: Type = {
             let st = self.peek().cloned().ok_or(ParseError {
@@ -2016,6 +2023,16 @@ impl Parser {
             Some(Token::Defer) => {
                 let d = self.parse_defer()?;
                 Ok(Stmt::Defer(d))
+            }
+            Some(Token::Delete) => {
+                let start = self.advance().unwrap().span.start;
+                let target = self.parse_expr()?;
+                let end = target.span.end;
+                self.expect_terminator("delete statement")?;
+                Ok(Stmt::Delete(DeleteStmt {
+                    target,
+                    span: Span::new(start, end),
+                }))
             }
             Some(Token::Return) => {
                 let s = self.parse_return()?;
@@ -3213,6 +3230,17 @@ impl Parser {
             Token::Null => {
                 self.advance();
                 Ok(Expr{kind: ExprKind::Null, span: st.span})
+            }
+            Token::New => {
+                // Heap construction: `new Type(args)` — constructor picked
+                // by arity in sema, like a `Type(...)` call.
+                self.advance();
+                let ty = self.parse_type()?;
+                self.expect(Token::LParen, "expected `(` after `new Type`")?;
+                let args = self.parse_call_args()?;
+                let rp = self.expect(Token::RParen, "expected `)` after `new` arguments")?;
+                let span = Span::new(st.span.start, rp.span.end);
+                Ok(Expr{kind: ExprKind::New{ty, args, span}, span})
             }
             Token::Dot => {
                 // Enum variant `.Variant` or `.Variant(args)` (Phase 4) — args use argument-list (named/out/ref)

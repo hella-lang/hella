@@ -139,6 +139,8 @@ pub enum Type {
     Map { key: Box<Type>, value: Box<Type>, span: Span },
     Pointer(Box<Type>, Span),  // T*  (Phase 2)
     Optional(Box<Type>, Span), // T? (Phase 2 future)
+    /// Owning heap pointer: `own T` (moves, scope-destroyed, never null).
+    Own(Box<Type>, Span),
 }
 
 impl Type {
@@ -161,7 +163,8 @@ impl Type {
             | Type::Vec { span: s, .. }
             | Type::Map { span: s, .. }
             | Type::Pointer(_, s)
-            | Type::Optional(_, s) => *s,
+            | Type::Optional(_, s)
+            | Type::Own(_, s) => *s,
         }
     }
     pub fn name(&self) -> String {
@@ -187,6 +190,7 @@ impl Type {
             Type::Map { key, value, .. } => format!("{}:{}", key.name(), value.name()),
             Type::Pointer(el, _) => format!("{}*", el.name()),
             Type::Optional(el, _) => format!("{}?", el.name()),
+            Type::Own(el, _) => format!("own {}", el.name()),
         }
     }
     pub fn is_void(&self) -> bool {
@@ -425,6 +429,7 @@ pub enum Stmt {
     Break(BreakStmt),
     Continue(ContinueStmt),
     Defer(DeferStmt),
+    Delete(DeleteStmt),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -532,6 +537,12 @@ pub struct ForStmt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeferStmt {
     pub inner: DeferInner,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteStmt {
+    pub target: Expr,
     pub span: Span,
 }
 
@@ -684,6 +695,13 @@ pub enum ExprKind {
     Closure {
         params: Vec<Param>,
         body: Box<ClosureBody>,
+        span: Span,
+    },
+    /// Heap construction: `new Type(args)` — runs the constructor on a
+    /// fresh heap object, yields an owning value.
+    New {
+        ty: Type,
+        args: Vec<CallArg>,
         span: Span,
     },
 }

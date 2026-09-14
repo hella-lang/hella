@@ -46,6 +46,8 @@ pub enum Ty {
     Map { key: Box<Ty>, value: Box<Ty> },
     Pointer(Box<Ty>),
     Optional(Box<Ty>),
+    /// Owning heap pointer: `own T`. Moves (never copies); scope-destroyed.
+    Own(Box<Ty>),
 }
 
 impl Ty {
@@ -173,6 +175,9 @@ impl From<&Type> for Ty {
             Type::Optional(el, _) => {
                 Ty::Optional(Box::new(Ty::from(el.as_ref())))
             }
+            Type::Own(el, _) => {
+                Ty::Own(Box::new(Ty::from(el.as_ref())))
+            }
         }
     }
 }
@@ -212,6 +217,7 @@ impl std::fmt::Display for Ty {
             Ty::Map { key, value } => write!(f, "{}:{}", key, value),
             Ty::Pointer(el) => write!(f, "{}*", el),
             Ty::Optional(el) => write!(f, "{}?", el),
+            Ty::Own(el) => write!(f, "own {}", el),
         }
     }
 }
@@ -281,6 +287,10 @@ pub struct Checker {
     traits: HashMap<String, TraitInfo>,
     scopes: Vec<HashMap<String, Ty>>,
     const_scopes: Vec<HashSet<String>>,
+    /// Moved/deleted `own` slots per scope level, parallel to `scopes`.
+    /// A name here must not be read (use-after-move/use-after-delete).
+    /// Declaration of a name clears it (fresh binding shadows poison).
+    poisoned: Vec<HashSet<String>>,
     errors: Vec<SemError>,
     cur_ret: Option<Ty>,
     cur_class: Option<String>,
@@ -318,6 +328,7 @@ impl Checker {
             traits: HashMap::new(),
             scopes: Vec::new(),
             const_scopes: Vec::new(),
+            poisoned: Vec::new(),
             errors: Vec::new(),
             cur_ret: None,
             cur_class: None,
@@ -337,10 +348,121 @@ impl Checker {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.const_scopes.push(HashSet::new());
+        self.poisoned.push(HashSet::new());
     }
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.const_scopes.pop();
+        // No poison merge needed: moves/deletes insert at the DECLARING
+        // level (found via lookup, like the use sites below), so branch and
+        // loop bodies already poison precisely. Shadow-locals die with their
+        // scope; outer same-named bindings are untouched.
+        self.poisoned.pop();
+    }
+    /// Innermost scope level declaring `name`, if any (mirrors lookup).
+    fn scope_index_of(&self, name: &str) -> Option<usize> {
+        for (i, scope) in self.scopes.iter().enumerate().rev() {
+            if scope.contains_key(name) {
+                return Some(i);
+            }
+        }
+        None
+    }
+    /// True when the VISIBLE declaration of `name` is poisoned
+    /// (moved/deleted). Shadowing is precise: a fresh inner binding reads
+    /// clean even when an outer same-named slot is poisoned.
+    fn is_poisoned(&self, name: &str) -> bool {
+        match self.scope_index_of(name) {
+            Some(idx) => self.poisoned.get(idx).is_some_and(|s| s.contains(name)),
+            None => false,
+        }
+    }
+    /// Poison the scope level that declares `name` (moves bind to the
+    /// visible declaration, so shadows stay precise).
+    fn poison_at_decl(&mut self, name: &str) {
+        if let Some(idx) = self.scope_index_of(name) {
+            if let Some(set) = self.poisoned.get_mut(idx) {
+                set.insert(name.to_string());
+            }
+        }
+    }
+    /// Unwrap `own T` to `T` for member/method access (auto-deref on `.`).
+    fn deref_ty(&self, ty: &Ty) -> Ty {
+        match ty {
+            Ty::Own(inner) => (**inner).clone(),
+            other => other.clone(),
+        }
+    }
+
+    /// True when `ty` is an owning heap pointer.
+    fn is_own(&self, ty: &Ty) -> bool {
+        matches!(ty, Ty::Own(_))
+    }
+
+    /// Inner type of an `own T`, if present.
+    fn own_inner(&self, ty: &Ty) -> Option<Ty> {
+        match ty {
+            Ty::Own(inner) => Some((**inner).clone()),
+            _ => None,
+        }
+    }
+
+    /// Rebirth: assigning a fresh value clears poison at the declared level.
+    fn unpoison_at_decl(&mut self, name: &str) {
+        if let Some(idx) = self.scope_index_of(name) {
+            if let Some(set) = self.poisoned.get_mut(idx) {
+                set.remove(name);
+            }
+        }
+    }
+
+    /// Collect identifier names occurring in transparent value-forwarding
+    /// positions: the expression itself, parentheses, conditional branches,
+    /// and match arm bodies. Stops at calls (their own arg boundaries move),
+    /// member access (reads borrow the base), and closures (borrow capture).
+    /// Used both to poison moved sources and to null them in codegen shape.
+    fn moved_ident_names(expr: &Expr, out: &mut Vec<String>) {
+        match &expr.kind {
+            ExprKind::Ident(n) => out.push(n.clone()),
+            ExprKind::Paren(e) => Self::moved_ident_names(e, out),
+            ExprKind::Conditional {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::moved_ident_names(then_branch, out);
+                Self::moved_ident_names(else_branch, out);
+            }
+            ExprKind::Match(m) => {
+                for arm in &m.arms {
+                    match &arm.body {
+                        MatchArmBody::Expr(e) => Self::moved_ident_names(e, out),
+                        // Block bodies evaluate to their last value in
+                        // complex ways; conservative approximation lives
+                        // with the callers (they only enter here for
+                        // own-typed positions, which are rare).
+                        MatchArmBody::Block(_) => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Poison every own-typed variable named in value-forwarding position
+    /// within `expr` (a move into an `own` slot transfers ownership out of
+    /// each of them; untaken branches merely leak, never dangle).
+    fn poison_moved_idents(&mut self, expr: &Expr) {
+        let mut names = Vec::new();
+        Self::moved_ident_names(expr, &mut names);
+        for name in names {
+            let base = name.rsplit("::").next().unwrap_or(&name);
+            if matches!(self.lookup_var(&name), Some(Ty::Own(_)))
+                || matches!(self.lookup_var(base), Some(Ty::Own(_)))
+            {
+                self.poison_at_decl(&name);
+            }
+        }
     }
 
     fn declare_var(&mut self, name: &str, ty: Ty, span: Span) -> bool {
@@ -393,6 +515,35 @@ impl Checker {
         None
     }
 
+    /// True when `own` appears anywhere inside a type (including as the
+    /// whole type — callers exclude positions they already validated).
+    fn contains_own(ty: &Ty) -> bool {
+        match ty {
+            Ty::Own(_) => true,
+            Ty::Array(e) | Ty::Vec(e) | Ty::Pointer(e) | Ty::Optional(e) => {
+                Self::contains_own(e)
+            }
+            Ty::FixedArray { elem, .. } => Self::contains_own(elem),
+            Ty::Map { key, value } => Self::contains_own(key) || Self::contains_own(value),
+            Ty::Generic(_, args) | Ty::Tuple(args) => args.iter().any(Self::contains_own),
+            Ty::Function(ret, params) => {
+                Self::contains_own(ret) || params.iter().any(Self::contains_own)
+            }
+            _ => false,
+        }
+    }
+
+    /// `null` flows into any nullable slot — except `own`, which is
+    /// non-nullable by construction. Call at every `is_null` bypass.
+    fn reject_null_own(&mut self, is_null: bool, decl_ty: &Ty, span: Span) {
+        if is_null && matches!(decl_ty, Ty::Own(_)) {
+            self.errors.push(SemError {
+                message: "null cannot flow into `own` (non-nullable ownership)".into(),
+                span,
+            });
+        }
+    }
+
     /// Assignment compatibility with class→trait upcasts: a class value
     /// flows into a trait-typed slot when the class implements the trait
     /// (directly or through its `extends` chain). Falls back to the
@@ -402,6 +553,31 @@ impl Checker {
             if f != t && self.class_implements_trait(f, t) {
                 return true;
             }
+        }
+        // Owning pointers: identical ownership moves; `own C` upcasts to
+        // `own T` under `implements`; `own C` borrows as `C*`. `any`
+        // (including `null`) never converts into ownership — no provenance.
+        if let (Ty::Own(f), Ty::Own(t)) = (from, to) {
+            if f == t {
+                return true;
+            }
+            if let (Ty::Struct(fc), Ty::Struct(tc)) = (f.as_ref(), t.as_ref()) {
+                if fc != tc && self.class_implements_trait(fc, tc) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if let (Ty::Own(f), Ty::Pointer(t)) = (from, to) {
+            if let (Ty::Struct(fc), Ty::Struct(tc)) = (f.as_ref(), t.as_ref()) {
+                if fc == tc {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if matches!(to, Ty::Own(_)) {
+            return false;
         }
         Ty::assignable(from, to)
     }
@@ -472,7 +648,7 @@ impl Checker {
                 if let Some(pt) = sig.params.get(pidx) {
                     if !self.ty_assignable(&aty, pt) { self.errors.push(SemError{message: format!("arg {} of `{}`: expected `{}`, found `{}`", i+1, method, pt, aty), span: a.span()}); }
                 }
-                self.check_arg_mode(a, &sig.param_modes, pidx, method, i + 1);
+                self.check_arg_mode(a, sig, pidx, method, i + 1);
             }
         }
     }
@@ -676,6 +852,25 @@ impl Checker {
                 }
             }
         }
+        // Owning heap pointer: inner must be a known class, struct, or
+        // trait. Anything else (primitives, pointers, containers, nested
+        // `own`, generics) is rejected — phase 1 owns class/struct objects.
+        if let Ty::Own(ref inner) = t {
+            match inner.as_ref() {
+                Ty::Struct(n) => {
+                    let lookup = n.rsplit("::").next().unwrap_or(n);
+                    if !self.structs.contains_key(lookup)
+                        && !self.classes.contains_key(lookup)
+                        && !self.traits.contains_key(lookup)
+                    {
+                        self.errors.push(SemError{message: format!("unknown type `{n}`"), span: ty.span()});
+                    }
+                }
+                other => {
+                    self.errors.push(SemError{message: format!("`own` requires a class, struct, or trait type, found `{other}`"), span: ty.span()});
+                }
+            }
+        }
         // Handle Generic type
         if let Ty::Generic(ref n, ref args) = t {
             // Check base exists
@@ -687,6 +882,12 @@ impl Checker {
                     self.errors.push(SemError{message: format!("unknown generic type `{n}`"), span: ty.span()});
                 }
             }
+        }
+        // `own` may only appear as the whole type (never nested inside
+        // containers, pointers, generics, ...). Top-level `own` itself is
+        // validated above.
+        if !matches!(t, Ty::Own(_)) && Self::contains_own(&t) {
+            self.errors.push(SemError{message: "own types cannot be nested inside other types in phase 1".into(), span: ty.span()});
         }
         // For compound types, ensure inner is known (array element etc) – From already handled, but check nested struct/enum existence
         match &t {
@@ -797,6 +998,12 @@ impl Checker {
                                     "field `{}` cannot be `void`",
                                     f.name
                                 ),
+                                span: f.span,
+                            });
+                        }
+                        if matches!(fty, Ty::Own(_)) {
+                            self.errors.push(SemError {
+                                message: "own fields need structural destruction — rejected in phase 1".into(),
                                 span: f.span,
                             });
                         }
@@ -918,6 +1125,12 @@ impl Checker {
                         }
                         let fty = self.resolve_type(&f.ty);
                         if fty == Ty::Void { self.errors.push(SemError{message: format!("field `{}` cannot be `void`", f.name), span: f.span}); }
+                        if matches!(fty, Ty::Own(_)) {
+                            self.errors.push(SemError {
+                                message: "own fields need structural destruction — rejected in phase 1".into(),
+                                span: f.span,
+                            });
+                        }
                         if let Some(def) = &f.default {
                             let dty = self.check_expr(def);
                             if dty != fty && dty != Ty::Any {
@@ -1265,6 +1478,12 @@ impl Checker {
                         crate::ast::ExtensionMember::Field(field) => {
                             let fty = self.resolve_type(&field.ty);
                             if fty == Ty::Void { self.errors.push(SemError{message: format!("field `{}` cannot be `void`", field.name), span: field.span}); }
+                            if matches!(fty, Ty::Own(_)) {
+                                self.errors.push(SemError {
+                                    message: "own fields need structural destruction — rejected in phase 1".into(),
+                                    span: field.span,
+                                });
+                            }
                             if let Some(def) = &field.default {
                                 let dty = self.check_expr(def);
                                 if dty != fty && dty != Ty::Any { self.errors.push(SemError{message: format!("default for field `{}`: expected `{}`, found `{}`", field.name, fty, dty), span: def.span}); }
@@ -1396,11 +1615,15 @@ impl Checker {
                 if decl_ty == Ty::Void {
                     self.errors.push(SemError{message: "const cannot have void type".into(), span: c.span});
                 }
+                if matches!(decl_ty, Ty::Own(_)) {
+                    self.errors.push(SemError{message: "global own constants need structural destruction — rejected in phase 1".into(), span: c.span});
+                }
                 let init_ty = self.check_expr(&c.init);
                 let is_null = matches!(c.init.kind, ExprKind::Null);
                 if !is_null && !self.ty_assignable(&init_ty, &decl_ty) && decl_ty != Ty::Any {
                     self.errors.push(SemError{message: format!("const initializer mismatch: expected `{}`, found `{}`", decl_ty, init_ty), span: c.init.span});
                 }
+                self.reject_null_own(is_null, &decl_ty, c.init.span);
                 if self.scopes.last().map(|s| s.contains_key(&c.name)).unwrap_or(false) {
                     self.errors.push(SemError{message: format!("redefinition of const `{}`", c.name), span: c.name_span});
                 } else {
@@ -1408,6 +1631,9 @@ impl Checker {
                 }
             } else if let Item::Var(v) = item {
                 let mut decl_ty = self.resolve_type(&v.ty);
+                if matches!(decl_ty, Ty::Own(_)) {
+                    self.errors.push(SemError{message: "global own variables need structural destruction — rejected in phase 1".into(), span: v.span});
+                }
                 if decl_ty == Ty::Void {
                     self.errors.push(SemError{message: "global variable cannot have `void` type".into(), span: v.span});
                 }
@@ -1458,6 +1684,7 @@ impl Checker {
                                 self.errors.push(SemError{message: format!("global var initializer mismatch: expected `{}`, found `{}`", decl_ty, init_ty), span: init.span});
                             }
                         }
+                        self.reject_null_own(is_null, &decl_ty, init.span);
                     }
                 }
                 if self.scopes.last().map(|s| s.contains_key(&v.name)).unwrap_or(false) {
@@ -1510,6 +1737,12 @@ impl Checker {
                                     }
                                     let fty = self.resolve_type(&f.ty);
                                     if fty == Ty::Void { self.errors.push(SemError{message: format!("field `{}` cannot be `void`", f.name), span: f.span}); }
+                        if matches!(fty, Ty::Own(_)) {
+                            self.errors.push(SemError {
+                                message: "own fields need structural destruction — rejected in phase 1".into(),
+                                span: f.span,
+                            });
+                        }
                                     if let Some(tn) = self.extern_trait_name(&fty) {
                                         self.errors.push(SemError{message: format!("extern struct field `{}` cannot use trait type `{tn}` (no C representation)", f.name), span: f.span});
                                     }
@@ -1928,6 +2161,12 @@ impl Checker {
                         if !is_null && !compatible && decl_ty != Ty::Void && decl_ty != Ty::Any {
                             self.errors.push(SemError{message: format!("type mismatch in initializer: expected `{decl_ty}`, found `{init_ty}`"), span: init.span});
                         }
+                        self.reject_null_own(is_null, &decl_ty, init.span);
+                        // Initializing an `own` slot moves out of any own
+                        // slots named in the initializer.
+                        if matches!(decl_ty, Ty::Own(_)) {
+                            self.poison_moved_idents(init);
+                        }
                     }
                 }
                 self.declare_var(&d.name, decl_ty, d.name_span);
@@ -1947,6 +2186,7 @@ impl Checker {
                 if !is_null && !self.ty_assignable(&init_ty, &decl_ty) && decl_ty != Ty::Any {
                     self.errors.push(SemError { message: format!("const initializer mismatch: expected `{decl_ty}`, found `{init_ty}`"), span: c.init.span });
                 }
+                self.reject_null_own(is_null, &decl_ty, c.init.span);
                 self.declare_const(&c.name, decl_ty, c.name_span);
                 false
             }
@@ -2012,6 +2252,12 @@ impl Checker {
             }
             Stmt::Expr(e) => {
                 let _ = self.check_expr(&e.expr);
+                if matches!(e.expr.kind, ExprKind::New { .. }) {
+                    self.errors.push(SemError{
+                        message: "unused `new` value is a guaranteed leak — assign it to an `own` slot or delete it".into(),
+                        span: e.expr.span,
+                    });
+                }
                 false
             }
             Stmt::Block(b) => self.check_block(b, ret_ty),
@@ -2121,6 +2367,53 @@ impl Checker {
                 }
                 false
             }
+            Stmt::Delete(d) => {
+                let ty = self.check_expr(&d.target);
+                match &d.target.kind {
+                    ExprKind::Ident(name) => {
+                        let lookup = name.rsplit("::").next().unwrap_or(name);
+                        let var_ty = self.lookup_var(name).or_else(|| self.lookup_var(lookup));
+                        match var_ty {
+                            Some(Ty::Own(_)) => {
+                                if self.is_poisoned(name) || self.is_poisoned(lookup) {
+                                    self.errors.push(SemError {
+                                        message: format!("use of moved or deleted value `{name}`"),
+                                        span: d.target.span,
+                                    });
+                                } else {
+                                    self.poison_at_decl(name);
+                                    // `delete` of local vs `this` already guarded via ty check
+                                }
+                            }
+                            Some(_) => {
+                                self.errors.push(SemError {
+                                    message: "delete requires an `own` value".into(),
+                                    span: d.target.span,
+                                });
+                            }
+                            None => {
+                                // undefined already reported via check_expr
+                            }
+                        }
+                        if name == "this" {
+                            self.errors.push(SemError {
+                                message: "cannot delete `this` (borrowed receiver)".into(),
+                                span: d.target.span,
+                            });
+                        }
+                    }
+                    _ => {
+                        self.errors.push(SemError {
+                            message: "delete requires a named `own` variable".into(),
+                            span: d.target.span,
+                        });
+                        if !matches!(ty, Ty::Own(_)) && ty != Ty::Any {
+                            // still report type mismatch if not own
+                        }
+                    }
+                }
+                false
+            }
             Stmt::Break(b) => {
                 if let Some(label) = &b.label {
                     if !self.loop_stack.iter().any(|l| l.as_ref() == Some(label)) {
@@ -2152,6 +2445,16 @@ impl Checker {
             ExprKind::Ident(name) => {
                 let lookup = name.rsplit("::").next().unwrap_or(name);
                 if let Some(ty) = self.lookup_var(name).or_else(|| self.lookup_var(lookup)) {
+                    // Reading a moved/deleted `own` slot is an error. (Plain
+                    // assignment targets rebirth via unpoisoning in Assign.)
+                    if matches!(ty, Ty::Own(_))
+                        && (self.is_poisoned(name) || self.is_poisoned(lookup))
+                    {
+                        self.errors.push(SemError {
+                            message: format!("use of moved or deleted value `{name}`"),
+                            span: expr.span,
+                        });
+                    }
                     ty
                 } else {
                     if name.contains("::") {
@@ -2344,11 +2647,27 @@ impl Checker {
                     if self.is_const(name) {
                         self.errors.push(SemError{message: format!("cannot assign to const `{}`", name), span: lhs.span});
                     }
+                    // Rebirth: overwriting a moved/deleted slot with a fresh
+                    // value makes it live again.
+                    self.unpoison_at_decl(name);
+                }
+                // Writing through a member of a dead object is an error.
+                if let ExprKind::MemberAccess { object, .. } = &lhs.kind {
+                    if let ExprKind::Ident(base) = &object.kind {
+                        if self.is_poisoned(base) {
+                            self.errors.push(SemError{message: format!("use of moved or deleted value `{base}`"), span: object.span});
+                        }
+                    }
                 }
                 let rhs_ty = self.check_expr(value);
                 let is_null = matches!(value.kind, ExprKind::Null);
                 if !is_null && !self.ty_assignable(&rhs_ty, &lhs_ty) {
                     self.errors.push(SemError{message: format!("assignment type mismatch: expected `{lhs_ty}`, found `{rhs_ty}`"), span: expr.span});
+                }
+                self.reject_null_own(is_null, &lhs_ty, expr.span);
+                // Moving into an `own` slot poisons the sources.
+                if matches!(lhs_ty, Ty::Own(_)) {
+                    self.poison_moved_idents(value);
                 }
                 lhs_ty
             }
@@ -2569,7 +2888,7 @@ impl Checker {
                                     if !self.ty_assignable(&aty, &sig.params[pidx]) {
                                         self.errors.push(SemError{message: format!("ctor arg {}: expected `{}`, found `{aty}`", i+1, sig.params[pidx]), span: arg.span()});
                                     }
-                                    self.check_arg_mode(arg, &sig.param_modes, pidx, callee, i + 1);
+                                    self.check_arg_mode(arg, &sig, pidx, callee, i + 1);
                                 }
                                 return struct_ty;
                             } else {
@@ -2627,7 +2946,7 @@ impl Checker {
                                     }
                                 }
                             }
-                            self.check_arg_mode(arg, &sig.param_modes, pidx, callee, i + 1);
+                            self.check_arg_mode(arg, &sig, pidx, callee, i + 1);
                         }
                     }
                     sig.ret
@@ -2667,7 +2986,8 @@ impl Checker {
                 field_span,
             } => {
                 let obj_ty = self.check_expr(object);
-                if let Ty::Struct(ref sname) = obj_ty {
+                let effective_ty = self.deref_ty(&obj_ty);
+                if let Ty::Struct(ref sname) = effective_ty {
                     if let Some(sinfo) = self.structs.get(sname).cloned() {
                         if let Some((_, fty)) = sinfo.field_map.get(field) {
                             if let Some(vis) = sinfo.field_vis.get(field) {
@@ -2960,7 +3280,9 @@ impl Checker {
                 if let Some(ret) = self.check_collection_method(object, method, method_span, args, &obj_ty) {
                     return ret;
                 }
-                let sname = match obj_ty {
+                // Auto-deref for `own T` receivers (`. ` through owning pointers).
+                let effective_ty = self.deref_ty(&obj_ty);
+                let sname = match effective_ty {
                     Ty::Struct(ref n) => n.clone(),
                     _ => {
                         self.errors.push(SemError{message: format!("method call on non-class type `{obj_ty}`"), span: object.span});
@@ -3337,6 +3659,90 @@ impl Checker {
                 }
             }
             ExprKind::Null => Ty::Any,
+            ExprKind::New { ty, args, .. } => {
+                let inner = self.resolve_type(ty);
+                match &inner {
+                    Ty::Struct(n) if self.structs.contains_key(n) || self.classes.contains_key(n) || self.traits.contains_key(n) => {},
+                    other => {
+                        self.errors.push(SemError{message: format!("`new` requires a class, struct, or trait type, found `{other}`"), span: expr.span});
+                        for a in args { let _ = self.check_call_arg(a); }
+                        return Ty::Own(Box::new(inner));
+                    }
+                }
+                // Validate constructor args similar to `Type(args)` calls.
+                // Reuse the same ctor selection as `Call` handling for the inner type name.
+                if let Ty::Struct(n) = &inner {
+                    if let Some(cls) = self.classes.get(n).cloned() {
+                        if !cls.constructors.is_empty() {
+                            let mut matched: Option<(crate::sema::Ty, usize)> = None;
+                            for (sig, _) in &cls.constructors {
+                                if sig.params.len() == args.len() {
+                                    matched = Some((Ty::Struct(n.clone()), 0));
+                                    break;
+                                }
+                            }
+                            if matched.is_none() {
+                                // arity mismatch: try to find any ctor
+                                let mut found = false;
+                                for (sig, _) in &cls.constructors {
+                                    if sig.params.len() == args.len() { found = true; break; }
+                                }
+                                if !found {
+                                    self.errors.push(SemError{message: format!("no matching constructor for `{n}` with {} args", args.len()), span: expr.span});
+                                }
+                            }
+                            // type-check args against the first matching ctor
+                            if let Some((sig, _)) = cls.constructors.iter().find(|(s,_)| s.params.len() == args.len()) {
+                                for (i, arg) in args.iter().enumerate() {
+                                    let aty = self.check_call_arg(arg);
+                                    if let Some(pt) = sig.params.get(i) {
+                                        if !self.ty_assignable(&aty, pt) {
+                                            self.errors.push(SemError{message: format!("new {} arg {}: expected `{}`, found `{}`", n, i+1, pt, aty), span: arg.span()});
+                                        }
+                                        self.check_arg_mode(arg, sig, i, n, i+1);
+                                    }
+                                }
+                            } else {
+                                for a in args { let _ = self.check_call_arg(a); }
+                            }
+                        } else {
+                            // No explicit ctor: check against fields (struct literal via call)
+                            if let Some(sinfo) = self.structs.get(n).cloned() {
+                                if !sinfo.fields.is_empty() && args.len() == sinfo.fields.len() {
+                                    for (i, arg) in args.iter().enumerate() {
+                                        let aty = self.check_call_arg(arg);
+                                        let fty = &sinfo.fields[i].1;
+                                        if !self.ty_assignable(&aty, fty) {
+                                            self.errors.push(SemError{message: format!("new {} arg {}: expected `{}`, found `{}`,", n, i+1, fty, aty), span: arg.span()});
+                                        }
+                                    }
+                                } else {
+                                    for a in args { let _ = self.check_call_arg(a); }
+                                }
+                            } else {
+                                for a in args { let _ = self.check_call_arg(a); }
+                            }
+                        }
+                    } else if let Some(sinfo) = self.structs.get(n).cloned() {
+                        if !sinfo.fields.is_empty() && args.len() == sinfo.fields.len() {
+                            for (i, arg) in args.iter().enumerate() {
+                                let aty = self.check_call_arg(arg);
+                                let fty = &sinfo.fields[i].1;
+                                if !self.ty_assignable(&aty, fty) {
+                                    self.errors.push(SemError{message: format!("new {} arg {}: expected `{}`, found `{}`,", n, i+1, fty, aty), span: arg.span()});
+                                }
+                            }
+                        } else {
+                            for a in args { let _ = self.check_call_arg(a); }
+                        }
+                    } else {
+                        for a in args { let _ = self.check_call_arg(a); }
+                    }
+                } else {
+                    for a in args { let _ = self.check_call_arg(a); }
+                }
+                Ty::Own(Box::new(inner))
+            }
             ExprKind::Tuple(exprs) => {
                 let tys: Vec<Ty> = exprs.iter().map(|e| self.check_expr(e)).collect();
                 Ty::Tuple(tys)
@@ -3386,27 +3792,40 @@ impl Checker {
     /// mode. `param_idx` indexes the signature (no `this` offset in sema
     /// sigs). Named arguments are owned by the dedicated named-arg path
     /// and skipped here.
+    /// Full per-argument contract against a signature: marker validation
+    /// (`out`/`ref`) plus ownership moves into `own` parameters. Named
+    /// arguments are owned by the dedicated named path (skipped here).
+    /// `pidx` indexes the signature (no `this` offset in sema sigs).
     fn check_arg_mode(
         &mut self,
         arg: &CallArg,
-        modes: &[ParamMode],
-        param_idx: usize,
+        sig: &FuncSig,
+        pidx: usize,
         callee: &str,
         arg_no: usize,
     ) {
         if matches!(arg, CallArg::Named { .. }) {
             return;
         }
-        let Some(mode) = modes.get(param_idx) else {
-            return;
-        };
-        let is_out = matches!(arg, CallArg::Out { .. });
-        let is_ref = matches!(arg, CallArg::Ref { .. });
-        match mode {
-            ParamMode::Out if !is_out => self.errors.push(SemError { message: format!("argument {} of `{}` is `out` param but call uses non-out", arg_no, callee), span: arg.span() }),
-            ParamMode::Ref if !is_ref => self.errors.push(SemError { message: format!("argument {} of `{}` is `ref` param but call uses non-ref", arg_no, callee), span: arg.span() }),
-            ParamMode::None if is_out || is_ref => self.errors.push(SemError { message: format!("argument {} of `{}` is by-value param but call uses `out`/`ref`", arg_no, callee), span: arg.span() }),
-            _ => {}
+        if let Some(mode) = sig.param_modes.get(pidx) {
+            let is_out = matches!(arg, CallArg::Out { .. });
+            let is_ref = matches!(arg, CallArg::Ref { .. });
+            match mode {
+                ParamMode::Out if !is_out => self.errors.push(SemError { message: format!("argument {} of `{}` is `out` param but call uses non-out", arg_no, callee), span: arg.span() }),
+                ParamMode::Ref if !is_ref => self.errors.push(SemError { message: format!("argument {} of `{}` is `ref` param but call uses non-ref", arg_no, callee), span: arg.span() }),
+                ParamMode::None if is_out || is_ref => self.errors.push(SemError { message: format!("argument {} of `{}` is by-value param but call uses `out`/`ref`", arg_no, callee), span: arg.span() }),
+                _ => {}
+            }
+        }
+        // Moving into an `own` parameter poisons the sources.
+        // `out`/`ref` markers are borrows, not moves; plain `Expr`/`Named`
+        // that evaluate to an `own` value move it.
+        if matches!(sig.params.get(pidx), Some(Ty::Own(_))) {
+            match arg {
+                CallArg::Expr(e) => self.poison_moved_idents(e),
+                CallArg::Named { value, .. } => self.poison_moved_idents(value),
+                _ => {}
+            }
         }
     }
 
@@ -3664,7 +4083,7 @@ impl Checker {
                         }
                     }
                 }
-                self.check_arg_mode(arg, &sig.param_modes, pidx, callee, i + 1);
+                self.check_arg_mode(arg, &sig, pidx, callee, i + 1);
             }
             // Check variadic tail: `vda` is `T[]` where `T` is element type
             if let Some(vty) = sig.params.get(vidx) {
@@ -3698,7 +4117,7 @@ impl Checker {
                             }
                         }
                     }
-                    self.check_arg_mode(arg, &sig.param_modes, pidx, callee, fixed + vda_count + j + 1);
+                    self.check_arg_mode(arg, &sig, pidx, callee, fixed + vda_count + j + 1);
                 }
             }
             // Also check where bounds for variadic generic
@@ -3803,6 +4222,7 @@ impl Checker {
             Ty::Map { key, value } => Ty::Map { key: Box::new(Self::subst_generic_ty(key, map)), value: Box::new(Self::subst_generic_ty(value, map)) },
             Ty::Pointer(el) => Ty::Pointer(Box::new(Self::subst_generic_ty(el, map))),
             Ty::Optional(el) => Ty::Optional(Box::new(Self::subst_generic_ty(el, map))),
+            Ty::Own(el) => Ty::Own(Box::new(Self::subst_generic_ty(el, map))),
             Ty::Tuple(tys) => Ty::Tuple(tys.iter().map(|t| Self::subst_generic_ty(t, map)).collect()),
             Ty::Function(ret, args) => Ty::Function(Box::new(Self::subst_generic_ty(ret, map)), args.iter().map(|a| Self::subst_generic_ty(a, map)).collect()),
             other => other.clone(),
@@ -3879,6 +4299,7 @@ impl Checker {
             Ty::Map { key, value } => Type::Map { key: Box::new(Self::ty_to_type(key)), value: Box::new(Self::ty_to_type(value)), span: sp },
             Ty::Pointer(el) => Type::Pointer(Box::new(Self::ty_to_type(el)), sp),
             Ty::Optional(el) => Type::Optional(Box::new(Self::ty_to_type(el)), sp),
+            Ty::Own(el) => Type::Own(Box::new(Self::ty_to_type(el)), sp),
             Ty::Tuple(tys) => Type::Tuple(tys.iter().map(|t| Self::ty_to_type(t)).collect(), sp),
             Ty::Function(ret, args) => Type::FunctionType(Box::new(Self::ty_to_type(ret)), args.iter().map(|a| Self::ty_to_type(a)).collect(), sp),
         }
@@ -3982,7 +4403,8 @@ impl Checker {
             } => {
                 // reuse field check but treat as lvalue - also handle properties (setter)
                 let obj_ty = self.check_expr(object);
-                if let Ty::Struct(ref sname) = obj_ty {
+                let effective_ty = self.deref_ty(&obj_ty);
+                if let Ty::Struct(ref sname) = effective_ty {
                     if let Some(sinfo) = self.structs.get(sname) {
                         if let Some((_, fty)) = sinfo.field_map.get(field) {
                             if let Some(cinfo) = self.classes.get(sname) {

@@ -1,0 +1,82 @@
+// own_heap.hll — heap ownership with `own T`, `new`, `delete`, `own` moves, trait objects
+// Demonstrates move+RAII ownership, auto-deref on `.`, early `delete`, and
+// `own` trait upcasts. `own` slots are pairs `{data ptr, type tag}` with
+// scope-destroy (dtor + free) and `delete` as early destroy + poison.
+import std::io
+
+
+trait Speaker has
+    string speak()
+end
+
+open class Cat implements Speaker has
+    public string name
+
+    Cat(string name) initialize
+
+    ~Cat() do
+        println("Bye Cat!")
+    end
+
+    public string speak() do
+        return "meow from {this.name}"
+    end
+end
+
+open class Dog implements Speaker has
+    public string name
+
+    Dog(string name) initialize
+
+    ~Dog() do
+        println("Bye Dog!")
+    end
+
+    public string speak() do
+        return "woof from {this.name}"
+    end
+end
+
+open class User has
+    public string name
+    public int    age
+
+    User(string name, int age) initialize
+
+    ~User() do
+        println("Bye User {this.name}!")
+    end
+
+    public void yell() do
+        println("Yo {this.name}!")
+    end
+end
+
+void take(own User u) do
+    println("take got {u.name}")
+end
+
+void main() do
+    // Basic heap construction, auto-deref field/method, delete, scope destroy
+    own User a = new User("aaa", 30)
+    println(a.name)
+    a.yell()
+    own User b = a
+    println(b.name)
+    delete b
+    println("after delete b")
+
+    // Trait object via `own` upcast, dynamic dispatch, field access through trait
+    own Speaker s = new Cat("tom")
+    println(s.speak())
+    s = new Dog("spike")
+    println(s.speak())
+
+    // Move into function
+    own User c = new User("ccc", 25)
+    take(c)
+    println("after take c")
+
+    // Bare `new` without owner is a leak (diagnosed) — not shown here
+    println("done")
+end
