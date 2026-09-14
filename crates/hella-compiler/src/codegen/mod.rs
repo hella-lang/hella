@@ -6768,17 +6768,18 @@ impl<'ctx> Codegen<'ctx> {
             }
             ExprKind::EnumVariant{enum_name, variant, variant_span: _, args} => {
                 // Enum variant construction: produce {tag, payload} struct value
+                let vbase: &str = variant.rsplit("::").next().unwrap_or(variant);
                 let ename = if let Some(n) = enum_name { n.clone() } else {
                     // search for enum containing variant
                     let mut found = None;
                     for (ename, einfo) in &self.enum_variant_tags {
-                        if einfo.contains_key(variant) { found = Some(ename.clone()); break; }
+                        if einfo.contains_key(vbase) { found = Some(ename.clone()); break; }
                     }
                     found.unwrap_or_else(|| variant.clone())
                 };
-                let tag_map = self.enum_variant_tags.get(&ename).unwrap();
-                let tag = *tag_map.get(variant).unwrap() as u64;
-                let enum_ty = self.enum_types.get(&ename).unwrap();
+                let tag_map = self.enum_variant_tags.get(&ename).ok_or(CodegenError{message: format!("unknown enum `{ename}`"), span: expr.span})?;
+                let tag = *tag_map.get(vbase).ok_or(CodegenError{message: format!("unknown variant `{variant}` for enum `{ename}`"), span: expr.span})? as u64;
+                let enum_ty = self.enum_types.get(&ename).ok_or(CodegenError{message: format!("unknown enum `{ename}`"), span: expr.span})?;
                 // start with undef, insert tag at 0, payload at 1 if present
                 let mut agg: BasicValueEnum<'ctx> = enum_ty.get_undef().into();
                 let tag_val = self.context.i32_type().const_int(tag, false);
@@ -7025,6 +7026,15 @@ impl<'ctx> Codegen<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         // Evaluate scrutinee once
         let scrut_val = self.codegen_expr(&m.scrutinee)?;
+        // Resolve the scrutinee's sema type once (sema already validated
+        // enum/tuple patterns). `infer_expr_ty` is best-effort here: complex
+        // scrutinees (calls, etc.) may not infer, so keep it optional and
+        // report a proper `CodegenError` instead of panicking below.
+        let scrut_ty_opt = self.infer_expr_ty(&m.scrutinee).ok();
+        let scrut_enum_name: Option<String> = match &scrut_ty_opt {
+            Some(crate::sema::Ty::Enum(n)) => Some(n.clone()),
+            _ => None,
+        };
         let func = self.cur_fn.unwrap();
         let merge_bb = self.context.append_basic_block(func, "match.merge");
         // Determine result type lazily via first arm body; allocate after
@@ -7103,12 +7113,9 @@ impl<'ctx> Codegen<'ctx> {
                                     }
                                     Pattern::Wildcard(_) | Pattern::Var(_, _) => self.context.bool_type().const_int(1, false),
                                     Pattern::Enum{variant, payload, ..} => {
-                                        let ename = match self.infer_expr_ty(&m.scrutinee).unwrap() {
-                                            crate::sema::Ty::Enum(ref n) => n.clone(),
-                                            _ => panic!("enum pattern on non-enum"),
-                                        };
-                                        let tag_map = self.enum_variant_tags.get(&ename).unwrap();
-                                        let tag = *tag_map.get(variant).unwrap() as u64;
+                                        let ename = scrut_enum_name.clone().ok_or(CodegenError{message: format!("enum pattern `{variant}` on non-enum scrutinee"), span: pat.span()})?;
+                                        let tag_map = self.enum_variant_tags.get(&ename).ok_or(CodegenError{message: format!("unknown enum `{ename}`"), span: pat.span()})?;
+                                        let tag = *tag_map.get(variant.rsplit("::").next().unwrap_or(variant)).ok_or(CodegenError{message: format!("unknown variant `{variant}` for enum `{ename}`"), span: pat.span()})? as u64;
                                         let tag_lit = self.context.i32_type().const_int(tag, false);
                                         let enum_tag = self.builder.build_extract_value(scrut_val.into_struct_value(), 0, "enum.tag.alt").unwrap().into_int_value();
                                         let tag_eq = self.builder.build_int_compare(IntPredicate::EQ, enum_tag, tag_lit, "match.enum.tag.alt").unwrap();
@@ -7128,8 +7135,8 @@ impl<'ctx> Codegen<'ctx> {
                                     }
                                     Pattern::Tuple(subs, _) => {
                                         // For tuple alternative like `(1,2) | (3,4)`, check each tuple
-                                        if let Ok(tuple_ty) = self.infer_expr_ty(&m.scrutinee) {
-                                            if let crate::sema::Ty::Tuple(tys) = tuple_ty {
+                                        if let Some(crate::sema::Ty::Tuple(tys)) = scrut_ty_opt.clone() {
+                                            if tys.len() == subs.len() {
                                                 let mut and_val: Option<inkwell::values::IntValue<'ctx>> = None;
                                                 for (i, subpat) in subs.iter().enumerate() {
                                                     let elem_val = self.builder.build_extract_value(scrut_val.into_struct_value(), i as u32, "tuple.alt.elem").unwrap();
@@ -7178,14 +7185,10 @@ impl<'ctx> Codegen<'ctx> {
                                         let lit = self.context.bool_type().const_int(if *b {1} else {0}, false);
                                         self.builder.build_int_compare(IntPredicate::EQ, elem_val.into_int_value(), lit, "tuple.pat").unwrap()
                                     }
-                                    Pattern::Enum{variant, ..} => {
-                                        // Tuple element is enum: check tag
-                                        if let Ok(crate::sema::Ty::Enum(ref ename)) = self.infer_expr_ty(&crate::ast::Expr{kind: crate::ast::ExprKind::Tuple(vec![]), span: pat.span()}) {
-                                            // Not needed for now, just true
-                                            self.context.bool_type().const_int(1, false)
-                                        } else {
-                                            self.context.bool_type().const_int(1, false)
-                                        }
+                                    Pattern::Enum{..} => {
+                                        // Tuple element is itself an enum value: binding only,
+                                        // payload checks happen when that element is matched.
+                                        self.context.bool_type().const_int(1, false)
                                     }
                                     Pattern::Tuple(_, _) => self.context.bool_type().const_int(1, false),
                                     Pattern::Alternative(alts, _) => {
@@ -7214,12 +7217,9 @@ impl<'ctx> Codegen<'ctx> {
                             and_val.unwrap_or_else(|| self.context.bool_type().const_int(1, false))
                         }
                         Pattern::Enum{variant, payload, ..} => {
-                            let ename = match self.infer_expr_ty(&m.scrutinee).unwrap() {
-                                crate::sema::Ty::Enum(ref n) => n.clone(),
-                                _ => panic!("enum pattern on non-enum"),
-                            };
-                            let tag_map = self.enum_variant_tags.get(&ename).unwrap();
-                            let tag = *tag_map.get(variant).unwrap() as u64;
+                            let ename = scrut_enum_name.clone().ok_or(CodegenError{message: format!("enum pattern `{variant}` on non-enum scrutinee"), span: arm.pattern.span()})?;
+                            let tag_map = self.enum_variant_tags.get(&ename).ok_or(CodegenError{message: format!("unknown enum `{ename}`"), span: arm.pattern.span()})?;
+                            let tag = *tag_map.get(variant.rsplit("::").next().unwrap_or(variant)).ok_or(CodegenError{message: format!("unknown variant `{variant}` for enum `{ename}`"), span: arm.pattern.span()})? as u64;
                             let tag_lit = self.context.i32_type().const_int(tag, false);
                             let enum_tag = self.builder.build_extract_value(scrut_val.into_struct_value(), 0, "enum.tag").unwrap().into_int_value();
                             let tag_eq = self.builder.build_int_compare(IntPredicate::EQ, enum_tag, tag_lit, "match.enum.tag").unwrap();
@@ -7236,13 +7236,10 @@ impl<'ctx> Codegen<'ctx> {
                                             let lit = self.context.bool_type().const_int(if *b {1} else {0}, false);
                                             self.builder.build_int_compare(IntPredicate::EQ, payload_val.into_int_value(), lit, "match.enum.payload").unwrap()
                                         }
-                                        Pattern::Tuple(subs, _) => {
-                                            // Enum payload is tuple like `MyVariant((a,b))` where payload is one tuple
-                                            if let Ok(crate::sema::Ty::Tuple(tys)) = self.infer_expr_ty(&crate::ast::Expr{kind: crate::ast::ExprKind::Tuple(vec![]), span: pats[0].span()}) {
-                                                self.context.bool_type().const_int(1, false)
-                                            } else {
-                                                self.context.bool_type().const_int(1, false)
-                                            }
+                                        Pattern::Tuple(_, _) => {
+                                            // Enum payload is a tuple like `MyVariant((a,b))`;
+                                            // element-wise checks bind in the arm body.
+                                            self.context.bool_type().const_int(1, false)
                                         }
                                         _ => self.context.bool_type().const_int(1, false),
                                     }
@@ -7712,11 +7709,29 @@ impl<'ctx> Codegen<'ctx> {
                             if let Some(tn) = self.pair_owner_of(ty.into_struct_type()) {
                                 return Ok(crate::sema::Ty::Struct(tn));
                             }
-                            let sname = self.ty_to_struct_name(ty).unwrap();
-                            if self.enum_types.contains_key(&sname) {
-                                return Ok(crate::sema::Ty::Enum(sname));
+                            if let Ok(sname) = self.ty_to_struct_name(ty) {
+                                if self.enum_types.contains_key(&sname) {
+                                    return Ok(crate::sema::Ty::Enum(sname));
+                                }
+                                return Ok(crate::sema::Ty::Struct(sname));
                             }
-                            return Ok(crate::sema::Ty::Struct(sname));
+                            // Anonymous struct (tuple literal): decode fields back to sema types.
+                            let st = ty.into_struct_type();
+                            let mut tys = Vec::new();
+                            let mut ok = true;
+                            for i in 0..st.count_fields() {
+                                match st.get_field_type_at_index(i) {
+                                    Some(fty) => match self.llvm_field_to_sema(fty, expr.span) {
+                                        Ok(t) => tys.push(t),
+                                        Err(_) => { ok = false; break; }
+                                    },
+                                    None => { ok = false; break; }
+                                }
+                            }
+                            if ok && !tys.is_empty() {
+                                return Ok(crate::sema::Ty::Tuple(tys));
+                            }
+                            return Err(CodegenError{message: format!("cannot infer type of {name}"), span: expr.span});
                         } else if ty.is_int_type() {
                             let bw = ty.into_int_type().get_bit_width();
                             if bw == 1 { return Ok(crate::sema::Ty::Bool); } else { return Ok(crate::sema::Ty::Int); }

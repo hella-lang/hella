@@ -3347,7 +3347,7 @@ impl Checker {
                 };
                 let enum_name_str = match &enum_ty { Ty::Enum(n) => n.clone(), _ => "".to_string() };
                 if let Some(einfo) = self.enums.get(&enum_name_str).cloned() {
-                    if let Some((_, payload_tys)) = einfo.variant_map.get(variant) {
+                    if let Some((_, payload_tys)) = einfo.variant_map.get(variant.rsplit("::").next().unwrap_or(variant)) {
                         if !payload_tys.is_empty() {
                             if args.len() != payload_tys.len() {
                                 self.errors.push(SemError{message: format!("variant `{variant}` expects {} payload(s), found {}", payload_tys.len(), args.len()), span: *variant_span});
@@ -3464,7 +3464,9 @@ impl Checker {
                         Pattern::Enum{variant, variant_span, payload} => {
                             if let Ty::Enum(ref ename) = scrut_ty {
                                 if let Some(einfo) = self.enums.get(ename).cloned() {
-                                    if let Some((_, payload_tys)) = einfo.variant_map.get(variant) {
+                                    // Qualified `Color.Red` parses as `Color::Red`; strip to `Red` for lookup.
+                                    let vbase: &str = variant.rsplit("::").next().unwrap_or(variant);
+                                    if let Some((_, payload_tys)) = einfo.variant_map.get(vbase) {
                                         match (payload, payload_tys.as_slice()) {
                                             (Some(pats), [expected]) if pats.len() == 1 => {
                                                 match &pats[0] {
@@ -3528,7 +3530,7 @@ impl Checker {
                                     }
                                     Pattern::Enum{ payload: Some(subs), variant, ..} => {
                                         if let Ty::Enum(ref ename) = scrut_ty {
-                                            if let Some(payload_tys) = self.enums.get(ename).and_then(|einfo| einfo.variant_map.get(variant).map(|(_, v)| v.clone())) {
+                                            if let Some(payload_tys) = self.enums.get(ename).and_then(|einfo| einfo.variant_map.get(variant.rsplit("::").next().unwrap_or(variant)).map(|(_, v)| v.clone())) {
                                                 for (spat, ty) in subs.iter().zip(payload_tys.iter()) {
                                                     if let Pattern::Var(n, s) = spat { self.declare_var(n, ty.clone(), *s); }
                                                 }
@@ -3560,7 +3562,7 @@ impl Checker {
                             if pats.len() == 1 {
                                 if let Pattern::Var(vname, vspan) = &pats[0] {
                                     if let Ty::Enum(ref ename) = scrut_ty {
-                                        if let Some(payload_tys) = self.enums.get(ename).and_then(|einfo| einfo.variant_map.get(variant).map(|(_, v)| v.clone())) {
+                                        if let Some(payload_tys) = self.enums.get(ename).and_then(|einfo| einfo.variant_map.get(variant.rsplit("::").next().unwrap_or(variant)).map(|(_, v)| v.clone())) {
                                             if let Some(pty) = payload_tys.first() {
                                                 self.declare_var(vname, pty.clone(), *vspan);
                                             }
@@ -3569,7 +3571,7 @@ impl Checker {
                                 } else if let Pattern::Tuple(subs, _) = &pats[0] {
                                     // Enum payload is tuple e.g., `MyVariant((a,b))` where payload is one tuple
                                     if let Ty::Enum(ref ename) = scrut_ty {
-                                        if let Some(payload_tys) = self.enums.get(ename).and_then(|einfo| einfo.variant_map.get(variant).map(|(_, v)| v.clone())) {
+                                        if let Some(payload_tys) = self.enums.get(ename).and_then(|einfo| einfo.variant_map.get(variant.rsplit("::").next().unwrap_or(variant)).map(|(_, v)| v.clone())) {
                                             if let Some(Ty::Tuple(tys)) = payload_tys.first() {
                                                 for (spat, ty) in subs.iter().zip(tys.iter()) {
                                                     if let Pattern::Var(n, s) = spat { self.declare_var(n, ty.clone(), *s); }
@@ -3580,7 +3582,7 @@ impl Checker {
                                 }
                             } else {
                                 if let Ty::Enum(ref ename) = scrut_ty {
-                                    if let Some(payload_tys) = self.enums.get(ename).and_then(|einfo| einfo.variant_map.get(variant).map(|(_, v)| v.clone())) {
+                                    if let Some(payload_tys) = self.enums.get(ename).and_then(|einfo| einfo.variant_map.get(variant.rsplit("::").next().unwrap_or(variant)).map(|(_, v)| v.clone())) {
                                         for (pat, ty) in pats.iter().zip(payload_tys.iter()) {
                                             if let Pattern::Var(vname, vspan) = pat {
                                                 self.declare_var(vname, ty.clone(), *vspan);
@@ -3635,12 +3637,39 @@ impl Checker {
                     // bool exhaustive requires both true/false or wildcard
                     let has_true = m.arms.iter().any(|a| {
                         matches!(a.pattern, Pattern::LitBool(true, _))
+                            || matches!(a.pattern, Pattern::Alternative(ref pats, _) if pats.iter().any(|p| matches!(p, Pattern::LitBool(true, _))))
                     });
                     let has_false = m.arms.iter().any(|a| {
                         matches!(a.pattern, Pattern::LitBool(false, _))
+                            || matches!(a.pattern, Pattern::Alternative(ref pats, _) if pats.iter().any(|p| matches!(p, Pattern::LitBool(false, _))))
                     });
                     if !(has_true && has_false) {
                         self.errors.push(SemError{message: "non-exhaustive bool match: require `true`, `false`, or wildcard".into(), span: m.span});
+                    }
+                }
+                if let Ty::Enum(ref ename) = scrut_ty {
+                    if !has_wildcard {
+                        if let Some(einfo) = self.enums.get(ename) {
+                            use std::collections::HashSet;
+                            let mut covered: HashSet<String> = HashSet::new();
+                            for arm in &m.arms {
+                                match &arm.pattern {
+                                    Pattern::Enum{variant, ..} => { covered.insert(variant.rsplit("::").next().unwrap_or(variant).to_string()); }
+                                    Pattern::Alternative(pats, _) => {
+                                        for p in pats {
+                                            if let Pattern::Enum{variant, ..} = p { covered.insert(variant.rsplit("::").next().unwrap_or(variant).to_string()); }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let all: HashSet<String> = einfo.variant_map.keys().cloned().collect();
+                            if covered != all {
+                                let mut missing: Vec<String> = all.difference(&covered).cloned().collect();
+                                missing.sort();
+                                self.errors.push(SemError{message: format!("non-exhaustive match on enum `{ename}`: missing `{}` (add wildcard `_` or the missing variants)", missing.join("`, `")), span: m.span});
+                            }
+                        }
                     }
                 }
                 arm_ty.unwrap_or(Ty::Int)
