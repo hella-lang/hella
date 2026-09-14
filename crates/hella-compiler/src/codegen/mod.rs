@@ -3256,6 +3256,12 @@ impl<'ctx> Codegen<'ctx> {
         let fn_ty = self.context.void_type().fn_type(&[self.context.ptr_type(inkwell::AddressSpace::default()).into()], false);
         self.module.add_function("free", fn_ty, None)
     }
+    fn get_or_declare_memcpy(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("memcpy") { return f; }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), self.context.i64_type().into()], false);
+        self.module.add_function("memcpy", fn_ty, None)
+    }
 
     // NOTE (real stdlib): no `is_stdlib_io_intrinsic` /
     // `codegen_stdlib_io_body`. User-facing IO (`print`, `println`,
@@ -3469,6 +3475,60 @@ impl<'ctx> Codegen<'ctx> {
             pos += 1;
         }
         Ok(out)
+    }
+
+    /// Clamped slice bounds `(lo, len)` with `0 <= lo` and `len >= 0`,
+    /// relative to `full_len` (array size, vector length, or `strlen`).
+    /// `end` defaults to the full length; `..=` includes it. Bound
+    /// expressions evaluate once, in order.
+    fn slice_bounds(
+        &mut self,
+        start: &Option<Box<Expr>>,
+        end: &Option<Box<Expr>>,
+        inclusive: bool,
+        full_len: inkwell::values::IntValue<'ctx>,
+    ) -> Result<(inkwell::values::IntValue<'ctx>, inkwell::values::IntValue<'ctx>), CodegenError> {
+        // Copy the context reference out so the i64 type below does not
+        // hold an immutable borrow of `self` across `&mut` calls.
+        let ctx: &'ctx Context = self.context;
+        let i64_ty = ctx.i64_type();
+        let i64_as_basic: BasicTypeEnum<'ctx> = i64_ty.into();
+        let lo_raw = if let Some(s) = start {
+            let sv = self.codegen_expr(s)?;
+            self.coerce_to_ty(sv, i64_as_basic).into_int_value()
+        } else {
+            i64_ty.const_zero()
+        };
+        let hi_raw = if let Some(e) = end {
+            let ev0 = self.codegen_expr(e)?;
+            let ev = self.coerce_to_ty(ev0, i64_as_basic).into_int_value();
+            if inclusive { self.builder.build_int_add(ev, i64_ty.const_int(1, false), "slice.hi.incl").unwrap() } else { ev }
+        } else {
+            full_len
+        };
+        let lo_nonneg = self.builder.build_select(self.builder.build_int_compare(IntPredicate::SGT, lo_raw, i64_ty.const_zero(), "slice.lo.pos").unwrap(), lo_raw, i64_ty.const_zero(), "slice.lo.nn").unwrap().into_int_value();
+        let lo = self.builder.build_select(self.builder.build_int_compare(IntPredicate::SGT, lo_nonneg, full_len, "slice.lo.over").unwrap(), full_len, lo_nonneg, "slice.lo").unwrap().into_int_value();
+        let hi_nonneg = self.builder.build_select(self.builder.build_int_compare(IntPredicate::SGT, hi_raw, i64_ty.const_zero(), "slice.hi.pos").unwrap(), hi_raw, i64_ty.const_zero(), "slice.hi.nn").unwrap().into_int_value();
+        let hi = self.builder.build_select(self.builder.build_int_compare(IntPredicate::SGT, hi_nonneg, full_len, "slice.hi.over").unwrap(), full_len, hi_nonneg, "slice.hi").unwrap().into_int_value();
+        let raw_len = self.builder.build_int_sub(hi, lo, "slice.len.raw").unwrap();
+        let len = self.builder.build_select(self.builder.build_int_compare(IntPredicate::SGT, raw_len, i64_ty.const_zero(), "slice.len.pos").unwrap(), raw_len, i64_ty.const_zero(), "slice.len").unwrap().into_int_value();
+        Ok((lo, len))
+    }
+
+    /// Zero fill value for a slice element type.
+    fn slice_zero_elem(
+        &self,
+        elem_ty: BasicTypeEnum<'ctx>,
+        span: Span,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        match elem_ty {
+            BasicTypeEnum::IntType(it) => Ok(it.const_zero().into()),
+            BasicTypeEnum::PointerType(pt) => Ok(pt.const_null().into()),
+            BasicTypeEnum::FloatType(ft) => Ok(ft.const_float(0.0).into()),
+            BasicTypeEnum::StructType(st) => Ok(st.const_zero().into()),
+            BasicTypeEnum::ArrayType(at) => Ok(at.const_zero().into()),
+            _ => Err(CodegenError{message: "unsupported element type for slicing".into(), span}),
+        }
     }
 
     /// Box a call argument into its declared parameter type when that
@@ -6898,8 +6958,9 @@ impl<'ctx> Codegen<'ctx> {
             }
             ExprKind::Slice { object, start, end, inclusive } => {
                 // `a[l..r]` / `a[..r]` / `a[l..]` / `a[..]` (`..=` includes
-                // `end`): copy the clamped range into a fresh array value,
-                // zero-filling outside it. Bounds evaluate once.
+                // `end`). Arrays and vectors copy the clamped range (zero
+                // outside); strings allocate a fresh null-terminated copy.
+                // Bounds evaluate once, in order.
                 let (base_ptr, base_ty): (PointerValue<'ctx>, BasicTypeEnum<'ctx>) = if let ExprKind::Ident(ref n) = object.kind {
                     let lookup = n.rsplit("::").next().unwrap_or(n);
                     self.lookup_var(n).or_else(|| self.lookup_var(lookup)).ok_or(CodegenError{message: format!("undefined variable `{n}`"), span: object.span})?
@@ -6909,56 +6970,86 @@ impl<'ctx> Codegen<'ctx> {
                     self.builder.build_store(tmp, v).unwrap();
                     (tmp, v.get_type())
                 };
-                let arr_ty = match base_ty {
-                    BasicTypeEnum::ArrayType(at) => at,
-                    _ => return Err(CodegenError{message: "slicing is only supported on arrays".into(), span: object.span}),
-                };
-                let n = arr_ty.len();
-                let elem_ty = arr_ty.get_element_type();
-                // Copy the context reference out so the i64 type below does
-                // not hold an immutable borrow of `self` across `&mut` calls.
-                let ctx: &'ctx Context = self.context;
-                let i64_ty = ctx.i64_type();
-                let zero_elem: BasicValueEnum<'ctx> = match elem_ty {
-                    BasicTypeEnum::IntType(it) => it.const_zero().into(),
-                    BasicTypeEnum::PointerType(pt) => pt.const_null().into(),
-                    BasicTypeEnum::FloatType(ft) => ft.const_float(0.0).into(),
-                    BasicTypeEnum::StructType(st) => st.const_zero().into(),
-                    BasicTypeEnum::ArrayType(at) => at.const_zero().into(),
-                    _ => return Err(CodegenError{message: "unsupported array element type for slicing".into(), span: object.span}),
-                };
-                let i64_as_basic: BasicTypeEnum<'ctx> = i64_ty.into();
-                let lo_raw = if let Some(s) = start {
-                    let sv = self.codegen_expr(s)?;
-                    self.coerce_to_ty(sv, i64_as_basic).into_int_value()
-                } else {
-                    i64_ty.const_zero()
-                };
-                let hi_raw = if let Some(e) = end {
-                    let ev0 = self.codegen_expr(e)?;
-                    let ev = self.coerce_to_ty(ev0, i64_as_basic).into_int_value();
-                    if *inclusive { self.builder.build_int_add(ev, i64_ty.const_int(1, false), "slice.hi.incl").unwrap() } else { ev }
-                } else { i64_ty.const_int(n as u64, false) };
-                let n_val = i64_ty.const_int(n as u64, false);
-                let lo_nonneg = self.builder.build_select(self.builder.build_int_compare(IntPredicate::SGT, lo_raw, i64_ty.const_zero(), "slice.lo.pos").unwrap(), lo_raw, i64_ty.const_zero(), "slice.lo.nn").unwrap().into_int_value();
-                let lo = self.builder.build_select(self.builder.build_int_compare(IntPredicate::SGT, lo_nonneg, n_val, "slice.lo.over").unwrap(), n_val, lo_nonneg, "slice.lo").unwrap().into_int_value();
-                let hi_nonneg = self.builder.build_select(self.builder.build_int_compare(IntPredicate::SGT, hi_raw, i64_ty.const_zero(), "slice.hi.pos").unwrap(), hi_raw, i64_ty.const_zero(), "slice.hi.nn").unwrap().into_int_value();
-                let hi = self.builder.build_select(self.builder.build_int_compare(IntPredicate::SGT, hi_nonneg, n_val, "slice.hi.over").unwrap(), n_val, hi_nonneg, "slice.hi").unwrap().into_int_value();
-                let raw_len = self.builder.build_int_sub(hi, lo, "slice.len.raw").unwrap();
-                let len = self.builder.build_select(self.builder.build_int_compare(IntPredicate::SGT, raw_len, i64_ty.const_zero(), "slice.len.pos").unwrap(), raw_len, i64_ty.const_zero(), "slice.len").unwrap().into_int_value();
-                let mut agg: BasicValueEnum<'ctx> = arr_ty.get_undef().into();
-                for i in 0..n {
-                    let idx = i64_ty.const_int(i as u64, false);
-                    let in_range = self.builder.build_int_compare(IntPredicate::SLT, idx, len, "slice.in").unwrap();
-                    let want = self.builder.build_int_add(lo, idx, "slice.want").unwrap();
-                    let src_idx = self.builder.build_select(in_range, want, i64_ty.const_zero(), "slice.src").unwrap().into_int_value();
-                    let elem_ptr = unsafe { self.builder.build_gep(arr_ty, base_ptr, &[i64_ty.const_zero(), src_idx], "slice.elem.ptr").unwrap() };
-                    let e = self.builder.build_load(elem_ty, elem_ptr, "slice.elem").unwrap();
-                    let picked = self.builder.build_select(in_range, e, zero_elem, "slice.pick").unwrap();
-                    let tmp = self.builder.build_insert_value(agg.into_array_value(), picked, i, "slice.ins").unwrap();
-                    agg = tmp.as_basic_value_enum();
+                match base_ty {
+                    BasicTypeEnum::ArrayType(arr_ty) => {
+                        let n = arr_ty.len();
+                        let ctx: &'ctx Context = self.context;
+                        let (lo, len) = self.slice_bounds(start, end, *inclusive, ctx.i64_type().const_int(n as u64, false))?;
+                        let i64_ty = ctx.i64_type();
+                        let elem_ty = arr_ty.get_element_type();
+                        let zero_elem = self.slice_zero_elem(elem_ty, object.span)?;
+                        let mut agg: BasicValueEnum<'ctx> = arr_ty.get_undef().into();
+                        for i in 0..n {
+                            let idx = i64_ty.const_int(i as u64, false);
+                            let in_range = self.builder.build_int_compare(IntPredicate::SLT, idx, len, "slice.in").unwrap();
+                            let want = self.builder.build_int_add(lo, idx, "slice.want").unwrap();
+                            let src_idx = self.builder.build_select(in_range, want, i64_ty.const_zero(), "slice.src").unwrap().into_int_value();
+                            let elem_ptr = unsafe { self.builder.build_gep(arr_ty, base_ptr, &[i64_ty.const_zero(), src_idx], "slice.elem.ptr").unwrap() };
+                            let e = self.builder.build_load(elem_ty, elem_ptr, "slice.elem").unwrap();
+                            let picked = self.builder.build_select(in_range, e, zero_elem, "slice.pick").unwrap();
+                            let tmp = self.builder.build_insert_value(agg.into_array_value(), picked, i, "slice.ins").unwrap();
+                            agg = tmp.as_basic_value_enum();
+                        }
+                        Ok(agg)
+                    }
+                    BasicTypeEnum::StructType(vec_st) if vec_st.count_fields() == 2 => {
+                        // Vector `{buf, len}`: copy the live prefix range into
+                        // a fresh vector value (buffer zero-filled past it).
+                        let buf_field = vec_st.get_field_type_at_index(0).unwrap();
+                        let buf_arr_ty = match buf_field {
+                            BasicTypeEnum::ArrayType(at) => at,
+                            _ => return Err(CodegenError{message: "slicing is only supported on arrays, vectors, and strings".into(), span: object.span}),
+                        };
+                        let cap = buf_arr_ty.len();
+                        let elem_ty = buf_arr_ty.get_element_type();
+                        let ctx: &'ctx Context = self.context;
+                        let i64_ty = ctx.i64_type();
+                        let len_ptr = self.builder.build_struct_gep(vec_st, base_ptr, 1, "vslice.len.ptr").unwrap();
+                        let veclen = self.builder.build_load(i64_ty, len_ptr, "vslice.len").unwrap().into_int_value();
+                        let (lo, len) = self.slice_bounds(start, end, *inclusive, veclen)?;
+                        let zero_elem = self.slice_zero_elem(elem_ty, object.span)?;
+                        let buf_ptr = self.builder.build_struct_gep(vec_st, base_ptr, 0, "vslice.buf").unwrap();
+                        let mut buf_val: BasicValueEnum<'ctx> = buf_arr_ty.get_undef().into();
+                        for i in 0..cap {
+                            let idx = i64_ty.const_int(i as u64, false);
+                            let in_range = self.builder.build_int_compare(IntPredicate::SLT, idx, len, "vslice.in").unwrap();
+                            let want = self.builder.build_int_add(lo, idx, "vslice.want").unwrap();
+                            let src_idx = self.builder.build_select(in_range, want, i64_ty.const_zero(), "vslice.src").unwrap().into_int_value();
+                            let elem_ptr = unsafe { self.builder.build_gep(buf_arr_ty, buf_ptr, &[i64_ty.const_zero(), src_idx], "vslice.elem.ptr").unwrap() };
+                            let e = self.builder.build_load(elem_ty, elem_ptr, "vslice.elem").unwrap();
+                            let picked = self.builder.build_select(in_range, e, zero_elem, "vslice.pick").unwrap();
+                            let tmp = self.builder.build_insert_value(buf_val.into_array_value(), picked, i, "vslice.ins").unwrap();
+                            buf_val = tmp.as_basic_value_enum();
+                        }
+                        let mut agg: BasicValueEnum<'ctx> = vec_st.get_undef().into();
+                        let tmp = self.builder.build_insert_value(agg.into_struct_value(), buf_val, 0, "vslice.buf").unwrap();
+                        agg = tmp.as_basic_value_enum();
+                        let tmp2 = self.builder.build_insert_value(agg.into_struct_value(), len.as_basic_value_enum(), 1, "vslice.len").unwrap();
+                        agg = tmp2.as_basic_value_enum();
+                        Ok(agg)
+                    }
+                    BasicTypeEnum::PointerType(_) => {
+                        // String: fresh `malloc`'d null-terminated copy.
+                        let ctx: &'ctx Context = self.context;
+                        let i64_ty = ctx.i64_type();
+                        let i8_ty = ctx.i8_type();
+                        let ptr_ty = ctx.ptr_type(inkwell::AddressSpace::default());
+                        let sptr = self.builder.build_load(ptr_ty, base_ptr, "sslice.ptr").unwrap().into_pointer_value();
+                        let call = self.builder.build_call(self.get_or_declare_strlen(), &[sptr.into()], "sslice.len").unwrap();
+                        let slen = call.try_as_basic_value().basic().unwrap().into_int_value();
+                        let (lo, len) = self.slice_bounds(start, end, *inclusive, slen)?;
+                        let total = self.builder.build_int_add(len, i64_ty.const_int(1, false), "sslice.total").unwrap();
+                        let malloc = self.get_or_declare_malloc();
+                        let raw = self.builder.build_call(malloc, &[total.into()], "sslice.malloc").unwrap().try_as_basic_value().basic().unwrap().into_pointer_value();
+                        let src = unsafe { self.builder.build_gep(i8_ty, sptr, &[lo], "sslice.src").unwrap() };
+                        let memcpy = self.get_or_declare_memcpy();
+                        self.builder.build_call(memcpy, &[raw.into(), src.into(), len.into()], "sslice.copy").unwrap();
+                        let end_ptr = unsafe { self.builder.build_gep(i8_ty, raw, &[len], "sslice.end").unwrap() };
+                        self.builder.build_store(end_ptr, i8_ty.const_zero()).unwrap();
+                        Ok(raw.as_basic_value_enum())
+                    }
+                    _ => Err(CodegenError{message: "slicing is only supported on arrays, vectors, and strings".into(), span: object.span}),
                 }
-                Ok(agg)
             }
             ExprKind::StringLit(s) => {
                 // Create global string pointer: build_global_string_ptr returns i8* to null-terminated string
@@ -8398,6 +8489,14 @@ mod tests {
     fn slice_verifies() {
         compile_src(
             "void main() do\n  int arr[6] nums\n  int arr sub = nums[1..4]\n  int arr full = nums[..]\n  int arr incl = nums[1..=2]\nend\n",
+        );
+    }
+
+    /// T-6: vector and string slices lower too (fresh vec value / malloc'd copy).
+    #[test]
+    fn slice_vec_string_verifies() {
+        compile_src(
+            "void main() do\n  int vec v = vec[]\n  int vec w = v[1..3]\n  string s = \"hello\"\n  string t = s[1..4]\nend\n",
         );
     }
 
