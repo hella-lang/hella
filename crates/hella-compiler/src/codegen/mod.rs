@@ -681,7 +681,7 @@ impl<'ctx> Codegen<'ctx> {
                 crate::sema::Ty::Float => self.context.f32_type().fn_type(&param_llvm, false),
                 crate::sema::Ty::Double => self.context.f64_type().fn_type(&param_llvm, false),
                 crate::sema::Ty::Generic(_, _) => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, false),
-                crate::sema::Ty::Tuple(_) => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, false),
+                crate::sema::Ty::Tuple(ref tys) => self.tuple_struct_ty(tys).map(|st| st.fn_type(&param_llvm, false)).unwrap_or_else(|| self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, false)),
                 crate::sema::Ty::Any => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, false),
                 crate::sema::Ty::Function(_, _) => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, false),
 
@@ -1054,7 +1054,7 @@ impl<'ctx> Codegen<'ctx> {
                             et.fn_type(&param_llvm, false)
                         }
                         crate::sema::Ty::Generic(_, _) => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, false),
-                        crate::sema::Ty::Tuple(_) => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, false),
+                        crate::sema::Ty::Tuple(ref tys) => self.tuple_struct_ty(tys).map(|st| st.fn_type(&param_llvm, false)).unwrap_or_else(|| self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, false)),
                         crate::sema::Ty::Any => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, false),
                         crate::sema::Ty::Function(_, _) => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, false),
                         crate::sema::Ty::Array(_) => self.context.i64_type().array_type(16).fn_type(&param_llvm, false),
@@ -2105,6 +2105,20 @@ impl<'ctx> Codegen<'ctx> {
             &[buf.into(), self.context.i64_type().into()],
             false,
         )
+    }
+
+    /// LLVM struct type for a tuple type, or `None` when an element has no
+    /// lowering. Tuples pass/return by value (multi-word struct), unlike
+    /// `any`/function values which erase to pointers.
+    fn tuple_struct_ty(
+        &self,
+        tys: &[crate::sema::Ty],
+    ) -> Option<inkwell::types::StructType<'ctx>> {
+        let mut elems = Vec::with_capacity(tys.len());
+        for t in tys {
+            elems.push(self.llvm_ty_for_sema(t)?);
+        }
+        Some(self.context.struct_type(&elems, false))
     }
 
     /// Element LLVM type for a `vec` declaration type. `Any` (from `vec[]`
@@ -3175,7 +3189,7 @@ impl<'ctx> Codegen<'ctx> {
                 crate::sema::Ty::Double => self.context.f64_type().fn_type(&param_types, is_c_varargs),
                 crate::sema::Ty::Generic(ref n, _) if n.len()==1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) => self.context.i64_type().fn_type(&param_types, is_c_varargs),
                 crate::sema::Ty::Generic(_, _) => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_types, is_c_varargs),
-                crate::sema::Ty::Tuple(_) => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_types, is_c_varargs),
+                crate::sema::Ty::Tuple(ref tys) => self.tuple_struct_ty(tys).map(|st| st.fn_type(&param_types, is_c_varargs)).unwrap_or_else(|| self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_types, is_c_varargs)),
                 crate::sema::Ty::Any => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_types, is_c_varargs),
                 crate::sema::Ty::Function(_, _) => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_types, is_c_varargs),
             }
@@ -4099,9 +4113,9 @@ impl<'ctx> Codegen<'ctx> {
                 crate::sema::Ty::Enum(ref n) => self.enum_types.get(n).unwrap().const_zero().into(),
                 crate::sema::Ty::Float => self.context.f32_type().const_float(0.0).into(),
                 crate::sema::Ty::Double => self.context.f64_type().const_float(0.0).into(),
-                crate::sema::Ty::Generic(_, _) => self.context.ptr_type(inkwell::AddressSpace::default()).const_null().into(),
-                crate::sema::Ty::Tuple(_) => self.context.ptr_type(inkwell::AddressSpace::default()).const_null().into(),
-                crate::sema::Ty::Any => self.context.ptr_type(inkwell::AddressSpace::default()).const_null().into(),
+                    crate::sema::Ty::Generic(_, _) => self.context.ptr_type(inkwell::AddressSpace::default()).const_null().into(),
+                    crate::sema::Ty::Tuple(ref tys) => self.tuple_struct_ty(tys).map(|st| st.const_zero().into()).unwrap_or_else(|| self.context.ptr_type(inkwell::AddressSpace::default()).const_null().into()),
+                    crate::sema::Ty::Any => self.context.ptr_type(inkwell::AddressSpace::default()).const_null().into(),
                 crate::sema::Ty::Function(_, _) => self.context.ptr_type(inkwell::AddressSpace::default()).const_null().into(),
                 };
                 self.builder.build_return(Some(&zero)).unwrap();
@@ -4181,7 +4195,7 @@ impl<'ctx> Codegen<'ctx> {
             crate::sema::Ty::Float => Some(self.context.f32_type().const_float(0.0).into()),
             crate::sema::Ty::Double => Some(self.context.f64_type().const_float(0.0).into()),
             crate::sema::Ty::Generic(_, _) => Some(self.context.ptr_type(inkwell::AddressSpace::default()).const_null().into()),
-            crate::sema::Ty::Tuple(_) => Some(self.context.ptr_type(inkwell::AddressSpace::default()).const_null().into()),
+            crate::sema::Ty::Tuple(tys) => Some(self.tuple_struct_ty(&tys).map(|st| st.const_zero().into()).unwrap_or_else(|| self.context.ptr_type(inkwell::AddressSpace::default()).const_null().into())),
             crate::sema::Ty::Any => Some(self.context.ptr_type(inkwell::AddressSpace::default()).const_null().into()),
             crate::sema::Ty::Function(_, _) => Some(self.context.ptr_type(inkwell::AddressSpace::default()).const_null().into()),
         }
@@ -8497,6 +8511,15 @@ mod tests {
     fn slice_vec_string_verifies() {
         compile_src(
             "void main() do\n  int vec v = vec[]\n  int vec w = v[1..3]\n  string s = \"hello\"\n  string t = s[1..4]\nend\n",
+        );
+    }
+
+    /// T-9: tuple-returning functions lower struct-by-value (not `ptr`),
+    /// so destructuring binds correctly.
+    #[test]
+    fn tuple_return_destructure_verifies() {
+        compile_src(
+            "(int, int) pair() do\n  return (3, 4)\nend\nvoid main() do\n  a, b = pair()\n  int x = 1\n  int y = 2\n  x, y = (y, x)\nend\n",
         );
     }
 
