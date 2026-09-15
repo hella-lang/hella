@@ -3469,12 +3469,18 @@ impl<'ctx> Codegen<'ctx> {
             self.string_vars.insert(name.clone());
         }
         if let Some(class_name) = match opt_ty {
-            Some(t) => self.dtor_class_for_ty(t),
+            Some(t) => self.dtor_name_for_ast_ty(t),
             None => None,
         }
         .or_else(|| match param_sema_ty {
-            Some(crate::sema::Ty::Struct(n)) if self.class_destructors.contains_key(n) => {
-                Some(n.clone())
+            Some(crate::sema::Ty::Struct(n)) => {
+                if self.class_destructors.contains_key(n) {
+                    Some(n.clone())
+                } else if self.struct_needs_field_destroy(n) {
+                    Some(n.clone())
+                } else {
+                    None
+                }
             }
             _ => None,
         }) {
@@ -3482,7 +3488,53 @@ impl<'ctx> Codegen<'ctx> {
                 top.push((alloca, class_name));
             }
         }
+        // Fixed arrays of destructible elements register per index.
+        // (`out` declarations carry an explicit AST type when present.)
+        if let Some(t) = opt_ty {
+            self.track_dtor_array_elems(alloca, t, llvm_ty);
+        }
         Ok(Some(alloca))
+    }
+
+    /// Per-element scope-exit entries for a fixed-array slot whose element
+    /// type needs destruction (user dtors or structural). No-op otherwise.
+    fn track_dtor_array_elems(
+        &mut self,
+        alloca: PointerValue<'ctx>,
+        ast_ty: &Type,
+        llvm_ty: BasicTypeEnum<'ctx>,
+    ) {
+        let (elem_ast, arr_ty) = match (ast_ty, llvm_ty) {
+            (Type::FixedArray { elem, .. }, BasicTypeEnum::ArrayType(at)) => (elem.as_ref(), at),
+            (Type::Array(elem, _), BasicTypeEnum::ArrayType(at)) => (elem.as_ref(), at),
+            _ => return,
+        };
+        let ename = match elem_ast {
+            Type::Named(n, _) | Type::Generic(n, _, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
+            _ => return,
+        };
+        // User dtors and structural destruction share the entry shape.
+        let entry = if self.class_destructors.contains_key(&ename) {
+            Some(ename.clone())
+        } else if self.struct_needs_field_destroy(&ename) {
+            Some(ename.clone())
+        } else {
+            None
+        };
+        if let Some(entry) = entry {
+            let ctx: &'ctx Context = self.context;
+            let i64_ty = ctx.i64_type();
+            for i in 0..arr_ty.len() {
+                let eptr = unsafe {
+                    self.builder
+                        .build_gep(arr_ty, alloca, &[i64_ty.const_zero(), i64_ty.const_int(i as u64, false)], "arr.elem.dtor")
+                        .unwrap()
+                };
+                if let Some(top) = self.scope_dtors.last_mut() {
+                    top.push((eptr, entry.clone()));
+                }
+            }
+        }
     }
 
     /// Lower one call argument against its declared parameter.
@@ -3519,10 +3571,16 @@ impl<'ctx> Codegen<'ctx> {
             }
             _ => {
                 let v = self.codegen_call_arg(arg)?;
-                // Move from `own` source: null the source slot(s) so their
+                // Move from owned source: null the source slot(s) so their
                 // scope destroy becomes a no-op (sema poisoned them).
-                // Transparent through `?:`/parens/match arms.
-                if let Some(crate::sema::Ty::Own(_)) = info.params.get(param_idx) {
+                // Transparent through `?:`/parens/match arms. Fires for
+                // `own` params and for params with transitive `own` fields.
+                let param_owned = match info.params.get(param_idx) {
+                    Some(crate::sema::Ty::Own(_)) => true,
+                    Some(crate::sema::Ty::Struct(n)) => self.struct_needs_field_destroy(n),
+                    _ => false,
+                };
+                if param_owned {
                     let src_expr: Option<&Expr> = match arg {
                         CallArg::Expr(e) => Some(e),
                         CallArg::Named { value, .. } => Some(value),
@@ -4040,6 +4098,7 @@ impl<'ctx> Codegen<'ctx> {
 
         self.vars.push(HashMap::new());
         self.own_slots.push(Vec::new());
+        self.scope_dtors.push(Vec::new());
         // Special handling for `int main(string[] args)`: the LLVM function
         // is C `i32 (i32 argc, ptr argv)`; `args` is a local `[16 x string]`
         // filled with argv[1..] (program name excluded, C#/Java-style),
@@ -4124,6 +4183,10 @@ impl<'ctx> Codegen<'ctx> {
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
                     // Track `own` params for destruction at function exit.
                     self.track_own_param(alloca, &param.ty);
+                    // Track params needing destructors (user dtors,
+                    // structural `own`-field destruction, or arrays of
+                    // either) the same way.
+                    self.track_dtor_slot(alloca, &param.ty, llvm_ty);
                 }
             }
 
@@ -4140,6 +4203,7 @@ impl<'ctx> Codegen<'ctx> {
         {
             // Destroy owned params still live at fall-through exit
             self.emit_current_scope_owns();
+            self.emit_current_scope_dtors();
             if self.cur_is_main {
                 let zero = self.context.i32_type().const_int(0, false);
                 self.builder.build_return(Some(&zero)).unwrap();
@@ -4244,6 +4308,7 @@ impl<'ctx> Codegen<'ctx> {
         }
 
         self.own_slots.pop();
+        self.scope_dtors.pop();
         self.vars.pop();
         self.cur_fn = None;
         self.cur_is_main = false;
@@ -4332,6 +4397,7 @@ impl<'ctx> Codegen<'ctx> {
         self.builder.position_at_end(entry);
         self.vars.push(HashMap::new());
         self.own_slots.push(Vec::new());
+        self.scope_dtors.push(Vec::new());
         let this_ty: BasicTypeEnum<'ctx> = self.context.ptr_type(inkwell::AddressSpace::default()).into();
         let this_param = func.get_nth_param(0).unwrap();
         let this_alloca = self.create_entry_block_alloca("this", this_ty);
@@ -4375,6 +4441,7 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.build_store(alloca, param_val).unwrap();
                 self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, llvm_ty));
                 self.track_own_param(alloca, &param.ty);
+                self.track_dtor_slot(alloca, &param.ty, llvm_ty);
             }
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
@@ -4385,12 +4452,14 @@ impl<'ctx> Codegen<'ctx> {
             // Destroy owned params still live at fall-through exit (early
             // `return` already ran `emit_all_owns`).
             self.emit_current_scope_owns();
+            self.emit_current_scope_dtors();
             match self.default_return_value(&info.ret) {
                 Some(zero) => { self.builder.build_return(Some(&zero)).unwrap(); }
                 None => { self.builder.build_return(None).unwrap(); }
             }
         }
         self.own_slots.pop();
+        self.scope_dtors.pop();
         self.vars.pop();
         self.cur_fn = None;
         self.cur_class = None;
@@ -4409,6 +4478,7 @@ impl<'ctx> Codegen<'ctx> {
         self.builder.position_at_end(entry);
         self.vars.push(HashMap::new());
         self.own_slots.push(Vec::new());
+        self.scope_dtors.push(Vec::new());
         let this_ty: BasicTypeEnum<'ctx> = self.context.ptr_type(inkwell::AddressSpace::default()).into();
         let this_param = func.get_nth_param(0).unwrap();
         let this_alloca = self.create_entry_block_alloca("this", this_ty);
@@ -4444,11 +4514,12 @@ impl<'ctx> Codegen<'ctx> {
                 let inner_ty = self.llvm_ty_for(&param.ty);
                 let ptr = val.into_pointer_value();
                 self.vars.last_mut().unwrap().insert(param.name.clone(), (ptr, inner_ty));
-            } else {
+                } else {
                 let alloca = self.create_entry_block_alloca(&param.name, llvm_ty);
                 self.builder.build_store(alloca, val).unwrap();
                 self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, llvm_ty));
                 self.track_own_param(alloca, &param.ty);
+                self.track_dtor_slot(alloca, &param.ty, llvm_ty);
             }
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
@@ -4467,6 +4538,9 @@ impl<'ctx> Codegen<'ctx> {
                     let (param_ptr, param_ty) = self.lookup_var(&param.name).unwrap();
                     let val = self.builder.build_load(param_ty, param_ptr, &param.name).unwrap();
                     self.builder.build_store(field_ptr, val).unwrap();
+                    // Move into the field: null owned content in the param
+                    // slot (mirrors sema poisoning; primitives unaffected).
+                    self.null_own_fields(param_ptr, param_ty, 0);
                 }
             }
         }
@@ -4475,9 +4549,11 @@ impl<'ctx> Codegen<'ctx> {
         }
         if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
             self.emit_current_scope_owns();
+            self.emit_current_scope_dtors();
             self.builder.build_return(None).unwrap();
         }
         self.own_slots.pop();
+        self.scope_dtors.pop();
         self.vars.pop();
         self.cur_fn = None;
         self.cur_class = None;
@@ -4533,6 +4609,43 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    /// Destructor name for a slot of AST type: user destructors first
+    /// (`dtor_class_for_ty`), else structural destruction for structs with
+    /// transitive `own` fields. Powers scope-exit, assignment-overwrite,
+    /// and parameter tracking uniformly.
+    fn dtor_name_for_ast_ty(&self, ty: &Type) -> Option<String> {
+        if let Some(n) = self.dtor_class_for_ty(ty) {
+            return Some(n);
+        }
+        let base = match ty {
+            Type::Named(n, _) | Type::Generic(n, _, _) => n.rsplit("::").next().unwrap_or(n),
+            _ => return None,
+        };
+        if self.struct_needs_field_destroy(base) {
+            Some(base.to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Register a freshly allocated slot for scope-exit destruction: the
+    /// whole slot when it needs it, plus one entry per element for fixed
+    /// arrays of owned structs (static indices, so the shared
+    /// `(alloca, name)` entries keep working).
+    fn track_dtor_slot(
+        &mut self,
+        alloca: PointerValue<'ctx>,
+        ast_ty: &Type,
+        llvm_ty: BasicTypeEnum<'ctx>,
+    ) {
+        if let Some(name) = self.dtor_name_for_ast_ty(ast_ty) {
+            if let Some(top) = self.scope_dtors.last_mut() {
+                top.push((alloca, name));
+            }
+        }
+        self.track_dtor_array_elems(alloca, ast_ty, llvm_ty);
+    }
+
     fn emit_dtor_call(&mut self, alloca: PointerValue<'ctx>, class_name: &str) {
         if self.trait_names.contains(class_name) {
             self.emit_trait_dtor_call(alloca, class_name);
@@ -4543,6 +4656,159 @@ impl<'ctx> Codegen<'ctx> {
                 let arg: inkwell::values::BasicMetadataValueEnum = alloca.into();
                 let _ = self.builder.build_call(func, &[arg], "dtor.call");
             }
+        }
+        // Structural destruction for `own` fields (structs and classes
+        // alike), after any user destructor body (C++ member order).
+        if self.struct_needs_field_destroy(class_name) {
+            self.emit_struct_field_destroy(alloca, class_name);
+        }
+    }
+
+    /// Whether this struct/class needs structural destruction: an `own`
+    /// field anywhere inside (nested structs and fixed arrays included;
+    /// vectors/maps are gated to Own-P2b). Cycle-safe via the pair/type
+    /// walk.
+    fn struct_needs_field_destroy(&self, name: &str) -> bool {
+        let lookup = name.rsplit("::").next().unwrap_or(name);
+        match self.struct_types.get(lookup) {
+            Some(st) => self.type_has_own_pair(&st.as_basic_type_enum(), &mut HashSet::new()),
+            None => false,
+        }
+    }
+
+    /// Destroy the `own` fields of the struct at `struct_ptr` (reverse
+    /// declaration order), recursing into nested structs and fixed arrays.
+    fn emit_struct_field_destroy(&mut self, struct_ptr: PointerValue<'ctx>, struct_name: &str) {
+        let lookup = struct_name.rsplit("::").next().unwrap_or(struct_name);
+        let (st, fmap) = match (self.struct_types.get(lookup), self.struct_fields.get(lookup)) {
+            (Some(st), Some(fm)) => (*st, fm.clone()),
+            _ => return,
+        };
+        let mut fields: Vec<(String, u32)> = fmap.into_iter().collect();
+        fields.sort_by_key(|(_, idx)| *idx);
+        for (_, idx) in fields.iter().rev() {
+            let fty = st.get_field_type_at_index(*idx).unwrap();
+            let field_ptr = self
+                .builder
+                .build_struct_gep(st, struct_ptr, *idx, "field.dtor")
+                .unwrap();
+            self.emit_field_destroy_for_ty(field_ptr, fty, 0);
+        }
+    }
+
+    /// Destroy owned content at `ptr` of LLVM type `ty`: `own` pairs via
+    /// `emit_own_destroy`, structs field-wise, fixed arrays element-wise.
+    /// `depth` guards recursive types.
+    fn emit_field_destroy_for_ty(
+        &mut self,
+        ptr: PointerValue<'ctx>,
+        ty: BasicTypeEnum<'ctx>,
+        depth: u32,
+    ) {
+        if depth > 64 {
+            return;
+        }
+        match ty {
+            BasicTypeEnum::StructType(st) => {
+                if let Some(inner) = self.pair_owner_of(st) {
+                    self.emit_own_destroy(ptr, &inner);
+                    return;
+                }
+                let count = st.count_fields();
+                for idx in (0..count).rev() {
+                    let fty = st.get_field_type_at_index(idx).unwrap();
+                    // Skip leaves fast: only descend into aggregates that
+                    // could own (pairs/structs/arrays).
+                    let maybe_own = matches!(
+                        fty,
+                        BasicTypeEnum::StructType(_) | BasicTypeEnum::ArrayType(_)
+                    );
+                    if !maybe_own {
+                        continue;
+                    }
+                    let field_ptr = self
+                        .builder
+                        .build_struct_gep(st, ptr, idx, "field.dtor")
+                        .unwrap();
+                    self.emit_field_destroy_for_ty(field_ptr, fty, depth + 1);
+                }
+            }
+            BasicTypeEnum::ArrayType(at) => {
+                let elem = at.get_element_type();
+                let elem_maybe_own = matches!(
+                    elem,
+                    BasicTypeEnum::StructType(_) | BasicTypeEnum::ArrayType(_)
+                );
+                if !elem_maybe_own {
+                    return;
+                }
+                let ctx: &'ctx Context = self.context;
+                let i64_ty = ctx.i64_type();
+                for i in 0..at.len() {
+                    let elem_ptr = unsafe {
+                        self.builder
+                            .build_gep(at, ptr, &[i64_ty.const_zero(), i64_ty.const_int(i as u64, false)], "arr.elem.dtor")
+                            .unwrap()
+                    };
+                    self.emit_field_destroy_for_ty(elem_ptr, elem, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Null (poison) the `own` content at `ptr` of LLVM type `ty`, mirroring
+    /// `emit_field_destroy_for_ty`: direct pairs become null pairs, struct
+    /// and fixed-array interiors recurse. Unconditionally safe: slots sema
+    /// poisoned never read again.
+    fn null_own_fields(&mut self, ptr: PointerValue<'ctx>, ty: BasicTypeEnum<'ctx>, depth: u32) {
+        if depth > 64 {
+            return;
+        }
+        match ty {
+            BasicTypeEnum::StructType(st) => {
+                if self.pair_owner_of(st).is_some() {
+                    self.builder.build_store(ptr, ty.const_zero()).unwrap();
+                    return;
+                }
+                let count = st.count_fields();
+                for idx in 0..count {
+                    let fty = st.get_field_type_at_index(idx).unwrap();
+                    let maybe_own = matches!(
+                        fty,
+                        BasicTypeEnum::StructType(_) | BasicTypeEnum::ArrayType(_)
+                    );
+                    if !maybe_own {
+                        continue;
+                    }
+                    let field_ptr = self
+                        .builder
+                        .build_struct_gep(st, ptr, idx, "field.poison")
+                        .unwrap();
+                    self.null_own_fields(field_ptr, fty, depth + 1);
+                }
+            }
+            BasicTypeEnum::ArrayType(at) => {
+                let elem = at.get_element_type();
+                let elem_maybe_own = matches!(
+                    elem,
+                    BasicTypeEnum::StructType(_) | BasicTypeEnum::ArrayType(_)
+                );
+                if !elem_maybe_own {
+                    return;
+                }
+                let ctx: &'ctx Context = self.context;
+                let i64_ty = ctx.i64_type();
+                for i in 0..at.len() {
+                    let elem_ptr = unsafe {
+                        self.builder
+                            .build_gep(at, ptr, &[i64_ty.const_zero(), i64_ty.const_int(i as u64, false)], "arr.elem.poison")
+                            .unwrap()
+                    };
+                    self.null_own_fields(elem_ptr, elem, depth + 1);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -4644,6 +4910,10 @@ impl<'ctx> Codegen<'ctx> {
                     let st = ty.into_struct_type();
                     if self.pair_owner_of(st).is_some() {
                         self.builder.build_store(ptr, ty.const_zero()).unwrap();
+                    } else if self.type_has_own_pair(&ty, &mut HashSet::new()) {
+                        // Struct with transitive `own` fields: poison the
+                        // owned interior (mirrors sema poisoning).
+                        self.null_own_fields(ptr, ty, 0);
                     }
                 }
             }
@@ -4864,6 +5134,7 @@ impl<'ctx> Codegen<'ctx> {
         self.builder.position_at_end(entry);
         self.vars.push(std::collections::HashMap::new());
         self.own_slots.push(Vec::new());
+        self.scope_dtors.push(Vec::new());
         let this_ty: BasicTypeEnum<'ctx> = self.context.ptr_type(inkwell::AddressSpace::default()).into();
         let this_param = func.get_nth_param(0).unwrap();
         let this_alloca = self.create_entry_block_alloca("this", this_ty);
@@ -4882,6 +5153,7 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.build_store(alloca, val).unwrap();
                 self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, llvm_ty));
                 self.track_own_param(alloca, &param.ty);
+                self.track_dtor_slot(alloca, &param.ty, llvm_ty);
             }
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
@@ -4890,9 +5162,11 @@ impl<'ctx> Codegen<'ctx> {
         let _ = self.codegen_block(&op.body)?;
         if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
             self.emit_current_scope_owns();
+            self.emit_current_scope_dtors();
             self.builder.build_return(Some(&self.context.i64_type().const_int(0,false))).unwrap();
         }
         self.own_slots.pop();
+        self.scope_dtors.pop();
         self.vars.pop();
         self.cur_fn = None;
         self.cur_class = None;
@@ -5150,11 +5424,7 @@ impl<'ctx> Codegen<'ctx> {
                 // `this` is the borrowed receiver, never owned: skip it so a
                 // method/dtor body never destroys its own receiver.
                 if d.name != "this" {
-                    if let Some(class_name) = self.dtor_class_for_ty(&d.ty) {
-                        if let Some(top) = self.scope_dtors.last_mut() {
-                            top.push((alloca, class_name));
-                        }
-                    }
+                    self.track_dtor_slot(alloca, &d.ty, ty);
                     // Track `own` slots for heap destruction (pair + free).
                     if let Type::Own(inner, _) = &d.ty {
                         let inner_name = match inner.as_ref() {
@@ -5253,11 +5523,19 @@ impl<'ctx> Codegen<'ctx> {
                         let val = self.box_trait_value(val, ty, d.span)?;
                         let coerced = self.coerce_to_ty(val, ty);
                         self.builder.build_store(alloca, coerced).unwrap();
-                        // Move from `own` source: null the source slot(s) so their
+                        // Move from owned source: null the source slot(s) so their
                         // scope destroy becomes a no-op (poison is checked in sema).
                         // Transparent through `?:`/parens/match arms (see
                         // `null_moved_sources`); untaken branches merely leak.
-                        if let Type::Own(_, _) = &d.ty {
+                        // Fires for `own` decls and decls with `own` fields.
+                        let decl_owned = match &d.ty {
+                            Type::Own(_, _) => true,
+                            Type::Named(n, _) | Type::Generic(n, _, _) => {
+                                self.struct_needs_field_destroy(n.rsplit("::").next().unwrap_or(n))
+                            }
+                            _ => false,
+                        };
+                        if decl_owned {
                             self.null_moved_sources(init, None);
                         }
                     }
@@ -5548,6 +5826,33 @@ impl<'ctx> Codegen<'ctx> {
             Stmt::Block(b) => self.codegen_block(b),
             Stmt::Return(r) => {
                 self.emit_all_defers()?;
+                // Evaluate the return operand BEFORE destructors run. The
+                // operand may move out of locals (nulling below makes their
+                // destroys no-ops); destroying first would free the very
+                // object being returned. (Defers intentionally stay first:
+                // they observe live state, as before.)
+                let evaluated: Option<BasicValueEnum<'ctx>> = match &r.value {
+                    Some(expr) => Some(self.codegen_expr(expr)?),
+                    None => None,
+                };
+                // Move from owned source: null the source slot(s) so their
+                // scope destroy becomes a no-op (sema poisoned them).
+                // Transparent through `?:`/parens/match arms. Fires for
+                // `own` returns and returns with `own` fields.
+                if let Some(expr) = &r.value {
+                    if let Some(cur) = self.cur_fn {
+                        if let Some(ret_ty) = cur.get_type().get_return_type() {
+                            if ret_ty.is_struct_type() {
+                                let ret_st = ret_ty.into_struct_type();
+                                let ret_owned = self.pair_owner_of(ret_st).is_some()
+                                    || self.ty_to_struct_name(&ret_ty).map(|n| self.struct_needs_field_destroy(&n)).unwrap_or(false);
+                                if ret_owned {
+                                    self.null_moved_sources(expr, None);
+                                }
+                            }
+                        }
+                    }
+                }
                 if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
                     self.emit_all_dtors();
                 }
@@ -5555,8 +5860,7 @@ impl<'ctx> Codegen<'ctx> {
                     self.emit_all_owns();
                 }
                 if self.cur_is_main {
-                    if let Some(expr) = &r.value {
-                        let val = self.codegen_expr(expr)?;
+                    if let Some(val) = evaluated {
                         let ret_val = if val.is_int_value()
                             && val.into_int_value().get_type().get_bit_width()
                                 == 64
@@ -5592,18 +5896,7 @@ impl<'ctx> Codegen<'ctx> {
                         let zero = self.context.i32_type().const_int(0, false);
                         self.builder.build_return(Some(&zero)).unwrap();
                     }
-                } else if let Some(expr) = &r.value {
-                    let val = self.codegen_expr(expr)?;
-                    // Move from `own` source: null the source slot(s) so their
-                    // scope destroy becomes a no-op (sema poisoned them).
-                    // Transparent through `?:`/parens/match arms.
-                    if let Some(cur) = self.cur_fn {
-                        if let Some(ret_ty) = cur.get_type().get_return_type() {
-                            if ret_ty.is_struct_type() && self.pair_owner_of(ret_ty.into_struct_type()).is_some() {
-                                self.null_moved_sources(expr, None);
-                            }
-                        }
-                    }
+                } else if let Some(val) = evaluated {
                     // Coerce int return to the function's declared return width
                     // (e.g. `i32 foo() do return 5 end` — literal is i64).
                     // Class values returning through a trait-typed slot are
@@ -6106,10 +6399,10 @@ impl<'ctx> Codegen<'ctx> {
                         let (ptr, ty) = self.lookup_var("this").ok_or(CodegenError{message: "`super` outside method".into(), span: expr.span})?;
                         self.builder.build_load(ty, ptr, "this.load").unwrap().into_pointer_value()
                     }
-                    ExprKind::MemberAccess{object: inner, field, ..} => {
-                        // a.b.method() where a.b is struct field that is class instance
-                        let field_ptr = self.codegen_field_ptr(inner, field)?;
-                        field_ptr
+                    ExprKind::MemberAccess{..} => {
+                        // `a.b.method()` where the field may itself be `own`:
+                        // resolve the receiver with auto-deref.
+                        self.obj_struct_ptr(object)?.0
                     }
                     _ => {
                         // Fallback: try codegen object as value and allocate temp? For now error
@@ -6523,22 +6816,32 @@ impl<'ctx> Codegen<'ctx> {
                                 message: format!("undefined var {name}"),
                                 span: lhs.span,
                             })?;
-                        // Destroy old `own` value before overwriting (avoid leak).
+                        // Destroy old owned content before overwriting
+                        // (avoid leak): `own` pairs plus structs with
+                        // transitive `own` fields.
                         if dest_ty.is_struct_type() {
-                            if let Some(inner) = self.pair_owner_of(dest_ty.into_struct_type()) {
+                            let st = dest_ty.into_struct_type();
+                            if let Some(inner) = self.pair_owner_of(st) {
                                 // Only for `own` slots (pair types).
                                 self.emit_own_destroy(ptr, &inner);
+                            } else if let Ok(sname) = self.ty_to_struct_name(&dest_ty) {
+                                if self.struct_needs_field_destroy(&sname) {
+                                    self.emit_struct_field_destroy(ptr, &sname);
+                                }
                             }
                         }
                         let val = self.box_trait_value(val, dest_ty, expr.span)?;
                         let coerced = self.coerce_to_ty(val, dest_ty);
                         self.builder.build_store(ptr, coerced).unwrap();
-                        // Move from `own` source: null the source slot(s).
+                        // Move from owned source: null the source slot(s).
                         // Transparent through `?:`/parens/match arms; skips
                         // the destination itself (self-assignment guard).
+                        // Covers `own` pairs and structs with `own` fields.
                         if dest_ty.is_struct_type() {
                             let st = dest_ty.into_struct_type();
-                            if self.pair_owner_of(st).is_some() {
+                            let dest_owned = self.pair_owner_of(st).is_some()
+                                || self.ty_to_struct_name(&dest_ty).map(|n| self.struct_needs_field_destroy(&n)).unwrap_or(false);
+                            if dest_owned {
                                 self.null_moved_sources(value, Some(name.as_str()));
                             }
                         }
@@ -6682,9 +6985,16 @@ impl<'ctx> Codegen<'ctx> {
                                             )
                                             .unwrap()
                                     };
+                                    // Destroy old owned content, then move the
+                                    // new value in (both no-ops for plain data).
+                                    let elem_ty = arr_ty.get_element_type();
+                                    if self.type_has_own_pair(&elem_ty, &mut HashSet::new()) {
+                                        self.emit_field_destroy_for_ty(elem_ptr, elem_ty, 0);
+                                    }
                                     self.builder
                                         .build_store(elem_ptr, val)
                                         .unwrap();
+                                    self.null_moved_sources(value, None);
                                     return Ok(val);
                                 } else if self.is_vec_var(name) && ty.is_struct_type() {
                                     // vec[idx] = val -> buffer GEP store (length unchanged).
@@ -6710,7 +7020,11 @@ impl<'ctx> Codegen<'ctx> {
                                             )
                                             .unwrap()
                                     };
+                                    if self.type_has_own_pair(&elem_ty, &mut HashSet::new()) {
+                                        self.emit_field_destroy_for_ty(elem_ptr, elem_ty, 0);
+                                    }
                                     self.builder.build_store(elem_ptr, cv).unwrap();
+                                    self.null_moved_sources(value, None);
                                     return Ok(cv);
                                 } else if ty.is_pointer_type() {
                                     let loaded = self
@@ -7260,6 +7574,15 @@ impl<'ctx> Codegen<'ctx> {
                     let dest = st.get_field_type_at_index(idx).unwrap();
                     let val = self.box_trait_value(val, dest, fexpr.span)?;
                     self.builder.build_store(field_ptr, val).unwrap();
+                    // Moving into an owned field nulls the source slot(s).
+                    if dest.is_struct_type() {
+                        let dst = dest.into_struct_type();
+                        let owned = self.pair_owner_of(dst).is_some()
+                            || self.ty_to_struct_name(&dest).map(|n| self.struct_needs_field_destroy(&n)).unwrap_or(false);
+                        if owned {
+                            self.null_moved_sources(fexpr, None);
+                        }
+                    }
                 }
                 // Fill missing fields with defaults if any
                 let provided: std::collections::HashSet<String> = fields.iter().map(|(n, _, _)| n.clone()).collect();
@@ -7403,6 +7726,7 @@ impl<'ctx> Codegen<'ctx> {
                 self.cur_fn = Some(func);
                 self.vars.push(std::collections::HashMap::new());
                 self.own_slots.push(Vec::new());
+                self.scope_dtors.push(Vec::new());
                 for (i, p) in params.iter().enumerate() {
                     let llvm_ty = self.llvm_ty_for(&p.ty);
                     let alloca = self.create_entry_block_alloca(&p.name, llvm_ty);
@@ -7410,13 +7734,14 @@ impl<'ctx> Codegen<'ctx> {
                     self.builder.build_store(alloca, param_val).unwrap();
                     self.vars.last_mut().unwrap().insert(p.name.clone(), (alloca, llvm_ty));
                     self.track_own_param(alloca, &p.ty);
+                    self.track_dtor_slot(alloca, &p.ty, llvm_ty);
                 }
                 let ret_val = match body.as_ref() {
                     ClosureBody::Expr(e) => Some(self.codegen_expr(e)?),
                     ClosureBody::Block(b) => { let _ = self.codegen_block(b)?; None },
                 };
                 if let Some(v) = ret_val {
-                    // Move-out: if the body is a bare `own` param, ownership
+                    // Move-out: if the body is a bare param, ownership
                     // transfers to the caller — drop its slot without destroying.
                     if let ClosureBody::Expr(e) = body.as_ref() {
                         if let ExprKind::Ident(name) = &e.kind {
@@ -7426,20 +7751,28 @@ impl<'ctx> Codegen<'ctx> {
                                         top.remove(pos);
                                     }
                                 }
+                                if let Some(top) = self.scope_dtors.last_mut() {
+                                    if let Some(pos) = top.iter().position(|(p, _)| *p == ptr) {
+                                        top.remove(pos);
+                                    }
+                                }
                             }
                         }
                     }
                     if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
                         self.emit_current_scope_owns();
+                        self.emit_current_scope_dtors();
                     }
                     if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
                         self.builder.build_return(Some(&v)).unwrap();
                     }
                 } else if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
                     self.emit_current_scope_owns();
+                    self.emit_current_scope_dtors();
                     self.builder.build_return(Some(&self.context.i64_type().const_int(0,false))).unwrap();
                 }
                 self.own_slots.pop();
+                self.scope_dtors.pop();
                 self.vars.pop();
                 self.cur_fn = prev_fn;
                 if let Some(bb) = prev_block { self.builder.position_at_end(bb); }
@@ -8109,77 +8442,36 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
-    // Helper: compute GEP pointer to field `field` of object expression (object must be variable or member chain)
+    // Helper: compute GEP pointer to field `field` of object expression.
+    // The object struct is resolved with per-level `own` auto-deref (see
+    // `obj_struct_ptr`), so chains like `o.pet.name` read through heap
+    // pairs instead of their storage bytes.
     fn codegen_field_ptr(
         &self,
         object: &Expr,
         field: &str,
     ) -> Result<PointerValue<'ctx>, CodegenError> {
-        // Resolve base variable pointer and struct type chain
-        // Simplify Phase 2: only support `ident` or `ident.field...` chains where base is a variable
-        let (base_ptr, base_struct_name) =
-            self.resolve_base_struct_ptr(object)?;
-        let fields =
-            self.struct_fields
-                .get(&base_struct_name)
-                .ok_or(CodegenError {
-                    message: format!("unknown struct {base_struct_name}"),
-                    span: object.span,
-                })?;
-        let field_idx = *fields.get(field).ok_or(CodegenError {
-            message: format!("struct {base_struct_name} has no field {field}"),
+        let (obj_ptr, obj_name) = self.obj_struct_ptr(object)?;
+        let fields = self.struct_fields.get(&obj_name).ok_or(CodegenError {
+            message: format!("unknown struct {obj_name}"),
             span: object.span,
         })?;
-        let st = self.struct_types.get(&base_struct_name).unwrap();
-        // If object is a simple ident, we directly GEP from base_ptr
-        // If object is member access chain, we need to compute progressively. For chain like a.b.c, resolve_base already handles? Let's expand.
-        // Our resolve_base only handles single level; for nested, we need progressive GEPs.
-        // Instead, handle recursively: if object is MemberAccess, compute pointer to its field first, then GEP again
-        if let ExprKind::MemberAccess {
-            object: inner,
-            field: inner_field,
-            ..
-        } = &object.kind
-        {
-            // recursively get pointer to inner.field, then GEP to `field`
-            // inner.field pointer is the object for this access
-            let inner_ptr = self.codegen_field_ptr(inner, inner_field)?;
-            // inner_ptr points to intermediate struct field (which itself is a struct if nested)
-            // Need to know type of inner field to GEP second field: intermediate field must be struct containing `field`
-            // For simplicity Phase 2, we don't support nested struct field chains beyond one level (flat)
-            // But we can attempt: derive intermediate struct name
-            let inner_ty = self.infer_expr_ty(object)?; // this is actually type of inner.field? For chain, we want type of object itself
-            // Instead use direct: if object is MemberAccess, its type is field type, which must be struct
-            // We can infer inner field's type via sema-ty lookup
-            let inner_lval_ty = self.infer_expr_ty(object)?;
-            if let crate::sema::Ty::Struct(ref inner_sname) = inner_lval_ty {
-                let inner_st = self.struct_types.get(inner_sname).unwrap();
-                let parent_fields =
-                    self.struct_fields.get(inner_sname).unwrap();
-                let idx2 = *parent_fields.get(field).unwrap();
-                // GEP from inner_ptr (which points to inner struct value storage) to its field
-                // inner_ptr is pointer to struct (the field) — first index 0 is struct, second is field
-                let ptr = self
-                    .builder
-                    .build_struct_gep(*inner_st, inner_ptr, idx2, field)
-                    .unwrap();
-                return Ok(ptr);
-            } else {
-                return Err(CodegenError {
-                    message: "nested field access on non-struct".into(),
-                    span: object.span,
-                });
-            }
-        }
-        // Simple case: base ident field
-        let ptr = self
+        let field_idx = *fields.get(field).ok_or(CodegenError {
+            message: format!("struct {obj_name} has no field {field}"),
+            span: object.span,
+        })?;
+        let st = self.struct_types.get(&obj_name).unwrap();
+        Ok(self
             .builder
-            .build_struct_gep(*st, base_ptr, field_idx, field)
-            .unwrap();
-        Ok(ptr)
+            .build_struct_gep(*st, obj_ptr, field_idx, field)
+            .unwrap())
     }
 
-    fn resolve_base_struct_ptr(
+    /// Pointer to the struct instance denoted by `object`, plus its struct
+    /// name. `own` pairs auto-deref at every level: a direct `own` variable
+    /// yields its heap data pointer, and an `own` field in a chain is
+    /// loaded and unwrapped before descending further.
+    fn obj_struct_ptr(
         &self,
         object: &Expr,
     ) -> Result<(PointerValue<'ctx>, String), CodegenError> {
@@ -8190,7 +8482,6 @@ impl<'ctx> Codegen<'ctx> {
                 if ty.is_struct_type() {
                     let st = ty.into_struct_type();
                     if let Some(inner) = self.pair_owner_of(st) {
-                        // `own` pair: load and extract heap data pointer
                         let pair_val = self.builder.build_load(ty, ptr, "own.load").unwrap();
                         let data = self.builder.build_extract_value(pair_val.into_struct_value(), 0, "own.data").unwrap().into_pointer_value();
                         return Ok((data, inner));
@@ -8199,31 +8490,50 @@ impl<'ctx> Codegen<'ctx> {
                 let sname = self.ty_to_struct_name(&ty)?;
                 Ok((ptr, sname))
             }
-            ExprKind::This | ExprKind::Super => {
-                let (ptr, ty) = self.lookup_var("this").ok_or(CodegenError{message: "`this`/`super` outside method".into(), span: object.span})?;
-                let sname = self.cur_class.clone().ok_or(CodegenError{message: "`this`/`super` outside method".into(), span: object.span})?;
+            ExprKind::This => {
+                let (ptr, ty) = self.lookup_var("this").ok_or(CodegenError{message: "`this` outside method".into(), span: object.span})?;
+                let sname = self.cur_class.clone().ok_or(CodegenError{message: "`this` outside method".into(), span: object.span})?;
+                let instance_ptr = self.builder.build_load(ty, ptr, "this.load").unwrap().into_pointer_value();
+                Ok((instance_ptr, sname))
+            }
+            ExprKind::Super => {
+                let (ptr, ty) = self.lookup_var("this").ok_or(CodegenError{message: "`super` outside method".into(), span: object.span})?;
+                let sname = self.cur_class.clone().ok_or(CodegenError{message: "`super` outside method".into(), span: object.span})?;
                 let instance_ptr = self.builder.build_load(ty, ptr, "this.load").unwrap().into_pointer_value();
                 Ok((instance_ptr, sname))
             }
             ExprKind::MemberAccess {
                 object: inner,
-                field,
+                field: inner_field,
                 ..
             } => {
-                // For `a.b` as base for `a.b.c`, we need pointer to `a.b` field which holds a struct
-                let field_ptr = self.codegen_field_ptr(inner, field)?;
-                // its pointee type is struct field's type
-                let inner_ty = self.infer_expr_ty(object)?;
-                if let crate::sema::Ty::Struct(ref n) = inner_ty {
-                    // but for base resolution, the pointer's pointee is the struct of inner_ty? Actually a.b's type is field type, not outer
-                    // For chain `a.b.c`, we need `a.b` pointer as base for `.c`, and its struct name is inner_ty
-                    Ok((field_ptr, n.clone()))
-                } else {
-                    Err(CodegenError {
-                        message: "resolve base not struct".into(),
-                        span: object.span,
-                    })
+                // Storage slot of `inner.inner_field`, then deref when the
+                // field itself is an `own` pair.
+                let (obj_ptr, obj_name) = self.obj_struct_ptr(inner)?;
+                let fields = self.struct_fields.get(&obj_name).ok_or(CodegenError {
+                    message: format!("unknown struct {obj_name}"),
+                    span: object.span,
+                })?;
+                let field_idx = *fields.get(inner_field.as_str()).ok_or(CodegenError {
+                    message: format!("struct {obj_name} has no field {inner_field}"),
+                    span: object.span,
+                })?;
+                let st = self.struct_types.get(&obj_name).unwrap();
+                let slot = self
+                    .builder
+                    .build_struct_gep(*st, obj_ptr, field_idx, inner_field)
+                    .unwrap();
+                let fty = st.get_field_type_at_index(field_idx).unwrap();
+                if fty.is_struct_type() {
+                    let fst = fty.into_struct_type();
+                    if let Some(inner_owner) = self.pair_owner_of(fst) {
+                        let pair_val = self.builder.build_load(fty, slot, "own.load").unwrap();
+                        let data = self.builder.build_extract_value(pair_val.into_struct_value(), 0, "own.data").unwrap().into_pointer_value();
+                        return Ok((data, inner_owner));
+                    }
                 }
+                let sname = self.ty_to_struct_name(&fty)?;
+                Ok((slot, sname))
             }
             _ => Err(CodegenError {
                 message: "field access base must be variable or field".into(),
@@ -8244,7 +8554,8 @@ impl<'ctx> Codegen<'ctx> {
                 Ok(loaded)
             },
             ExprKind::MemberAccess{object: inner, field, ..} => {
-                // `a.b` as object for property: need pointer to field `b`
+                // `a.b` storage address (for `ref` args, setters, field
+                // stores — never deref'd here).
                 Ok(self.codegen_field_ptr(inner, field)?)
             },
             _ => Err(CodegenError{message: "cannot take pointer of expression for property/method".into(), span: object.span}),
@@ -8797,6 +9108,27 @@ mod tests {
     fn multi_payload_enum_verifies() {
         compile_src(
             "enum P has\n  Pair(int a, int b)\n  Single(int x)\n  Mix(int n, string s)\nend\nint sum(P p) do\n  return match p do\n    .Pair(a, b) -> a + b\n    .Single(x) -> x\n    .Mix(n, s) -> n\n  end\nend\nvoid main() do\n  P p = .Pair(3, 4)\nend\n",
+        );
+    }
+
+    /// Own-P2a: structs with `own` fields lower scope-exit destruction
+    /// (an observable `free` on the owned pair).
+    #[test]
+    fn struct_own_field_destroyed() {
+        let ir = compile_ir(
+            "struct Pet has\n  string name\nend\nstruct Owner has\n  own Pet pet\n  int level\nend\nvoid main() do\n  Owner o = Owner has\n    pet = new Pet(\"r\")\n    level = 1\n  end\nend\n",
+        );
+        assert!(
+            ir.contains("call void @free"),
+            "expected heap free for owned field, got:\n{ir}"
+        );
+    }
+
+    /// Own-P2a: member chains read through `own` fields.
+    #[test]
+    fn nested_own_field_access_verifies() {
+        compile_src(
+            "struct Pet has\n  string name\nend\nstruct Owner has\n  own Pet pet\nend\nstring fetch(Owner o) do\n  return o.pet.name\nend\nvoid main() do\nend\n",
         );
     }
 

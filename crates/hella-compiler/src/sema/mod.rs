@@ -476,14 +476,56 @@ impl Checker {
     /// Poison every own-typed variable named in value-forwarding position
     /// within `expr` (a move into an `own` slot transfers ownership out of
     /// each of them; untaken branches merely leak, never dangle).
+    /// True when values of this type own heap pairs: `own` itself, or a
+    /// struct (transitively, cycle-guarded) with an `own` field. Moving
+    /// such a value transfers ownership (poison the source); dropping it
+    /// must destroy the owned pairs (structural destruction in codegen).
+    /// Containers cannot hold `own` (rejected at resolve), so only direct
+    /// struct fields matter — tuples are included defensively.
+    fn ty_has_own(&self, ty: &Ty) -> bool {
+        let mut visiting = HashSet::new();
+        self.ty_has_own_inner(ty, &mut visiting)
+    }
+
+    fn ty_has_own_inner(&self, ty: &Ty, visiting: &mut HashSet<String>) -> bool {
+        match ty {
+            Ty::Own(_) => true,
+            Ty::Struct(n) => {
+                let lookup = n.rsplit("::").next().unwrap_or(n);
+                if !visiting.insert(lookup.to_string()) {
+                    return false;
+                }
+                // Classes mirror into the structs map; either entry works.
+                if let Some(sinfo) = self.structs.get(lookup) {
+                    sinfo.fields.iter().any(|(_, fty)| self.ty_has_own_inner(fty, visiting))
+                } else {
+                    false
+                }
+            }
+            Ty::Tuple(tys) => tys.iter().any(|t| self.ty_has_own_inner(t, visiting)),
+            Ty::Array(el) | Ty::Vec(el) | Ty::Pointer(el) | Ty::Optional(el) => {
+                self.ty_has_own_inner(el, visiting)
+            }
+            Ty::FixedArray { elem, .. } => self.ty_has_own_inner(elem, visiting),
+            Ty::Map { key, value } => {
+                self.ty_has_own_inner(key, visiting) || self.ty_has_own_inner(value, visiting)
+            }
+            Ty::Generic(_, args) => args.iter().any(|t| self.ty_has_own_inner(t, visiting)),
+            Ty::Function(ret, params) => {
+                self.ty_has_own_inner(ret, visiting)
+                    || params.iter().any(|t| self.ty_has_own_inner(t, visiting))
+            }
+            _ => false,
+        }
+    }
+
     fn poison_moved_idents(&mut self, expr: &Expr) {
         let mut names = Vec::new();
         Self::moved_ident_names(expr, &mut names);
         for name in names {
             let base = name.rsplit("::").next().unwrap_or(&name);
-            if matches!(self.lookup_var(&name), Some(Ty::Own(_)))
-                || matches!(self.lookup_var(base), Some(Ty::Own(_)))
-            {
+            let ty = self.lookup_var(&name).or_else(|| self.lookup_var(base));
+            if matches!(ty, Some(Ty::Own(_))) || ty.as_ref().is_some_and(|t| self.ty_has_own(t)) {
                 self.poison_at_decl(&name);
             }
         }
@@ -981,6 +1023,12 @@ impl Checker {
                 if let Ty::Enum(ref n) = **el {
                     if !self.enums.contains_key(n) { self.errors.push(SemError{message: format!("unknown type `{n}`"), span: ty.span()}); }
                 }
+                // Dynamic containers need per-element ownership (Own-P2b):
+                // elements that (transitively) own heap pairs are rejected.
+                // Fixed arrays are fine (static structural destruction).
+                if self.ty_has_own(el) {
+                    self.errors.push(SemError{message: format!("vector element type `{el}` owns heap data; `own` in vectors needs container ownership — rejected in phase 1"), span: ty.span()});
+                }
             }
             Ty::Map { key, value } => {
                 for el in [key, value] {
@@ -992,6 +1040,9 @@ impl Checker {
                     if let Ty::Enum(ref n) = **el {
                         if !self.enums.contains_key(n) { self.errors.push(SemError{message: format!("unknown type `{n}`"), span: ty.span()}); }
                     }
+                }
+                if self.ty_has_own(key) || self.ty_has_own(value) {
+                    self.errors.push(SemError{message: format!("map with key `{key}` / value `{value}` owns heap data; `own` in maps needs container ownership — rejected in phase 1"), span: ty.span()});
                 }
             }
             Ty::Generic(n, args) => {
@@ -1054,12 +1105,6 @@ impl Checker {
                                     "field `{}` cannot be `void`",
                                     f.name
                                 ),
-                                span: f.span,
-                            });
-                        }
-                        if matches!(fty, Ty::Own(_)) {
-                            self.errors.push(SemError {
-                                message: "own fields need structural destruction — rejected in phase 1".into(),
                                 span: f.span,
                             });
                         }
@@ -1214,12 +1259,6 @@ impl Checker {
                         }
                         let fty = self.resolve_type(&f.ty);
                         if fty == Ty::Void { self.errors.push(SemError{message: format!("field `{}` cannot be `void`", f.name), span: f.span}); }
-                        if matches!(fty, Ty::Own(_)) {
-                            self.errors.push(SemError {
-                                message: "own fields need structural destruction — rejected in phase 1".into(),
-                                span: f.span,
-                            });
-                        }
                         if let Some(def) = &f.default {
                             let dty = self.check_expr(def);
                             if dty != fty && dty != Ty::Any {
@@ -1594,12 +1633,6 @@ impl Checker {
                         crate::ast::ExtensionMember::Field(field) => {
                             let fty = self.resolve_type(&field.ty);
                             if fty == Ty::Void { self.errors.push(SemError{message: format!("field `{}` cannot be `void`", field.name), span: field.span}); }
-                            if matches!(fty, Ty::Own(_)) {
-                                self.errors.push(SemError {
-                                    message: "own fields need structural destruction — rejected in phase 1".into(),
-                                    span: field.span,
-                                });
-                            }
                             if let Some(def) = &field.default {
                                 let dty = self.check_expr(def);
                                 if dty != fty && dty != Ty::Any { self.errors.push(SemError{message: format!("default for field `{}`: expected `{}`, found `{}`", field.name, fty, dty), span: def.span}); }
@@ -1734,6 +1767,8 @@ impl Checker {
                 }
                 if matches!(decl_ty, Ty::Own(_)) {
                     self.errors.push(SemError{message: "global own constants need structural destruction — rejected in phase 1".into(), span: c.span});
+                } else if self.ty_has_own(&decl_ty) {
+                    self.errors.push(SemError{message: "global constants owning heap data need structural destruction — rejected in phase 1".into(), span: c.span});
                 }
                 let init_ty = self.check_expr(&c.init);
                 let is_null = matches!(c.init.kind, ExprKind::Null);
@@ -1750,6 +1785,8 @@ impl Checker {
                 let mut decl_ty = self.resolve_type(&v.ty);
                 if matches!(decl_ty, Ty::Own(_)) {
                     self.errors.push(SemError{message: "global own variables need structural destruction — rejected in phase 1".into(), span: v.span});
+                } else if self.ty_has_own(&decl_ty) {
+                    self.errors.push(SemError{message: "global variables owning heap data need structural destruction — rejected in phase 1".into(), span: v.span});
                 }
                 if decl_ty == Ty::Void {
                     self.errors.push(SemError{message: "global variable cannot have `void` type".into(), span: v.span});
@@ -2167,6 +2204,20 @@ impl Checker {
             let ty = self.resolve_type(&p.ty);
             self.declare_var(&p.name, ty, p.name_span);
         }
+        // `initialize` sugar moves each matching param into its field at
+        // entry (mirrors codegen): owned params are consumed, so poison
+        // them for the body.
+        if let Some(cinfo) = self.classes.get(class_name).cloned() {
+            for p in &ctor.params {
+                if cinfo.fields.iter().any(|(fname, _)| fname == &p.name) {
+                    if let Some(ty) = self.lookup_var(&p.name) {
+                        if matches!(ty, Ty::Own(_)) || self.ty_has_own(&ty) {
+                            self.poison_at_decl(&p.name);
+                        }
+                    }
+                }
+            }
+        }
         if let Some(body) = &ctor.body {
             let _ = self.check_block(body, &Ty::Void);
         }
@@ -2299,9 +2350,9 @@ impl Checker {
                             self.errors.push(SemError{message: format!("type mismatch in initializer: expected `{decl_ty}`, found `{init_ty}`"), span: init.span});
                         }
                         self.reject_null_own(is_null, &decl_ty, init.span);
-                        // Initializing an `own` slot moves out of any own
-                        // slots named in the initializer.
-                        if matches!(decl_ty, Ty::Own(_)) {
+                        // Initializing an owned slot (`own` or struct-with-`own`)
+                        // moves out of any owned slots named in the initializer.
+                        if matches!(decl_ty, Ty::Own(_)) || self.ty_has_own(&decl_ty) {
                             self.poison_moved_idents(init);
                         }
                     }
@@ -2608,9 +2659,11 @@ impl Checker {
             ExprKind::Ident(name) => {
                 let lookup = name.rsplit("::").next().unwrap_or(name);
                 if let Some(ty) = self.lookup_var(name).or_else(|| self.lookup_var(lookup)) {
-                    // Reading a moved/deleted `own` slot is an error. (Plain
-                    // assignment targets rebirth via unpoisoning in Assign.)
-                    if matches!(ty, Ty::Own(_))
+                    // Reading a moved/deleted owned slot is an error: `own`
+                    // directly, or structs with transitive `own` fields.
+                    // (Plain assignment targets rebirth via unpoisoning in
+                    // Assign.)
+                    if (matches!(ty, Ty::Own(_)) || self.ty_has_own(&ty))
                         && (self.is_poisoned(name) || self.is_poisoned(lookup))
                     {
                         self.errors.push(SemError {
@@ -2843,8 +2896,8 @@ impl Checker {
                     self.errors.push(SemError{message: format!("assignment type mismatch: expected `{lhs_ty}`, found `{rhs_ty}`"), span: expr.span});
                 }
                 self.reject_null_own(is_null, &lhs_ty, expr.span);
-                // Moving into an `own` slot poisons the sources.
-                if matches!(lhs_ty, Ty::Own(_)) {
+                // Moving into an owned slot poisons the sources.
+                if matches!(lhs_ty, Ty::Own(_)) || self.ty_has_own(&lhs_ty) {
                     self.poison_moved_idents(value);
                 }
                 lhs_ty
@@ -3288,6 +3341,10 @@ impl Checker {
                         let got = self.check_expr(fexpr);
                         if &got != expected_ty {
                             self.errors.push(SemError{message: format!("field `{fname}`: expected `{expected_ty}`, found `{got}`"), span: fexpr.span});
+                        }
+                        // Moving into an owned field poisons the sources.
+                        if matches!(expected_ty, Ty::Own(_)) || self.ty_has_own(expected_ty) {
+                            self.poison_moved_idents(fexpr);
                         }
                     } else {
                         self.errors.push(SemError {
@@ -5063,6 +5120,31 @@ mod tests {
         assert_error_contains(
             "void main() do\nint x = 1 ?? 2\nend\n",
             "requires an Optional left side",
+        );
+    }
+
+    /// Own-P2a: `own` fields are allowed; moves poison struct sources and
+    /// reads-after-move are diagnosed.
+    #[test]
+    fn own_fields_moves_checked() {
+        assert_clean("struct Pet has\nstring name\nend\nstruct Owner has\nown Pet pet\nint level\nend\nvoid take(Owner o) do\nend\nvoid main() do\nOwner a = Owner has\npet = new Pet(\"r\")\nlevel = 1\nend\ntake(a)\nend\n");
+        assert_error_contains(
+            "struct Pet has\nstring name\nend\nstruct Owner has\nown Pet pet\nend\nvoid main() do\nOwner a = Owner has\npet = new Pet(\"r\")\nend\nOwner b = a\nstring s = a.pet.name\nend\n",
+            "use of moved or deleted value `a`",
+        );
+    }
+
+    /// Own-P2b gates: `own` inside vectors/maps and owning globals stay
+    /// rejected (need container/global ownership).
+    #[test]
+    fn own_containers_and_globals_rejected() {
+        assert_error_contains(
+            "struct Pet has\nstring name\nend\nstruct Owner has\nown Pet pet\nend\nvoid main() do\nOwner vec v = vec[]\nend\n",
+            "needs container ownership",
+        );
+        assert_error_contains(
+            "struct Pet has\nstring name\nend\nstruct Owner has\nown Pet pet\nend\nOwner g = Owner has\npet = new Pet(\"r\")\nend\nvoid main() do\nend\n",
+            "need structural destruction",
         );
     }
 
