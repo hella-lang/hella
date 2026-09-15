@@ -982,6 +982,60 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
             .map(|s| s.name_span)
     }
 
+    /// All reference spans of the identifier at `offset` in this document.
+    ///
+    /// Lexer-driven (`Token::Ident` with equal slice), so strings and
+    /// comments never count. Scoped to the anchor declaration when the
+    /// word resolves to a local (shadowing-safe); whole-document otherwise,
+    /// which also doubles as the fallback for unparseable buffers.
+    pub fn reference_spans(
+        &self,
+        source: &str,
+        offset: usize,
+        include_declaration: bool,
+    ) -> Vec<Span> {
+        let Some(word) = ident_at(source, offset) else {
+            return Vec::new();
+        };
+        // Anchor: innermost visible local, else any top-level/imported
+        // symbol with this name (decl span + scope for narrowing).
+        let (decl, scope) = if let Some(l) = innermost_local(&self.locals, &word, offset, false) {
+            (Some(l.name_span), l.scope)
+        } else {
+            let found = self
+                .top_recursive()
+                .into_iter()
+                .chain(self.imported_recursive())
+                .find(|s| s.name == word);
+            match found {
+                Some(s) => (Some(s.name_span), s.scope),
+                None => (None, None),
+            }
+        };
+        let lexed = hella_compiler::lexer::lex(source);
+        let mut out = Vec::new();
+        for t in &lexed.tokens {
+            if t.token != Token::Ident {
+                continue;
+            }
+            if t.span.end > source.len() || &source[t.span.start..t.span.end] != word {
+                continue;
+            }
+            if let Some(scope) = scope {
+                if t.span.start < scope.start || t.span.start > scope.end {
+                    continue;
+                }
+            }
+            if !include_declaration && decl == Some(t.span) {
+                continue;
+            }
+            out.push(t.span);
+        }
+        out.sort_by_key(|s| s.start);
+        out.dedup();
+        out
+    }
+
     pub fn document_symbols(&self, source: &str) -> Vec<DocumentSymbol> {
         self.top
             .iter()
@@ -2033,6 +2087,50 @@ mod tests {
         assert_eq!(a.symbol_at(x_pos).map(|s| s.name.as_str()), Some("x"));
         let foo_name = src.find("foo").unwrap();
         assert_eq!(a.symbol_at(foo_name).map(|s| s.name.as_str()), Some("foo"));
+    }
+
+    #[test]
+    fn references_local_with_and_without_declaration() {
+        let src = "void main() do\n  int x = 1\n  int y = x + x\nend";
+        let a = analyze(src);
+        let use_off = src.find("x + x").unwrap();
+        assert_eq!(a.reference_spans(src, use_off, true).len(), 3); // decl + 2 uses
+        assert_eq!(a.reference_spans(src, use_off, false).len(), 2); // uses only
+    }
+
+    #[test]
+    fn references_top_level_function() {
+        let src = "int twice(int x) do\n  return x * 2\nend\nvoid main() do\n  int a = twice(1)\n  int b = twice(2)\nend";
+        let a = analyze(src);
+        let off = src.find("twice(1)").unwrap();
+        assert_eq!(a.reference_spans(src, off, true).len(), 3); // decl + 2 calls
+        assert_eq!(a.reference_spans(src, off, false).len(), 2);
+    }
+
+    #[test]
+    fn references_skip_strings_and_comments() {
+        let src = "void main() do\n  int x = 1\n  // x mentions nothing\n  string s = \"x\"\n  int y = x\nend";
+        let a = analyze(src);
+        let decl_off = src.find("int x").unwrap() + 4;
+        assert_eq!(a.reference_spans(src, decl_off, true).len(), 2); // decl + real use
+    }
+
+    #[test]
+    fn references_respect_shadowing() {
+        let src = "int f(int x) do\n  return x\nend\nint g(int x) do\n  return x\nend\nvoid main() do\nend";
+        let a = analyze(src);
+        let first_use = src.find("return x").unwrap() + 7;
+        // f's param decl + f's use only — g's pair is a different binding.
+        assert_eq!(a.reference_spans(src, first_use, true).len(), 2);
+    }
+
+    #[test]
+    fn references_empty_off_word() {
+        let src = "void main() do\n  int x = 1\nend";
+        let a = analyze(src);
+        let space = src.find(" main").unwrap(); // whitespace before `main`
+        assert!(a.reference_spans(src, space, true).is_empty());
+        assert!(a.reference_spans(src, src.len(), true).is_empty()); // past end
     }
 
     fn labels(items: &[CompletionItem]) -> Vec<&str> {

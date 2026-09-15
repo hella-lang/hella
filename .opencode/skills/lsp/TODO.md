@@ -10,7 +10,7 @@ UTF-16 positions, startup progress.
 
 - [x] **L-1 Formatting — DONE: `textDocument/formatting` + `rangeFormatting` via `hella-fmt`** (`formatting.rs`, 5 tests, 43 total pass)
 - [x] **L-2 Signature help — DONE: `textDocument/signatureHelp`** (`signatures.rs` text-scan + `lookup_callable`, 8 tests, 51 total pass)
-- [ ] **L-3 References — `textDocument/references`** — identifier-at-offset → all `Location`s in open doc (symbol spans + word-lex fallback for unparseable buffers). Include-declaration flag. Tests: local, param, field, fallback path.
+- [x] **L-3 References — DONE: `textDocument/references`** (`Analysis::reference_spans`, lexer-driven, scope-narrowed, 5 tests, 56 total pass)
 - [ ] **L-4 Rename — `textDocument/rename` + `prepareRename`** — reuse L-3 locations, single-file `WorkspaceEdit`, reject on keywords/empty with `InvalidParams`. Tests: rename local, reject keyword.
 - [ ] **L-5 Workspace symbols — `workspace/symbol`** — query filter over cached analyses (top-level + members), fuzzy case-insensitive match. Tests: find fn/struct across two open docs.
 - [ ] **L-6 Document highlights — `textDocument/documentHighlight`** — same-word occurrences in doc via L-3 core. Tests: read/write kinds on locals.

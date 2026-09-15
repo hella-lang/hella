@@ -9,13 +9,13 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest, RangeFormatting, Request as _, SignatureHelpRequest};
+use lsp_types::request::{Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest, RangeFormatting, References, Request as _, SignatureHelpRequest};
 use lsp_types::{
     CompletionParams, CompletionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DocumentFormattingParams, DocumentRangeFormattingParams,
     DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
-    GotoDefinitionResponse, HoverParams, InitializeResult, OneOf, Position,
-    PublishDiagnosticsParams, ServerCapabilities, ServerInfo, SignatureHelp,
+    GotoDefinitionResponse, HoverParams, InitializeResult, Location, OneOf, Position,
+    PublishDiagnosticsParams, ReferenceParams, ServerCapabilities, ServerInfo, SignatureHelp,
     SignatureHelpOptions, SignatureHelpParams, TextDocumentSyncCapability,
     TextDocumentSyncKind, TextDocumentSyncOptions,
 };
@@ -147,6 +147,7 @@ fn server_capabilities() -> ServerCapabilities {
             retrigger_characters: Some(vec![",".into(), ")".into()]),
             work_done_progress_options: Default::default(),
         }),
+        references_provider: Some(OneOf::Left(true)),
         ..Default::default()
     }
 }
@@ -261,6 +262,21 @@ fn handle_request(
             let result = state
                 .signature_help(&params)
                 .map(|s| serde_json::to_value(s))
+                .transpose()?
+                .unwrap_or(serde_json::Value::Null);
+            send_ok(connection, id, result);
+        }
+        References::METHOD => {
+            let (id, params) = match extract::<ReferenceParams>(req, References::METHOD) {
+                Ok(v) => v,
+                Err((id, msg)) => {
+                    send_err(connection, id, msg);
+                    return Ok(());
+                }
+            };
+            let result = state
+                .references(&params)
+                .map(|l| serde_json::to_value(l))
                 .transpose()?
                 .unwrap_or(serde_json::Value::Null);
             send_ok(connection, id, result);
@@ -560,8 +576,7 @@ impl State {
         crate::formatting::format_range(&doc.text, &params.range)
     }
 
-    fn signature_help(&self, params: &SignatureHelpParams) -> Option<SignatureHelp> {
-        let uri = &params.text_document_position_params.text_document.uri;
+    fn signature_help(&self, params: &SignatureHelpParams) -> Option<SignatureHelp> {        let uri = &params.text_document_position_params.text_document.uri;
         let (doc, offset) = self.doc_at(
             uri,
             &params.text_document_position_params.position,
@@ -579,6 +594,36 @@ impl State {
             .or_else(|| tolerant_parse(&doc.text))?;
         let a = Analysis::from_program(&prog);
         crate::signatures::help(&a, &doc.text, offset)
+    }
+
+    fn references(&self, params: &ReferenceParams) -> Option<Vec<Location>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let (doc, offset) = self.doc_at(uri, &params.text_document_position.position)?;
+        // Cached analysis when it exists; references degrade gracefully to
+        // whole-document word matches, so a tolerant re-parse is enough.
+        let fallback;
+        let analysis = match self.analysis.get(doc.uri.as_str()) {
+            Some(a) => a,
+            None => {
+                let out = hella_compiler::lexer::lex(&doc.text);
+                let prog = hella_compiler::parse::parse(out.tokens, doc.text.clone())
+                    .ok()
+                    .or_else(|| tolerant_parse(&doc.text))?;
+                fallback = Analysis::from_program(&prog);
+                &fallback
+            }
+        };
+        let spans =
+            analysis.reference_spans(&doc.text, offset, params.context.include_declaration);
+        Some(
+            spans
+                .into_iter()
+                .map(|s| Location {
+                    uri: doc.uri.clone(),
+                    range: crate::document::span_to_range(&doc.text, s),
+                })
+                .collect(),
+        )
     }
 
     fn doc_at(
