@@ -4029,7 +4029,17 @@ impl Checker {
                 // Undetermined element type until the first `push`.
                 Ty::Vec(Box::new(Ty::Any))
             }
-            ExprKind::InterpolatedString(_, _) => Ty::String,
+            ExprKind::InterpolatedString(parts, _) => {
+                // Interpolated `{expr}` parts re-parsed from the string
+                // literal must be checked like any other expression
+                // (visibility, definedness, types).
+                for part in parts {
+                    if let crate::ast::InterpolatedPart::Expr(e) = part {
+                        let _ = self.check_expr(e);
+                    }
+                }
+                Ty::String
+            }
             ExprKind::Closure { params, body, .. } => {
                 self.push_scope();
                 for p in params { let ty = self.resolve_type(&p.ty); self.declare_var(&p.name, ty, p.name_span); }
@@ -5063,6 +5073,21 @@ mod tests {
         assert_error_contains(
             "void main() do\nint x = 1 ?? 2\nend\n",
             "requires an Optional left side",
+        );
+    }
+
+    /// Interpolated `{expr}` parts are type-checked like any expression
+    /// (previously skipped entirely: undefined names and visibility
+    /// violations inside interpolation reached codegen).
+    #[test]
+    fn interpolation_parts_checked() {
+        assert_error_contains(
+            "void main() do\nprint(\"{nosuchvar}\")\nend\n",
+            "undefined variable `nosuchvar`",
+        );
+        assert_error_contains(
+            "struct S has\nprivate int secret\nend\nvoid main() do\nS s = S has\nsecret = 1\nend\nprint(\"{s.secret}\")\nend\n",
+            "is private",
         );
     }
 }
