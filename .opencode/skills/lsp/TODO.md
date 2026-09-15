@@ -9,7 +9,7 @@ diagnostics (lex/parse/sema + imports + `main`-file gate), incremental sync,
 UTF-16 positions, startup progress.
 
 - [x] **L-1 Formatting — DONE: `textDocument/formatting` + `rangeFormatting` via `hella-fmt`** (`formatting.rs`, 5 tests, 43 total pass)
-- [ ] **L-2 Signature help — `textDocument/signatureHelp`** — derive from `Symbol.params` + call-paren depth at offset (dummy-ident tolerant), active parameter from comma count, own/ref/out markers in labels. Advertise `signatureHelpProvider` with `(`/`,`/`)` triggers. Tests: free fn, method, extern-C, mid-typing `foo(a, |`.
+- [x] **L-2 Signature help — DONE: `textDocument/signatureHelp`** (`signatures.rs` text-scan + `lookup_callable`, 8 tests, 51 total pass)
 - [ ] **L-3 References — `textDocument/references`** — identifier-at-offset → all `Location`s in open doc (symbol spans + word-lex fallback for unparseable buffers). Include-declaration flag. Tests: local, param, field, fallback path.
 - [ ] **L-4 Rename — `textDocument/rename` + `prepareRename`** — reuse L-3 locations, single-file `WorkspaceEdit`, reject on keywords/empty with `InvalidParams`. Tests: rename local, reject keyword.
 - [ ] **L-5 Workspace symbols — `workspace/symbol`** — query filter over cached analyses (top-level + members), fuzzy case-insensitive match. Tests: find fn/struct across two open docs.

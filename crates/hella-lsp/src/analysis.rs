@@ -882,6 +882,34 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
         self.symbols_at(offset).into_iter().next()
     }
 
+    /// Find a callable (function/method/constructor) by name for signature
+    /// help. Searches top-level then imported symbols; prefers items that
+    /// actually declare parameters.
+    pub fn lookup_callable(&self, name: &str) -> Option<Symbol> {
+        let mut fallback: Option<Symbol> = None;
+        for s in self
+            .top_recursive()
+            .into_iter()
+            .chain(self.imported_recursive())
+        {
+            if s.name != name {
+                continue;
+            }
+            let callable = matches!(
+                s.kind,
+                SymKind::Function | SymKind::Method | SymKind::Constructor
+            );
+            if !callable {
+                continue;
+            }
+            if !s.params.is_empty() {
+                return Some(s.clone());
+            }
+            fallback.get_or_insert_with(|| s.clone());
+        }
+        fallback
+    }
+
     fn top_recursive(&self) -> Vec<&Symbol> {
         walk_symbols(&self.top)
     }

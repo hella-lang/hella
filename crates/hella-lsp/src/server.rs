@@ -9,13 +9,14 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest, RangeFormatting, Request as _};
+use lsp_types::request::{Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest, RangeFormatting, Request as _, SignatureHelpRequest};
 use lsp_types::{
     CompletionParams, CompletionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DocumentFormattingParams, DocumentRangeFormattingParams,
     DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
     GotoDefinitionResponse, HoverParams, InitializeResult, OneOf, Position,
-    PublishDiagnosticsParams, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
+    PublishDiagnosticsParams, ServerCapabilities, ServerInfo, SignatureHelp,
+    SignatureHelpOptions, SignatureHelpParams, TextDocumentSyncCapability,
     TextDocumentSyncKind, TextDocumentSyncOptions,
 };
 
@@ -141,6 +142,11 @@ fn server_capabilities() -> ServerCapabilities {
         document_symbol_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
         document_range_formatting_provider: Some(OneOf::Left(true)),
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".into(), ",".into(), ")".into()]),
+            retrigger_characters: Some(vec![",".into(), ")".into()]),
+            work_done_progress_options: Default::default(),
+        }),
         ..Default::default()
     }
 }
@@ -239,6 +245,22 @@ fn handle_request(
             let result = state
                 .format_range(&params)
                 .map(|e| serde_json::to_value(e))
+                .transpose()?
+                .unwrap_or(serde_json::Value::Null);
+            send_ok(connection, id, result);
+        }
+        SignatureHelpRequest::METHOD => {
+            let (id, params) =
+                match extract::<SignatureHelpParams>(req, SignatureHelpRequest::METHOD) {
+                    Ok(v) => v,
+                    Err((id, msg)) => {
+                        send_err(connection, id, msg);
+                        return Ok(());
+                    }
+                };
+            let result = state
+                .signature_help(&params)
+                .map(|s| serde_json::to_value(s))
                 .transpose()?
                 .unwrap_or(serde_json::Value::Null);
             send_ok(connection, id, result);
@@ -439,6 +461,39 @@ fn publish(connection: &Connection, state: &State, uri: &lsp_types::Uri) {
     let not = Notification::new(PublishDiagnostics::METHOD.to_string(), params);
     let _ = connection.sender.send(not.into());
 }
+/// Best-effort re-parse for mid-typing buffers: closes unclosed `(` so a
+/// half-typed call still yields top-level signatures. Returns `None` when
+/// even the repaired buffer does not parse.
+fn tolerant_parse(text: &str) -> Option<hella_compiler::ast::Program> {
+    let mut depth = 0u32;
+    let mut in_str = false;
+    let mut escape = false;
+    for b in text.bytes() {
+        if in_str {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' || b == b'\'' {
+                in_str = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' | b'\'' => in_str = true,
+            b'(' => depth += 1,
+            b')' if depth > 0 => depth -= 1,
+            _ => {}
+        }
+    }
+    let mut repaired = text.to_string();
+    for _ in 0..depth.min(16) {
+        repaired.push(')');
+    }
+    let out = hella_compiler::lexer::lex(&repaired);
+    hella_compiler::parse::parse(out.tokens, repaired).ok()
+}
+
 impl State {
     /// Re-run analysis for a document, replacing the cached symbol table.
     fn analyze(&mut self, uri: &lsp_types::Uri) {
@@ -503,6 +558,27 @@ impl State {
     fn format_range(&self, params: &DocumentRangeFormattingParams) -> Option<Vec<lsp_types::TextEdit>> {
         let doc = self.docs.get(&params.text_document.uri)?;
         crate::formatting::format_range(&doc.text, &params.range)
+    }
+
+    fn signature_help(&self, params: &SignatureHelpParams) -> Option<SignatureHelp> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let (doc, offset) = self.doc_at(
+            uri,
+            &params.text_document_position_params.position,
+        )?;
+        // Prefer the cached analysis; fall back to a tolerant re-parse so
+        // mid-typing buffers (unclosed parens/blocks) still resolve.
+        if let Some(a) = self.analysis.get(doc.uri.as_str()) {
+            if let Some(h) = crate::signatures::help(a, &doc.text, offset) {
+                return Some(h);
+            }
+        }
+        let out = hella_compiler::lexer::lex(&doc.text);
+        let prog = hella_compiler::parse::parse(out.tokens, doc.text.clone())
+            .ok()
+            .or_else(|| tolerant_parse(&doc.text))?;
+        let a = Analysis::from_program(&prog);
+        crate::signatures::help(&a, &doc.text, offset)
     }
 
     fn doc_at(

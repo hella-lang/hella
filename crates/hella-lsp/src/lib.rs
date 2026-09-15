@@ -14,3 +14,4 @@ pub mod document;
 pub mod formatting;
 pub mod progress;
 pub mod server;
+pub mod signatures;
