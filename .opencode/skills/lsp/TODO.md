@@ -16,7 +16,7 @@ UTF-16 positions, startup progress.
 - [x] **L-6 Document highlights — DONE: `textDocument/documentHighlight`** (L-3 core, decl = `Write`, uses = `Read`)
 - [x] **L-3b Analysis helpers — DONE** (`anchor_for`, `highlights`, `word_span_at`, `valid_ident`, `search`, `Analysis: Clone`, `DocumentManager::uris`)
 - [x] **L-7 Type definition + implementation — DONE** (`type_definition_span` with `own`/generic/array unwrap + self-resolve; `implementation_spans` via `Symbol.implements`; 6 tests, 65 total pass)
-- [ ] **L-8 Code actions — `textDocument/codeAction` quickfixes** — kind `quickfix`: remove unused import (diagnostic-driven), `delete` for leaked bare `new` (Own-P1 rule), add missing `end` for unclosed block. Tests: one per fix, titles exact.
+- [x] **L-8 Code actions — DONE: `textDocument/codeAction` quickfixes** (`actions.rs`: remove unresolvable import, bare-`new` → `own` bind, insert missing `end`; 4 tests, 69 total pass)
 - [ ] **L-9 Inlay hints — `textDocument/inlayHint`** — param-name hints at call sites (`param:`), inferred `let`-type hints for untyped decls, range-bounded. Tests: named-arg hint, inferred type hint.
 - [ ] **L-10 Folding + selection ranges — `textDocument/foldingRange`, `selectionRange`** — fold `do…end`/`has…end` blocks + imports header; selection expands ident → stmt → block → decl. Tests: nested blocks fold, selection chain length.
 - [ ] **L-11 Workspace index — multi-file, import-aware** — background scan of workspace `.hll` (cap ~500 files), imported-file symbol cache feeding completion/hover/definition, `didSave` re-index, file-watch invalidations. Tests: cross-file goto-def, import completion without open doc.

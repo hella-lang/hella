@@ -9,10 +9,10 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{Completion, DocumentHighlightRequest, DocumentSymbolRequest, Formatting, GotoDefinition, GotoImplementation, GotoImplementationParams, GotoTypeDefinition, GotoTypeDefinitionParams, HoverRequest, PrepareRenameRequest, RangeFormatting, References, Rename, Request as _, SignatureHelpRequest, WorkspaceSymbolRequest};
+use lsp_types::request::{CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest, Formatting, GotoDefinition, GotoImplementation, GotoImplementationParams, GotoTypeDefinition, GotoTypeDefinitionParams, HoverRequest, PrepareRenameRequest, RangeFormatting, References, Rename, Request as _, SignatureHelpRequest, WorkspaceSymbolRequest};
 use lsp_types::{
-    CompletionParams, CompletionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind,
+    CodeActionParams, CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind,
     DocumentHighlightParams, DocumentRangeFormattingParams, DocumentSymbolParams,
     DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, HoverParams,
     InitializeResult, Location, OneOf, Position, PrepareRenameResponse, PublishDiagnosticsParams,
@@ -152,6 +152,7 @@ fn server_capabilities() -> ServerCapabilities {
         references_provider: Some(OneOf::Left(true)),
         type_definition_provider: Some(lsp_types::TypeDefinitionProviderCapability::Simple(true)),
         implementation_provider: Some(lsp_types::ImplementationProviderCapability::Simple(true)),
+        code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
         rename_provider: Some(OneOf::Right(RenameOptions {
             prepare_provider: Some(true),
             work_done_progress_options: Default::default(),
@@ -383,6 +384,21 @@ fn handle_request(
             let result = state
                 .implementation(&params)
                 .map(|d| serde_json::to_value(d))
+                .transpose()?
+                .unwrap_or(serde_json::Value::Null);
+            send_ok(connection, id, result);
+        }
+        CodeActionRequest::METHOD => {
+            let (id, params) = match extract::<CodeActionParams>(req, CodeActionRequest::METHOD) {
+                Ok(v) => v,
+                Err((id, msg)) => {
+                    send_err(connection, id, msg);
+                    return Ok(());
+                }
+            };
+            let result = state
+                .code_actions(&params)
+                .map(|a| serde_json::to_value(a))
                 .transpose()?
                 .unwrap_or(serde_json::Value::Null);
             send_ok(connection, id, result);
@@ -858,8 +874,7 @@ impl State {
     fn type_definition(
         &self,
         params: &GotoTypeDefinitionParams,
-    ) -> Option<GotoDefinitionResponse> {
-        let uri = &params.text_document_position_params.text_document.uri;
+    ) -> Option<GotoDefinitionResponse> {        let uri = &params.text_document_position_params.text_document.uri;
         let (doc, analysis) = self.owned_analysis(uri)?;
         let offset = crate::document::position_to_offset(
             &doc.text,
@@ -900,6 +915,21 @@ impl State {
                     range: crate::document::span_to_range(&doc.text, s),
                 })
                 .collect(),
+        ))
+    }
+
+    fn code_actions(
+        &self,
+        params: &CodeActionParams,
+    ) -> Option<Vec<lsp_types::CodeActionOrCommand>> {
+        let doc = self.docs.get(&params.text_document.uri)?;
+        let path = crate::document::uri_to_path(&params.text_document.uri);
+        let diags = crate::diagnostics::diagnostics(&doc.text, path.as_deref());
+        Some(crate::actions::code_actions(
+            &doc.uri,
+            &doc.text,
+            &params.range,
+            &diags,
         ))
     }
 

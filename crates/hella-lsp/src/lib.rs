@@ -8,6 +8,7 @@
 //! - embedded in the `hella` CLI via `hella lsp` (alias `hella ls`)
 //! - embeddable in other tooling by calling [`server::run`] directly
 
+pub mod actions;
 pub mod analysis;
 pub mod diagnostics;
 pub mod document;
