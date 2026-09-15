@@ -41,6 +41,11 @@ pub struct Codegen<'ctx> {
     struct_field_defaults: HashMap<String, HashMap<String, Expr>>, // struct -> field -> default expr (if any)
     enum_types: HashMap<String, StructType<'ctx>>,
     enum_variant_tags: HashMap<String, HashMap<String, u32>>,
+    /// Wide payload layout for enums with a multi-param variant:
+    /// `{i32 tag, [WORDS x i64]}` plus per-variant field LLVM types.
+    /// Enums without multi-param variants keep the legacy `{i32, i64}`.
+    enum_wide_words: HashMap<String, u32>,
+    enum_payload_tys: HashMap<String, HashMap<String, Vec<BasicTypeEnum<'ctx>>>>,
     class_methods: HashMap<String, HashMap<String, (FunctionValue<'ctx>, TyInfo)>>,
     class_constructors: HashMap<String, Vec<(FunctionValue<'ctx>, TyInfo)>>,
     class_destructors: HashMap<String, Vec<(FunctionValue<'ctx>, TyInfo)>>,
@@ -125,6 +130,8 @@ impl<'ctx> Codegen<'ctx> {
             struct_fields: HashMap::new(),
             enum_types: HashMap::new(),
             enum_variant_tags: HashMap::new(),
+            enum_wide_words: HashMap::new(),
+            enum_payload_tys: HashMap::new(),
             class_methods: HashMap::new(),
             class_constructors: HashMap::new(),
             class_destructors: HashMap::new(),
@@ -915,12 +922,53 @@ impl<'ctx> Codegen<'ctx> {
         if self.enum_types.contains_key(&e.name) || self.struct_types.contains_key(&e.name) || self.class_methods.contains_key(&e.name) {
             return Err(CodegenError{message: format!("duplicate enum `{}`", e.name), span: e.name_span});
         }
+        // Per-variant payload field types (fallible: unknown types error
+        // instead of panicking on forward references).
+        let mut payload_tys: HashMap<String, Vec<BasicTypeEnum<'ctx>>> = HashMap::new();
+        let mut max_arity = 0usize;
+        for v in &e.variants {
+            let mut ftys = Vec::new();
+            for p in &v.payload_params {
+                let sty: crate::sema::Ty = (&p.ty).into();
+                let resolved = self.resolve_ty_for_codegen(&sty);
+                let Some(bt) = self.llvm_ty_for_sema(&resolved) else {
+                    return Err(CodegenError{message: format!("unknown type `{}` for enum `{}` payload", p.ty.name(), e.name), span: p.span});
+                };
+                ftys.push(bt);
+            }
+            max_arity = max_arity.max(ftys.len());
+            payload_tys.insert(v.name.clone(), ftys);
+        }
         let enum_ty = self.context.opaque_struct_type(&e.name);
-        // Enum as { i32 tag, i64 payload } - payload as i64 for int payloads, void payload as 0
-        // For multi-param payload, we still use i64 for first param (MVP); generic enum payload is i64 or ptr
-        let payload_ty = self.context.i64_type();
-        let tag_ty = self.context.i32_type();
-        enum_ty.set_body(&[tag_ty.into(), payload_ty.into()], false);
+        if max_arity <= 1 {
+            // Legacy layout: { i32 tag, i64 payload }.
+            let payload_ty = self.context.i64_type();
+            let tag_ty = self.context.i32_type();
+            enum_ty.set_body(&[tag_ty.into(), payload_ty.into()], false);
+        } else {
+            // Wide layout: { i32 tag, [WORDS x i64] }. Payloads roundtrip
+            // through word buffers (see construction / match lowering).
+            // Own-containing payloads would bypass destruction tracking.
+            let mut words = 0u64;
+            for (vname, ftys) in &payload_tys {
+                let mut total = 0u64;
+                for fty in ftys {
+                    if self.type_has_own_pair(fty, &mut HashSet::new()) {
+                        return Err(CodegenError{message: format!("variant `{vname}` payload owns heap data; `own` in enum payloads needs structural destruction — rejected in phase 1"), span: e.name_span});
+                    }
+                    let Some(k) = Self::llvm_word_count(fty) else {
+                        return Err(CodegenError{message: format!("variant `{vname}` payload type has no fixed size for enum lowering"), span: e.name_span});
+                    };
+                    total += k;
+                }
+                words = words.max(total);
+            }
+            let words = words.max(1) as u32;
+            let payload_arr = self.context.i64_type().array_type(words);
+            enum_ty.set_body(&[self.context.i32_type().into(), payload_arr.into()], false);
+            self.enum_wide_words.insert(e.name.clone(), words);
+        }
+        self.enum_payload_tys.insert(e.name.clone(), payload_tys);
         self.enum_types.insert(e.name.clone(), enum_ty);
         let mut tag_map = std::collections::HashMap::new();
         for (idx, v) in e.variants.iter().enumerate() {
@@ -2140,6 +2188,58 @@ impl<'ctx> Codegen<'ctx> {
             elems.push(self.llvm_ty_for_sema(t)?);
         }
         Some(self.context.struct_type(&elems, false))
+    }
+
+    /// 8-byte words needed to roundtrip a value of this type through an
+    /// `i64` word buffer (overestimates for sub-word scalars; padding
+    /// roundtrips as garbage, consistently on store and load). `None` for
+    /// types with no fixed size here (vectors).
+    fn llvm_word_count(ty: &BasicTypeEnum<'ctx>) -> Option<u64> {
+        match ty {
+            BasicTypeEnum::IntType(it) => Some(((it.get_bit_width() as u64 + 63) / 64).max(1)),
+            BasicTypeEnum::FloatType(_) => Some(2),
+            BasicTypeEnum::PointerType(_) => Some(1),
+            BasicTypeEnum::ArrayType(at) => Some(at.len() as u64 * Self::llvm_word_count(&at.get_element_type())?),
+            BasicTypeEnum::StructType(st) => {
+                let mut total = 0u64;
+                for i in 0..st.count_fields() {
+                    total += Self::llvm_word_count(&st.get_field_type_at_index(i).unwrap())?;
+                }
+                Some(total)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether values of this LLVM type own heap pairs (directly or through
+    /// struct fields, cycle-guarded). Word-copied payloads must not contain
+    /// these: scope destruction would miss them (double-own on copy).
+    fn type_has_own_pair(&self, ty: &BasicTypeEnum<'ctx>, visited: &mut HashSet<String>) -> bool {
+        match ty {
+            BasicTypeEnum::StructType(st) => {
+                if self.pair_owner_of(*st).is_some() {
+                    return true;
+                }
+                for (name, field_map) in &self.struct_fields {
+                    if self.struct_types.get(name) != Some(st) {
+                        continue;
+                    }
+                    if !visited.insert(name.clone()) {
+                        continue;
+                    }
+                    for idx in field_map.values() {
+                        if let Some(fty) = st.get_field_type_at_index(*idx) {
+                            if self.type_has_own_pair(&fty, visited) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            BasicTypeEnum::ArrayType(at) => self.type_has_own_pair(&at.get_element_type(), visited),
+            _ => false,
+        }
     }
 
     /// Element LLVM type for a `vec` declaration type. `Any` (from `vec[]`
@@ -7202,11 +7302,43 @@ impl<'ctx> Codegen<'ctx> {
                 agg = tmp.as_basic_value_enum();
                 if !args.is_empty() {
                     if args.len() > 1 {
-                        return Err(CodegenError{message: format!("variant `{variant}` has {} payload args; multi-param enum payloads are not supported in phase 1", args.len()), span: expr.span});
+                        // Wide payload: pack each arg's words after its tag.
+                        // (Legacy `{tag, i64}` enums never reach here through
+                        // sema: arity is checked at construction.)
+                        let slot_probe = self.builder.build_extract_value(agg.into_struct_value(), 1, "enum.payload.arr").unwrap();
+                        if !slot_probe.is_array_value() {
+                            return Err(CodegenError{message: format!("variant `{variant}` has {} payload args but `{ename}` is not a wide-payload enum", args.len()), span: expr.span});
+                        }
+                        let ftys = self.enum_payload_tys.get(&ename).and_then(|m| m.get(vbase)).cloned().unwrap_or_default();
+                        let ctx: &'ctx Context = self.context;
+                        let i64_ty = ctx.i64_type();
+                        let mut cursor = 0u32;
+                        for (i, a) in args.iter().enumerate() {
+                            let want_ty = ftys.get(i).cloned().unwrap_or(i64_ty.into());
+                            let mut v = self.codegen_call_arg(a)?;
+                            v = self.coerce_to_ty(v, want_ty);
+                            let vty = v.get_type();
+                            let k = Self::llvm_word_count(&vty).unwrap_or(1).max(1) as u32;
+                            let tmp_alloc = self.create_entry_block_alloca("enum.payload.tmp", vty);
+                            self.builder.build_store(tmp_alloc, v).unwrap();
+                            let opaque_ptr: BasicTypeEnum<'ctx> = ctx.ptr_type(inkwell::AddressSpace::default()).into();
+                            let word_ptr = self.builder.build_bit_cast(tmp_alloc.as_basic_value_enum(), opaque_ptr, "enum.payload.words").unwrap().into_pointer_value();
+                            for w in 0..k {
+                                let idx = i64_ty.const_int(w as u64, false);
+                                let wptr = unsafe { self.builder.build_gep(i64_ty, word_ptr, &[idx], "enum.payload.word.ptr").unwrap() };
+                                let word = self.builder.build_load(i64_ty, wptr, "enum.payload.word").unwrap();
+                                let slot = self.builder.build_extract_value(agg.into_struct_value(), 1, "enum.payload.arr").unwrap();
+                                let one = self.builder.build_insert_value(slot.into_array_value(), word, cursor, "enum.payload.set").unwrap();
+                                let back = self.builder.build_insert_value(agg.into_struct_value(), one.as_basic_value_enum(), 1, "enum.payload.arr").unwrap();
+                                agg = back.as_basic_value_enum();
+                                cursor += 1;
+                            }
+                        }
+                    } else {
+                        let payload_val = self.codegen_call_arg(&args[0])?;
+                        let tmp2 = self.builder.build_insert_value(agg.into_struct_value(), payload_val, 1, "enum.payload").unwrap();
+                        agg = tmp2.as_basic_value_enum();
                     }
-                    let payload_val = self.codegen_call_arg(&args[0])?;
-                    let tmp2 = self.builder.build_insert_value(agg.into_struct_value(), payload_val, 1, "enum.payload").unwrap();
-                    agg = tmp2.as_basic_value_enum();
                 }
                 Ok(agg)
             }
@@ -7466,6 +7598,34 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    /// Load payload word `idx` from an enum struct value, across both
+    /// layouts (legacy `{tag, i64}` and wide `{tag, [N x i64]}`).
+    fn enum_payload_word(
+        &self,
+        scrut_val: &BasicValueEnum<'ctx>,
+        idx: u32,
+        name: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CodegenError> {
+        let payload = self
+            .builder
+            .build_extract_value(scrut_val.into_struct_value(), 1, name)
+            .unwrap();
+        if payload.is_array_value() {
+            Ok(self
+                .builder
+                .build_extract_value(payload.into_array_value(), idx, name)
+                .unwrap()
+                .into_int_value())
+        } else if idx == 0 {
+            Ok(payload.into_int_value())
+        } else {
+            Err(CodegenError {
+                message: "enum payload position out of range".into(),
+                span: Span::new(0, 0),
+            })
+        }
+    }
+
     fn codegen_match(
         &mut self,
         m: &MatchExpr,
@@ -7578,7 +7738,29 @@ impl<'ctx> Codegen<'ctx> {
                                                     _ => tag_eq,
                                                 }
                                             } else if p.len() > 1 {
-                                                return Err(CodegenError{message: format!("variant `{variant}` has {} payload patterns; multi-param enum payloads are not supported in phase 1", p.len()), span: pat.span()});
+                                                // Wide payload: check each literal position.
+                                                // Positions address WORDS, so track a cursor
+                                                // (fields may span several words).
+                                                let aftys = self.enum_payload_tys.get(&ename).and_then(|m| m.get(variant.rsplit("::").next().unwrap_or(variant))).cloned().unwrap_or_default();
+                                                let mut cursor = 0u32;
+                                                let mut and_val = tag_eq;
+                                                for (pi, sub) in p.iter().enumerate() {
+                                                    let k = aftys.get(pi).and_then(|t| Self::llvm_word_count(t)).unwrap_or(1).max(1) as u32;
+                                                    if let Pattern::LitInt(v2, _) = sub {
+                                                        let w = self.enum_payload_word(&scrut_val, cursor, "match.alt.payload")?;
+                                                        let lit2 = self.context.i64_type().const_int(*v2 as u64, true);
+                                                        let inner = self.builder.build_int_compare(IntPredicate::EQ, w, lit2, "match.alt.payload.eq").unwrap();
+                                                        and_val = self.builder.build_and(and_val, inner, "match.alt.and").unwrap();
+                                                    } else if let Pattern::LitBool(b2, _) = sub {
+                                                        let w = self.enum_payload_word(&scrut_val, cursor, "match.alt.payload")?;
+                                                        let lit2 = self.context.bool_type().const_int(if *b2 { 1 } else { 0 }, false);
+                                                        let wb = self.builder.build_int_truncate(w, self.context.bool_type(), "match.alt.trunc").unwrap();
+                                                        let inner = self.builder.build_int_compare(IntPredicate::EQ, wb, lit2, "match.alt.payload.eq").unwrap();
+                                                        and_val = self.builder.build_and(and_val, inner, "match.alt.and").unwrap();
+                                                    }
+                                                    cursor += k;
+                                                }
+                                                and_val
                                             } else { tag_eq }
                                         } else { tag_eq }
                                     }
@@ -7693,7 +7875,34 @@ impl<'ctx> Codegen<'ctx> {
                                         _ => self.context.bool_type().const_int(1, false),
                                     }
                                 } else if pats.len() > 1 {
-                                    return Err(CodegenError{message: format!("variant `{variant}` has {} payload patterns; multi-param enum payloads are not supported in phase 1", pats.len()), span: arm.pattern.span()});
+                                    // Wide payload: check each literal position
+                                    // (tag is ANDed by the caller below).
+                                    // Positions address WORDS: track a cursor
+                                    // since fields may span several words.
+                                    let mftys = self.enum_payload_tys.get(&ename).and_then(|m| m.get(variant.rsplit("::").next().unwrap_or(variant))).cloned().unwrap_or_default();
+                                    let mut cursor = 0u32;
+                                    let mut and_val = self.context.bool_type().const_int(1, false);
+                                    for (pi, sub) in pats.iter().enumerate() {
+                                        let k = mftys.get(pi).and_then(|t| Self::llvm_word_count(t)).unwrap_or(1).max(1) as u32;
+                                        let check = match sub {
+                                            Pattern::Wildcard(_) | Pattern::Var(_, _) => self.context.bool_type().const_int(1, false),
+                                            Pattern::LitInt(v2, _) => {
+                                                let w = self.enum_payload_word(&scrut_val, cursor, "match.enum.payload")?;
+                                                let lit2 = self.context.i64_type().const_int(*v2 as u64, true);
+                                                self.builder.build_int_compare(IntPredicate::EQ, w, lit2, "match.enum.payload.eq").unwrap()
+                                            }
+                                            Pattern::LitBool(b2, _) => {
+                                                let w = self.enum_payload_word(&scrut_val, cursor, "match.enum.payload")?;
+                                                let lit2 = self.context.bool_type().const_int(if *b2 { 1 } else { 0 }, false);
+                                                let wb = self.builder.build_int_truncate(w, self.context.bool_type(), "match.enum.trunc").unwrap();
+                                                self.builder.build_int_compare(IntPredicate::EQ, wb, lit2, "match.enum.payload.eq").unwrap()
+                                            }
+                                            _ => self.context.bool_type().const_int(1, false),
+                                        };
+                                        and_val = self.builder.build_and(and_val, check, "match.enum.and").unwrap();
+                                        cursor += k;
+                                    }
+                                    and_val
                                 } else {
                                     self.context.bool_type().const_int(1, false)
                                 };
@@ -7789,7 +7998,7 @@ impl<'ctx> Codegen<'ctx> {
                         }
                     }
                 }
-                Pattern::Enum{ payload: Some(pats), ..} => {
+                Pattern::Enum{ payload: Some(pats), variant, ..} => {
                     if pats.len() == 1 {
                         match &pats[0] {
                             Pattern::Var(vname, _) => {
@@ -7814,31 +8023,32 @@ impl<'ctx> Codegen<'ctx> {
                             _ => {}
                         }
                     } else {
-                        for (idx, pat) in pats.iter().enumerate() {
-                            match pat {
-                                Pattern::Var(vname, _) => {
-                                    if idx == 0 {
-                                        let payload_val = self.builder.build_extract_value(scrut_val.into_struct_value(), 1, "enum.payload.bind").unwrap();
-                                        let ty = payload_val.get_type();
-                                        let alloc = self.create_entry_block_alloca(vname, ty);
-                                        self.builder.build_store(alloc, payload_val).unwrap();
-                                        self.vars.last_mut().unwrap().insert(vname.clone(), (alloc, ty));
-                                    }
+                        // Wide payload: reassemble each bound position from
+                        // its words via the variant's field types.
+                        let vbase: &str = variant.rsplit("::").next().unwrap_or(variant);
+                        let ename = scrut_enum_name.clone().unwrap_or_default();
+                        let ftys = self.enum_payload_tys.get(&ename).and_then(|m| m.get(vbase)).cloned().unwrap_or_default();
+                        let ctx: &'ctx Context = self.context;
+                        let i64_ty = ctx.i64_type();
+                        let mut cursor = 0u32;
+                        for (i, pat) in pats.iter().enumerate() {
+                            let fty: BasicTypeEnum<'ctx> = ftys.get(i).cloned().unwrap_or(i64_ty.into());
+                            let k = Self::llvm_word_count(&fty).unwrap_or(1).max(1) as u32;
+                            if let Pattern::Var(vname, _) = pat {
+                                let tmp_words = self.create_entry_block_alloca("enum.bind.words", i64_ty.array_type(k).into());
+                                for w in 0..k {
+                                    let word = self.enum_payload_word(&scrut_val, cursor + w, "enum.bind")?;
+                                    let slot = unsafe { self.builder.build_gep(i64_ty, tmp_words, &[i64_ty.const_int(w as u64, false)], "enum.bind.slot").unwrap() };
+                                    self.builder.build_store(slot, word).unwrap();
                                 }
-                                Pattern::Tuple(subs, _) => {
-                                    let payload_val = self.builder.build_extract_value(scrut_val.into_struct_value(), 1, "enum.payload.tuple").unwrap();
-                                    for (i, spat) in subs.iter().enumerate() {
-                                        if let Pattern::Var(n, _) = spat {
-                                            let elem_val = self.builder.build_extract_value(payload_val.into_struct_value(), i as u32, "enum.tuple.bind2").unwrap();
-                                            let ty = elem_val.get_type();
-                                            let alloc = self.create_entry_block_alloca(n, ty);
-                                            self.builder.build_store(alloc, elem_val).unwrap();
-                                            self.vars.last_mut().unwrap().insert(n.clone(), (alloc, ty));
-                                        }
-                                    }
-                                }
-                                _ => {}
+                                let opaque_ptr2: BasicTypeEnum<'ctx> = ctx.ptr_type(inkwell::AddressSpace::default()).into();
+                                let field_ptr = self.builder.build_bit_cast(tmp_words.as_basic_value_enum(), opaque_ptr2, "enum.bind.cast").unwrap().into_pointer_value();
+                                let val = self.builder.build_load(fty, field_ptr, "enum.bind.val").unwrap();
+                                let alloc = self.create_entry_block_alloca(vname, fty);
+                                self.builder.build_store(alloc, val).unwrap();
+                                self.vars.last_mut().unwrap().insert(vname.clone(), (alloc, fty));
                             }
+                            cursor += k;
                         }
                     }
                 }
@@ -8578,6 +8788,15 @@ mod tests {
     fn tuple_return_destructure_verifies() {
         compile_src(
             "(int, int) pair() do\n  return (3, 4)\nend\nvoid main() do\n  a, b = pair()\n  int x = 1\n  int y = 2\n  x, y = (y, x)\nend\n",
+        );
+    }
+
+    /// T-13: multi-param payloads lower through the wide `{tag, words}`
+    /// layout, including heterogeneous positions.
+    #[test]
+    fn multi_payload_enum_verifies() {
+        compile_src(
+            "enum P has\n  Pair(int a, int b)\n  Single(int x)\n  Mix(int n, string s)\nend\nint sum(P p) do\n  return match p do\n    .Pair(a, b) -> a + b\n    .Single(x) -> x\n    .Mix(n, s) -> n\n  end\nend\nvoid main() do\n  P p = .Pair(3, 4)\nend\n",
         );
     }
 
