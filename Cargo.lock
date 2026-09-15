@@ -324,6 +324,7 @@ name = "hella-lsp"
 version = "0.1.0"
 dependencies = [
  "hella-compiler",
+ "hella-fmt",
  "lsp-server",
  "lsp-types",
  "serde",

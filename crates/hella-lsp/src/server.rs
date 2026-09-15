@@ -9,10 +9,11 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, Request as _};
+use lsp_types::request::{Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest, RangeFormatting, Request as _};
 use lsp_types::{
     CompletionParams, CompletionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
+    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentRangeFormattingParams,
+    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
     GotoDefinitionResponse, HoverParams, InitializeResult, OneOf, Position,
     PublishDiagnosticsParams, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
     TextDocumentSyncKind, TextDocumentSyncOptions,
@@ -138,6 +139,8 @@ fn server_capabilities() -> ServerCapabilities {
             ..Default::default()
         }),
         document_symbol_provider: Some(OneOf::Left(true)),
+        document_formatting_provider: Some(OneOf::Left(true)),
+        document_range_formatting_provider: Some(OneOf::Left(true)),
         ..Default::default()
     }
 }
@@ -205,6 +208,37 @@ fn handle_request(
             let result = state
                 .document_symbols(&params)
                 .map(|d| serde_json::to_value(d))
+                .transpose()?
+                .unwrap_or(serde_json::Value::Null);
+            send_ok(connection, id, result);
+        }
+        Formatting::METHOD => {
+            let (id, params) = match extract::<DocumentFormattingParams>(req, Formatting::METHOD) {
+                Ok(v) => v,
+                Err((id, msg)) => {
+                    send_err(connection, id, msg);
+                    return Ok(());
+                }
+            };
+            let result = state
+                .format_document(&params)
+                .map(|e| serde_json::to_value(e))
+                .transpose()?
+                .unwrap_or(serde_json::Value::Null);
+            send_ok(connection, id, result);
+        }
+        RangeFormatting::METHOD => {
+            let (id, params) =
+                match extract::<DocumentRangeFormattingParams>(req, RangeFormatting::METHOD) {
+                    Ok(v) => v,
+                    Err((id, msg)) => {
+                        send_err(connection, id, msg);
+                        return Ok(());
+                    }
+                };
+            let result = state
+                .format_range(&params)
+                .map(|e| serde_json::to_value(e))
                 .transpose()?
                 .unwrap_or(serde_json::Value::Null);
             send_ok(connection, id, result);
@@ -459,6 +493,16 @@ impl State {
         let a = self.analysis.get(doc.uri.as_str())?;
         let symbols = a.document_symbols(&doc.text);
         Some(DocumentSymbolResponse::Nested(symbols))
+    }
+
+    fn format_document(&self, params: &DocumentFormattingParams) -> Option<Vec<lsp_types::TextEdit>> {
+        let doc = self.docs.get(&params.text_document.uri)?;
+        crate::formatting::format_document(&doc.text)
+    }
+
+    fn format_range(&self, params: &DocumentRangeFormattingParams) -> Option<Vec<lsp_types::TextEdit>> {
+        let doc = self.docs.get(&params.text_document.uri)?;
+        crate::formatting::format_range(&doc.text, &params.range)
     }
 
     fn doc_at(

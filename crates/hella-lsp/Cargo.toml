@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 hella-compiler = { path = "../hella-compiler" }
+hella-fmt = { path = "../hella-fmt" }
 lsp-server = "0.10.0"
 lsp-types = "0.97"
 serde = { version = "1", features = ["derive"] }
