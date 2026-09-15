@@ -5897,11 +5897,22 @@ impl<'ctx> Codegen<'ctx> {
             ExprKind::CharLit(c) => Ok(self.context.i32_type().const_int(*c as u64, false).into()),
             ExprKind::Ident(name) => {
                 let lookup = name.rsplit("::").next().unwrap_or(name);
-                let (ptr, ty) = self.lookup_var(name).or_else(|| self.lookup_var(lookup)).ok_or(CodegenError {
-                    message: format!("undefined var {name}"),
-                    span: expr.span,
-                })?;
-                Ok(self.builder.build_load(ty, ptr, lookup).unwrap())
+                if let Some((ptr, ty)) = self.lookup_var(name).or_else(|| self.lookup_var(lookup)) {
+                    Ok(self.builder.build_load(ty, ptr, lookup).unwrap())
+                } else if let Some((func, _)) = self.funcs.get(name).or_else(|| self.funcs.get(lookup)).cloned() {
+                    // First-class function reference: the function's address
+                    // (flows into `function<Ret(Args)>` slots, called via the
+                    // variable-call path).
+                    Ok(func.as_global_value().as_pointer_value().into())
+                } else if let Some(f) = self.module.get_function(name).or_else(|| self.module.get_function(lookup)) {
+                    // Extern functions live directly on the module.
+                    Ok(f.as_global_value().as_pointer_value().into())
+                } else {
+                    Err(CodegenError {
+                        message: format!("undefined var {name}"),
+                        span: expr.span,
+                    })
+                }
             }
             ExprKind::This => {
                 let (ptr, ty) = self.lookup_var("this").ok_or(CodegenError{message: "`this` outside method".into(), span: expr.span})?;
@@ -8585,6 +8596,14 @@ mod tests {
     fn super_and_self_verifies() {
         compile_src(
             "open class Base has\n  public int v\n  Base(int v) initialize\n  public int getv() do\n    return this.v\n  end\nend\nopen class Child extends Base has\n  Child(int v) initialize\n  public override int getv() do\n    return super.getv() + 1\n  end\n  public int viagetv() do\n    return Self.getv()\n  end\nend\nvoid main() do\n  Child c = Child(10)\nend\n",
+        );
+    }
+
+    /// T-3: named functions decay to pointers for `function<Ret(Args)>` slots.
+    #[test]
+    fn function_reference_verifies() {
+        compile_src(
+            "int apply(function<int(int)> f, int x) do\n  return f(x)\nend\nint twice(int x) do\n  return x * 2\nend\nvoid main() do\n  int r = apply(twice, 21)\nend\n",
         );
     }
 
