@@ -135,6 +135,9 @@ pub struct Symbol {
     pub params: Vec<(String, String)>,
     /// Superclass name for classes (`extends` target). Used for `super.`.
     pub parent: Option<String>,
+    /// Trait names a class implements (`implements` list, base names).
+    /// Used for `textDocument/implementation`.
+    pub implements: Vec<String>,
 }
 
 impl Symbol {
@@ -155,6 +158,10 @@ impl Symbol {
     }
     fn with_parent(mut self, parent: &str) -> Self {
         self.parent = Some(parent.to_string());
+        self
+    }
+    fn with_implements(mut self, traits: &[String]) -> Self {
+        self.implements = traits.to_vec();
         self
     }
     fn kind_heading(&self) -> &'static str {
@@ -426,6 +433,12 @@ fn collect_item(&mut self, item: &Item) {
                 if let Some(ext) = &c.extends {
                     sym = sym.with_parent(&ext.name());
                 }
+                let impls: Vec<String> = c
+                    .implements
+                    .iter()
+                    .map(|t| base_type_name(&t.name()))
+                    .collect();
+                sym = sym.with_implements(&impls);
                 self.push_top(sym, c.name_span);
             }
             Item::Enum(e) => {
@@ -1102,6 +1115,106 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
             .collect()
     }
 
+    /// Resolve the declared type of the identifier at `offset` to its
+    /// declaration span (`textDocument/typeDefinition`). Handles `own T`
+    /// wrappers, generic/array suffixes, and cursor-on-the-type-name
+    /// (which resolves to itself).
+    pub fn type_definition_span(&self, source: &str, offset: usize) -> Option<Span> {
+        let word = ident_at(source, offset)?;
+        let sym = if let Some(l) = innermost_local(&self.locals, &word, offset, false) {
+            l.clone()
+        } else {
+            self.top_recursive()
+                .into_iter()
+                .chain(self.imported_recursive())
+                .find(|s| s.name == word)?
+                .clone()
+        };
+        let ty_name = match &sym.ty {
+            Some(t) => base_type_name(t),
+            // Cursor is on the type name itself: a type resolves to itself.
+            None if matches!(
+                sym.kind,
+                SymKind::Struct
+                    | SymKind::Class
+                    | SymKind::Enum
+                    | SymKind::Trait
+                    | SymKind::Typedef
+                    | SymKind::Distinct
+            ) =>
+            {
+                return Some(sym.name_span)
+            }
+            None => return None,
+        };
+        self.top_recursive()
+            .into_iter()
+            .chain(self.imported_recursive())
+            .find(|s| {
+                s.name == ty_name
+                    && matches!(
+                        s.kind,
+                        SymKind::Struct
+                            | SymKind::Class
+                            | SymKind::Enum
+                            | SymKind::Trait
+                            | SymKind::Typedef
+                            | SymKind::Distinct
+                    )
+            })
+            .map(|s| s.name_span)
+    }
+
+    /// Implementation locations for the trait or trait method at `offset`
+    /// (`textDocument/implementation`): implementing classes (trait name)
+    /// or their same-named method declarations (trait method).
+    pub fn implementation_spans(&self, source: &str, offset: usize) -> Vec<Span> {
+        let Some(word) = ident_at(source, offset) else {
+            return Vec::new();
+        };
+        // Find the enclosing trait when the cursor is on one of its methods.
+        let mut trait_name: Option<String> = None;
+        let mut method_name: Option<String> = None;
+        for t in self.top_recursive() {
+            if t.kind != SymKind::Trait {
+                continue;
+            }
+            if t.name == word {
+                trait_name = Some(t.name.clone());
+                break;
+            }
+            if t.full_span.start <= offset
+                && offset <= t.full_span.end
+                && t.children.iter().any(|c| c.name == word)
+            {
+                trait_name = Some(t.name.clone());
+                method_name = Some(word.clone());
+                break;
+            }
+        }
+        let Some(trait_name) = trait_name else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for c in self.top_recursive() {
+            if c.kind != SymKind::Class || !c.implements.contains(&trait_name) {
+                continue;
+            }
+            match &method_name {
+                Some(m) => {
+                    for child in &c.children {
+                        if child.name == *m && child.kind == SymKind::Method {
+                            out.push(child.name_span);
+                        }
+                    }
+                }
+                None => out.push(c.name_span),
+            }
+        }
+        out.sort_by_key(|s| s.start);
+        out
+    }
+
     pub fn document_symbols(&self, source: &str) -> Vec<DocumentSymbol> {
         self.top
             .iter()
@@ -1522,12 +1635,22 @@ fn make_symbol(
         ty: None,
         params: Vec::new(),
         parent: None,
+        implements: Vec::new(),
     }
 }
 
 /// `(name, type-name)` pairs for snippet placeholders.
-fn param_pairs(params: &[ast::Param]) -> Vec<(String, String)> {
-    params
+fn base_type_name(ty: &str) -> String {
+    // `own Speaker` → `Speaker`; `Vec<int>` → `Vec`; `int[]` → `int`.
+    let t = ty.strip_prefix("own ").unwrap_or(ty).trim();
+    let end = t
+        .find(|c: char| c == '<' || c == '[' || c == '(' || c == ':' || c.is_whitespace())
+        .unwrap_or(t.len());
+    t[..end].to_string()
+}
+
+/// `(name, type-name)` pairs for snippet placeholders.
+fn param_pairs(params: &[ast::Param]) -> Vec<(String, String)> {    params
         .iter()
         .map(|p| (p.name.clone(), p.ty.name()))
         .collect()
@@ -2233,6 +2356,64 @@ mod tests {
         assert!(field.contains(&"distance".to_string()), "case-insensitive fn: {field:?}");
         assert!(a.search("").is_empty());
         assert!(a.search("zzz_no_match").is_empty());
+    }
+
+    #[test]
+    fn type_definition_var_to_struct() {
+        let src = "struct Point has\n  int x\nend\nvoid main() do\n  Point p = has x = 1 end\nend";
+        let a = analyze(src);
+        let use_off = src.find("Point p").unwrap();
+        let span = a.type_definition_span(src, use_off).expect("type def");
+        let decl_off = src.find("struct Point").unwrap() + 7;
+        assert_eq!(span, Analysis::word_span_at(src, decl_off).unwrap());
+    }
+
+    #[test]
+    fn type_definition_own_trait() {
+        let src = "trait Speaker has\n  string speak()\nend\nopen class Cat implements Speaker has\n  public string speak() do\n    return \"m\"\n  end\nend\nvoid main() do\n  own Speaker s = new Cat()\nend";
+        let a = analyze(src);
+        let use_off = src.find("Speaker s").unwrap();
+        let span = a.type_definition_span(src, use_off).expect("type def");
+        let decl_off = src.find("trait Speaker").unwrap() + 6;
+        assert_eq!(span, Analysis::word_span_at(src, decl_off).unwrap());
+    }
+
+    #[test]
+    fn type_definition_on_type_name_resolves_itself() {
+        let src = "struct Point has\n  int x\nend\nvoid main() do\nend";
+        let a = analyze(src);
+        let off = src.find("Point").unwrap();
+        let span = a.type_definition_span(src, off).expect("self");
+        assert_eq!(span, Analysis::word_span_at(src, off).unwrap());
+    }
+
+    #[test]
+    fn type_definition_unknown_returns_none() {
+        let src = "void main() do\n  int x = 1\nend";
+        let a = analyze(src);
+        let off = src.find("int x").unwrap() + 4; // `x: int` is primitive
+        assert_eq!(a.type_definition_span(src, off), None);
+    }
+
+    #[test]
+    fn implementations_of_trait() {
+        let src = "trait Speaker has\n  string speak()\nend\nopen class Cat implements Speaker has\n  public string speak() do\n    return \"m\"\n  end\nend\nopen class Dog implements Speaker has\n  public string speak() do\n    return \"w\"\n  end\nend\nvoid main() do\nend";
+        let a = analyze(src);
+        let off = src.find("trait Speaker").unwrap() + 6;
+        let impls = a.implementation_spans(src, off);
+        assert_eq!(impls.len(), 2, "Cat + Dog: {impls:?}");
+    }
+
+    #[test]
+    fn implementations_of_trait_method() {
+        let src = "trait Speaker has\n  string speak()\nend\nopen class Cat implements Speaker has\n  public string speak() do\n    return \"m\"\n  end\nend\nvoid main() do\nend";
+        let a = analyze(src);
+        let off = src.find("string speak()").unwrap() + 7; // trait's method
+        let impls = a.implementation_spans(src, off);
+        assert_eq!(impls.len(), 1, "Cat::speak: {impls:?}");
+        // ...and it points at the class method, not the class name.
+        let cat_method = src.find("public string speak()").unwrap() + 15;
+        assert_eq!(impls[0], Analysis::word_span_at(src, cat_method).unwrap());
     }
 
     fn labels(items: &[CompletionItem]) -> Vec<&str> {

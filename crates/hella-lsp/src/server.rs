@@ -9,7 +9,7 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{Completion, DocumentHighlightRequest, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest, PrepareRenameRequest, RangeFormatting, References, Rename, Request as _, SignatureHelpRequest, WorkspaceSymbolRequest};
+use lsp_types::request::{Completion, DocumentHighlightRequest, DocumentSymbolRequest, Formatting, GotoDefinition, GotoImplementation, GotoImplementationParams, GotoTypeDefinition, GotoTypeDefinitionParams, HoverRequest, PrepareRenameRequest, RangeFormatting, References, Rename, Request as _, SignatureHelpRequest, WorkspaceSymbolRequest};
 use lsp_types::{
     CompletionParams, CompletionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind,
@@ -150,6 +150,8 @@ fn server_capabilities() -> ServerCapabilities {
             work_done_progress_options: Default::default(),
         }),
         references_provider: Some(OneOf::Left(true)),
+        type_definition_provider: Some(lsp_types::TypeDefinitionProviderCapability::Simple(true)),
+        implementation_provider: Some(lsp_types::ImplementationProviderCapability::Simple(true)),
         rename_provider: Some(OneOf::Right(RenameOptions {
             prepare_provider: Some(true),
             work_done_progress_options: Default::default(),
@@ -349,6 +351,38 @@ fn handle_request(
             let result = state
                 .workspace_symbols(&params)
                 .map(|s| serde_json::to_value(s))
+                .transpose()?
+                .unwrap_or(serde_json::Value::Null);
+            send_ok(connection, id, result);
+        }
+        GotoTypeDefinition::METHOD => {
+            let (id, params) =
+                match extract::<GotoTypeDefinitionParams>(req, GotoTypeDefinition::METHOD) {
+                    Ok(v) => v,
+                    Err((id, msg)) => {
+                        send_err(connection, id, msg);
+                        return Ok(());
+                    }
+                };
+            let result = state
+                .type_definition(&params)
+                .map(|d| serde_json::to_value(d))
+                .transpose()?
+                .unwrap_or(serde_json::Value::Null);
+            send_ok(connection, id, result);
+        }
+        GotoImplementation::METHOD => {
+            let (id, params) =
+                match extract::<GotoImplementationParams>(req, GotoImplementation::METHOD) {
+                    Ok(v) => v,
+                    Err((id, msg)) => {
+                        send_err(connection, id, msg);
+                        return Ok(());
+                    }
+                };
+            let result = state
+                .implementation(&params)
+                .map(|d| serde_json::to_value(d))
                 .transpose()?
                 .unwrap_or(serde_json::Value::Null);
             send_ok(connection, id, result);
@@ -819,6 +853,54 @@ impl State {
             }
         }
         Some(WorkspaceSymbolResponse::Flat(flat))
+    }
+
+    fn type_definition(
+        &self,
+        params: &GotoTypeDefinitionParams,
+    ) -> Option<GotoDefinitionResponse> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let (doc, analysis) = self.owned_analysis(uri)?;
+        let offset = crate::document::position_to_offset(
+            &doc.text,
+            &params.text_document_position_params.position,
+        );
+        let span = analysis.type_definition_span(&doc.text, offset)?;
+        Some(GotoDefinitionResponse::Scalar(Location {
+            uri: doc.uri.clone(),
+            range: crate::document::span_to_range(&doc.text, span),
+        }))
+    }
+
+    fn implementation(
+        &self,
+        params: &GotoImplementationParams,
+    ) -> Option<GotoDefinitionResponse> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let (doc, analysis) = self.owned_analysis(uri)?;
+        let offset = crate::document::position_to_offset(
+            &doc.text,
+            &params.text_document_position_params.position,
+        );
+        let spans = analysis.implementation_spans(&doc.text, offset);
+        if spans.is_empty() {
+            return None;
+        }
+        if spans.len() == 1 {
+            return Some(GotoDefinitionResponse::Scalar(Location {
+                uri: doc.uri.clone(),
+                range: crate::document::span_to_range(&doc.text, spans[0]),
+            }));
+        }
+        Some(GotoDefinitionResponse::Array(
+            spans
+                .into_iter()
+                .map(|s| Location {
+                    uri: doc.uri.clone(),
+                    range: crate::document::span_to_range(&doc.text, s),
+                })
+                .collect(),
+        ))
     }
 
     fn doc_at(
