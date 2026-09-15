@@ -2215,6 +2215,10 @@ fn ident_at(source: &str, offset: usize) -> Option<String> {
 }
 
 /// Lowercased word prefix ending at `offset`, or `None` when not in a word.
+pub fn word_prefix_for_completion(source: &str, offset: usize) -> Option<String> {
+    word_prefix_at(source, offset)
+}
+
 fn word_prefix_at(source: &str, offset: usize) -> Option<String> {
     let bytes = source.as_bytes();
     let mut lo = offset;

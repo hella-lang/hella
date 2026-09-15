@@ -26,6 +26,18 @@ pub fn code_actions(
     range: &Range,
     diagnostics: &[Diagnostic],
 ) -> Vec<CodeActionOrCommand> {
+    code_actions_with_imports(uri, text, range, diagnostics, None, &[])
+}
+
+/// Same, but with workspace context for auto-import quickfixes.
+pub fn code_actions_with_imports(
+    uri: &Uri,
+    text: &str,
+    range: &Range,
+    diagnostics: &[Diagnostic],
+    importer: Option<&std::path::Path>,
+    workspace_roots: &[std::path::PathBuf],
+) -> Vec<CodeActionOrCommand> {
     let mut out = Vec::new();
     for diag in diagnostics {
         if !overlaps(&diag.range, range) {
@@ -36,6 +48,8 @@ pub fn code_actions(
         } else if let Some(a) = assign_own(uri, text, diag) {
             out.push(CodeActionOrCommand::CodeAction(a));
         } else if let Some(a) = insert_end(uri, text, diag) {
+            out.push(CodeActionOrCommand::CodeAction(a));
+        } else if let Some(a) = auto_import(uri, text, diag, importer, workspace_roots) {
             out.push(CodeActionOrCommand::CodeAction(a));
         }
     }
@@ -141,6 +155,59 @@ fn insert_end(uri: &Uri, text: &str, diag: &Diagnostic) -> Option<CodeAction> {
     ))
 }
 
+/// `undefined …` / `unknown type …` → suggest the import that provides it.
+fn auto_import(
+    uri: &Uri,
+    text: &str,
+    diag: &Diagnostic,
+    importer: Option<&std::path::Path>,
+    workspace_roots: &[std::path::PathBuf],
+) -> Option<CodeAction> {
+    let name = extract_missing_symbol(&diag.message)?;
+    if text.contains(&format!("import {name}")) || text.contains(&format!("::{name}")) {
+        // Already imported (selective or qualified) — no fix.
+        return None;
+    }
+    let import = crate::auto_import::find_import_for_symbol(&name, importer, workspace_roots)?;
+    if text.lines().any(|l| l.trim() == format!("import {import}") || l.trim().starts_with(&format!("import {import}::")) || l.trim().starts_with(&format!("import {import} "))) {
+        return None;
+    }
+    let insert_at = import_insertion_line(text);
+    Some(quickfix(
+        uri,
+        format!("Add import `{import}` for `{name}`"),
+        diag,
+        Range {
+            start: Position { line: insert_at, character: 0 },
+            end: Position { line: insert_at, character: 0 },
+        },
+        format!("import {import}\n"),
+    ))
+}
+
+fn extract_missing_symbol(msg: &str) -> Option<String> {
+    for prefix in ["unknown type `", "undefined function `", "undefined variable `"] {
+        if let Some(rest) = msg.strip_prefix(prefix) {
+            let name = rest.split('`').next()?;
+            if !name.is_empty() && crate::analysis::Analysis::valid_ident(name) {
+                return Some(name.to_string());
+            }
+        }
+    }
+    // Fallback: some sema messages use "unknown type `T`" inside longer text.
+    None
+}
+
+fn import_insertion_line(text: &str) -> u32 {
+    let mut last_import: Option<usize> = None;
+    for (idx, line) in text.lines().enumerate() {
+        if line.trim_start().starts_with("import ") {
+            last_import = Some(idx);
+        }
+    }
+    last_import.map(|i| i as u32 + 1).unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +285,22 @@ mod tests {
             panic!("expected action");
         };
         assert_eq!(a.title, "Insert missing `end`");
+    }
+
+    #[test]
+    fn auto_import_for_unknown_type() {
+        let root = std::env::temp_dir().join(format!("hella-actions-auto-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("mymod.hll"), "int helper(int x) do\n  return x\nend\n").unwrap();
+        let text = "void main() do\n  int y = helper(1)\nend\n";
+        let d = diag(text, text.find("helper").unwrap(), text.find("helper").unwrap() + 6, "undefined function `helper`");
+        let actions = code_actions_with_imports(&uri(), text, &whole(text), &[d], Some(&root.join("main.hll")), &[root.clone()]);
+        assert!(actions.iter().any(|a| match a {
+            CodeActionOrCommand::CodeAction(c) => c.title.contains("mymod") && c.title.contains("helper"),
+            _ => false
+        }), "expected auto-import: {actions:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

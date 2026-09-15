@@ -10,6 +10,7 @@
 
 pub mod actions;
 pub mod analysis;
+pub mod auto_import;
 pub mod diagnostics;
 pub mod document;
 pub mod formatting;

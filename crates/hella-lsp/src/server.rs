@@ -676,8 +676,49 @@ impl State {
         // so it does not use the cached analysis. The document path drives
         // import-path completion and loading imported names.
         let path = crate::document::uri_to_path(uri);
-        let items =
+        let mut items =
             Analysis::complete_with_path(&doc.text, path.as_deref(), offset, self.snippet_support);
+        // Auto-import: unimported workspace symbols matching the prefix,
+        // offered with an import edit. Bounded scan, skipped inside member access.
+        if !items.iter().any(|i| i.label.starts_with('.')) {
+            let prefix = crate::analysis::word_prefix_for_completion(&doc.text, offset);
+            if prefix.as_ref().map(|p| !p.is_empty()).unwrap_or(true) {
+                let existing: std::collections::HashSet<String> =
+                    items.iter().map(|i| i.label.clone()).collect();
+                let pre = prefix.clone().unwrap_or_default();
+                for (name, import) in crate::auto_import::candidates_with_prefix(
+                    &pre,
+                    path.as_deref(),
+                    &self.workspace_roots,
+                    &existing,
+                ) {
+                    // Don't duplicate names already offered.
+                    if existing.contains(&name) {
+                        continue;
+                    }
+                    let mut item = lsp_types::CompletionItem {
+                        label: name.clone(),
+                        kind: Some(lsp_types::CompletionItemKind::FUNCTION),
+                        detail: Some(format!("auto-import `{import}`")),
+                        additional_text_edits: Some(vec![lsp_types::TextEdit {
+                            range: lsp_types::Range {
+                                start: lsp_types::Position { line: crate::auto_import::import_insertion_line(&doc.text), character: 0 },
+                                end: lsp_types::Position { line: crate::auto_import::import_insertion_line(&doc.text), character: 0 },
+                            },
+                            new_text: format!("import {import}\n"),
+                        }]),
+                        ..Default::default()
+                    };
+                    // Keep auto-imports after locals: sort key via label but
+                    // mark with a detail so the editor shows the provenance.
+                    let _ = &mut item;
+                    items.push(item);
+                    if items.len() >= 200 {
+                        break;
+                    }
+                }
+            }
+        }
         Some(CompletionResponse::Array(items))
     }
 
@@ -925,11 +966,13 @@ impl State {
         let doc = self.docs.get(&params.text_document.uri)?;
         let path = crate::document::uri_to_path(&params.text_document.uri);
         let diags = crate::diagnostics::diagnostics(&doc.text, path.as_deref());
-        Some(crate::actions::code_actions(
+        Some(crate::actions::code_actions_with_imports(
             &doc.uri,
             &doc.text,
             &params.range,
             &diags,
+            path.as_deref(),
+            &self.workspace_roots,
         ))
     }
 
