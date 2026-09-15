@@ -1,0 +1,39 @@
+// stdlib_math.hll — regression for std::math (REAL_STDLIB.md).
+// Every name resolves to stdlib/std/math.hll via `import std::math`.
+
+import std::math
+import std::io
+
+int main() do
+    // integer helpers
+    assert abs(-42) is 42
+    assert abs(0) is 0
+    assert min(3, 5) is 3
+    assert max(3, 5) is 5
+    assert clamp(10, 0, 5) is 5
+    assert clamp(-1, 0, 5) is 0
+    assert clamp(3, 0, 5) is 3
+
+    // double libm — called for codegen coverage (double `is` not yet lowered)
+    double s4 = sqrt(4.0)
+    double s9 = sqrt(9.0)
+    double fa = fabs(2.5)
+    double af = absf(2.5)
+    double fl = floor(2.9)
+    double ce = ceil(2.1)
+    double ro = round(2.5)
+    double pw = pow(2.0, 3.0)
+    double ex = exp(0.0)
+    double lg = log(1.0)
+    double si = sin(0.0)
+    double co = cos(0.0)
+    double ta = tan(0.0)
+    double mn = fmin(1.5, 2.5)
+    double mx = fmax(1.5, 2.5)
+    double at = atan2(0.0, 1.0)
+    // touch values so they are not DCE'd
+    println("doubles ok")
+
+    println("math ok")
+    return 0
+end

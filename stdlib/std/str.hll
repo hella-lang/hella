@@ -1,0 +1,118 @@
+// std::str — string utilities for Hella (real stdlib: pure Hella + extern FFI).
+// Import via: import std::str
+
+extern "c" from "libc" do
+    int strlen(string s)
+    int strcmp(string a, string b)
+    int strncmp(string a, string b, int n)
+    string strdup(string s)
+    string calloc(int n, int size)
+end
+
+int len(string s) do
+    return strlen(s)
+end
+
+bool isEmpty(string s) do
+    return strlen(s) is 0
+end
+
+bool equals(string a, string b) do
+    return strcmp(a, b) is 0
+end
+
+int compare(string a, string b) do
+    return strcmp(a, b)
+end
+
+bool contains(string hay, string needle) do
+    int n = strlen(needle)
+    int h = strlen(hay)
+    int limit = 0
+    int i = 0
+    if n is 0 do
+        return true
+    end
+    if h < n do
+        return false
+    end
+    limit = h - n + 1
+    i = 0
+    while i < limit do
+        bool ok = true
+        int j = 0
+        j = 0
+        while j < n do
+            if hay[i + j] is not needle[j] do
+                ok = false
+            end
+            j = j + 1
+        end
+        if ok do
+            return true
+        end
+        i = i + 1
+    end
+    return false
+end
+
+bool startsWith(string s, string prefix) do
+    int plen = strlen(prefix)
+    if plen is 0 do
+        return true
+    end
+    if strlen(s) < plen do
+        return false
+    end
+    return strncmp(s, prefix, plen) is 0
+end
+
+bool endsWith(string s, string suffix) do
+    int slen = strlen(s)
+    int plen = strlen(suffix)
+    int start = 0
+    int k = 0
+    if plen is 0 do
+        return true
+    end
+    if slen < plen do
+        return false
+    end
+    start = slen - plen
+    k = 0
+    while k < plen do
+        if s[start + k] is not suffix[k] do
+            return false
+        end
+        k = k + 1
+    end
+    return true
+end
+
+string clone(string s) do
+    return strdup(s)
+end
+
+string substring(string s, int start, int stop) do
+    int slen = strlen(s)
+    string res = ""
+    int n = 0
+    int i = 0
+    if start < 0 do
+        start = 0
+    end
+    if stop > slen do
+        stop = slen
+    end
+    if stop < start do
+        return ""
+    end
+    n = stop - start
+    res = calloc(1, n + 1)
+    i = 0
+    while i < n do
+        res[i] = s[start + i]
+        i = i + 1
+    end
+    return res
+end

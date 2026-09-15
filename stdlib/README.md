@@ -23,6 +23,15 @@ without its `import` is a sema error (`undefined function`) by design.
     `i32 puts(string s)`, `i32 printf(string fmt, ...)`, `i32 putchar(char c)`,
     `int write(int fd, string buf, int count)`, `string calloc(int n, int size)`,
     `int scanf(string fmt, ...)`
+- `std::math` — `stdlib/std/math.hll`
+  - `double sqrt(double x)`, `sin`/`cos`/`tan`, `pow`, `floor`/`ceil`/`round`,
+    `log`/`exp`, `fabs`, `fmin`/`fmax`, `atan2` via `libm`
+  - `int abs(int x)`, `min`/`max`, `clamp`, `absf`/`minf`/`maxf` wrappers
+- `std::str` — `stdlib/std/str.hll`
+  - `int len(string s)`, `bool isEmpty`, `bool equals`/`int compare`,
+    `bool contains`/`startsWith`/`endsWith`, `string clone`/`substring`
+  - via `strlen`/`strcmp`/`strncmp`/`strdup`/`calloc`; `contains`/`endsWith`/
+    `substring` are pure Hella loops (no `Range` iteration — while loops)
 - `std::types` — `stdlib/std/types.hll` (doc-only manifest of the implicit
   environment: `bool string i8…u128 int uint float double`; importing is a no-op)
 
@@ -46,4 +55,4 @@ printf 'Ada\n42\n' | ./stdlib_io
 
 ## Not yet
 
-File IO, formatting/interpolation helpers, buffering.
+`std::env` (getEnv, argCount), `std::fs` (readFile/writeFile), `std::vec`/`std::map` helpers, `std::fmt` (format/join).

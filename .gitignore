@@ -1,5 +1,6 @@
 /target
 *.out
+*.o
 .DS_Store
-/examples
+/examples/*
 !/examples/*.hll

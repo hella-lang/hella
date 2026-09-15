@@ -1,0 +1,27 @@
+// stdlib_string.hll — regression for std::str
+
+import std::str
+import std::io
+
+int main() do
+    assert len("hello") is 5
+    assert isEmpty("") is true
+    assert isEmpty("x") is false
+    assert equals("abc", "abc") is true
+    assert equals("abc", "abd") is false
+    assert compare("a", "b") < 0
+    assert contains("hello world", "world") is true
+    assert contains("hello", "x") is false
+    assert contains("abc", "") is true
+    assert startsWith("hello", "hell") is true
+    assert startsWith("hello", "world") is false
+    assert endsWith("hello", "llo") is true
+    assert endsWith("hello", "hell") is false
+    assert endsWith("hello", "") is true
+    string sub = substring("hello world", 6, 11)
+    assert equals(sub, "world") is true
+    string cl = clone("hi")
+    assert equals(cl, "hi") is true
+    println("string ok")
+    return 0
+end

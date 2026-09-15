@@ -1,0 +1,71 @@
+// std::math — math utilities for Hella (real stdlib: pure Hella + extern FFI).
+// Import via: import std::math
+//
+// Thin wrappers over `libm` (macOS libSystem includes libm; no extra link
+// flags needed). All user-facing names are ordinary Hella functions/exterior
+// declarations — no compiler intrinsics. Calling without the import is a
+// sema error by design.
+
+extern "c" from "libm" do
+    double sqrt(double x)
+    double sin(double x)
+    double cos(double x)
+    double tan(double x)
+    double pow(double x, double y)
+    double floor(double x)
+    double ceil(double x)
+    double round(double x)
+    double log(double x)
+    double exp(double x)
+    double fabs(double x)
+    double fmin(double a, double b)
+    double fmax(double a, double b)
+    double atan2(double y, double x)
+end
+
+// Integer helpers (pure Hella, no FFI needed).
+
+int abs(int x) do
+    if x < 0 do
+        return -x
+    end
+    return x
+end
+
+int min(int a, int b) do
+    if a < b do
+        return a
+    end
+    return b
+end
+
+int max(int a, int b) do
+    if a > b do
+        return a
+    end
+    return b
+end
+
+int clamp(int v, int lo, int hi) do
+    if v < lo do
+        return lo
+    end
+    if v > hi do
+        return hi
+    end
+    return v
+end
+
+// Double wrappers with friendlier Hella names.
+
+double absf(double x) do
+    return fabs(x)
+end
+
+double minf(double a, double b) do
+    return fmin(a, b)
+end
+
+double maxf(double a, double b) do
+    return fmax(a, b)
+end

@@ -7416,20 +7416,51 @@ impl<'ctx> Codegen<'ctx> {
                                         .build_load(ty, ptr, "ptr.load")
                                         .unwrap()
                                         .into_pointer_value();
-                                    let elem_ptr = unsafe {
-                                        self.builder
-                                            .build_gep(
-                                                self.context.i64_type(),
-                                                loaded,
-                                                &[idx_val],
-                                                "idx.ptr.store",
-                                            )
-                                            .unwrap()
-                                    };
-                                    self.builder
-                                        .build_store(elem_ptr, val)
-                                        .unwrap();
-                                    return Ok(val);
+                                    if self.is_string_var(name) {
+                                        let elem_ptr = unsafe {
+                                            self.builder
+                                                .build_gep(
+                                                    self.context.i8_type(),
+                                                    loaded,
+                                                    &[idx_val],
+                                                    "idx.ptr.store",
+                                                )
+                                                .unwrap()
+                                        };
+                                        // `val` is char (i32) -> truncate to i8 for storage
+                                        let byte = if val.is_int_value() {
+                                            let iv = val.into_int_value();
+                                            if iv.get_type().get_bit_width() == 32 {
+                                                self.builder
+                                                    .build_int_truncate(
+                                                        iv,
+                                                        self.context.i8_type(),
+                                                        "str.trunc",
+                                                    )
+                                                    .unwrap()
+                                                    .into()
+                                            } else {
+                                                val
+                                            }
+                                        } else {
+                                            val
+                                        };
+                                        self.builder.build_store(elem_ptr, byte).unwrap();
+                                        return Ok(val);
+                                    } else {
+                                        let elem_ptr = unsafe {
+                                            self.builder
+                                                .build_gep(
+                                                    self.context.i64_type(),
+                                                    loaded,
+                                                    &[idx_val],
+                                                    "idx.ptr.store",
+                                                )
+                                                .unwrap()
+                                        };
+                                        self.builder.build_store(elem_ptr, val).unwrap();
+                                        return Ok(val);
+                                    }
                                 }
                             }
                         }
@@ -7789,24 +7820,51 @@ impl<'ctx> Codegen<'ctx> {
                                 .build_load(ty, ptr, "ptr.load")
                                 .unwrap()
                                 .into_pointer_value();
-                            let elem_ptr = unsafe {
-                                self.builder
-                                    .build_gep(
-                                        self.context.i64_type(),
-                                        loaded,
-                                        &[idx_val],
-                                        "idx.ptr",
-                                    )
+                            if self.is_string_var(name) {
+                                let elem_ptr = unsafe {
+                                    self.builder
+                                        .build_gep(
+                                            self.context.i8_type(),
+                                            loaded,
+                                            &[idx_val],
+                                            "idx.ptr",
+                                        )
+                                        .unwrap()
+                                };
+                                let byte = self
+                                    .builder
+                                    .build_load(self.context.i8_type(), elem_ptr, "idx.load")
                                     .unwrap()
-                            };
-                            return Ok(self
-                                .builder
-                                .build_load(
-                                    self.context.i64_type(),
-                                    elem_ptr,
-                                    "idx.load",
-                                )
-                                .unwrap());
+                                    .into_int_value();
+                                let ext = self
+                                    .builder
+                                    .build_int_z_extend(
+                                        byte,
+                                        self.context.i32_type(),
+                                        "idx.ext",
+                                    )
+                                    .unwrap();
+                                return Ok(ext.into());
+                            } else {
+                                let elem_ptr = unsafe {
+                                    self.builder
+                                        .build_gep(
+                                            self.context.i64_type(),
+                                            loaded,
+                                            &[idx_val],
+                                            "idx.ptr",
+                                        )
+                                        .unwrap()
+                                };
+                                return Ok(self
+                                    .builder
+                                    .build_load(
+                                        self.context.i64_type(),
+                                        elem_ptr,
+                                        "idx.load",
+                                    )
+                                    .unwrap());
+                            }
                         } else if ty.is_struct_type() {
                             // string as {ptr,len} ? For now string as ptr: fallback to pointer case
                             // but string currently maps to ptr, not struct, so handle pointer case above
