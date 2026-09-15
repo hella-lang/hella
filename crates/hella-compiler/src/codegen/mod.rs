@@ -89,10 +89,35 @@ pub struct Codegen<'ctx> {
     class_extends: HashMap<String, String>,
     /// Directly implemented traits per class.
     class_implements: HashMap<String, Vec<String>>,
+    /// Generated per-element-type destructor for vectors/maps holding
+    /// owned content: `__container_dtor_N(slot)`. Memoized; emitted on
+    /// demand, called from scope-exit, assignment-overwrite, and `clear`.
+    container_dtors: HashMap<String, FunctionValue<'ctx>>,
     /// Release mode (`hella build --release`): `debug_assert` is stripped
     /// (not emitted; sema still checks it). Set from `OptLevel` before
     /// `compile_program`.
     pub release: bool,
+    /// Global slots needing destruction at program end (`main` exit):
+    /// `own` pairs plus structs with user dtors or transitive `own`
+    /// fields. Emitted in reverse declaration order.
+    global_owns: Vec<(PointerValue<'ctx>, String)>,
+    global_dtors: Vec<GlobalDtor<'ctx>>,
+    /// Global initializers too complex to const-fold, evaluated at program
+    /// start (in `main`, after the user `init` block): `(name, init)`.
+    pending_global_inits: Vec<(String, Expr)>,
+}
+
+/// One program-end destruction entry: a single slot, or a fixed array slot
+/// expanded per static index at emission (the builder may not exist at
+/// declaration time, so indices materialize late).
+#[derive(Clone, Debug)]
+enum GlobalDtor<'ctx> {
+    One(PointerValue<'ctx>, String),
+    Array {
+        slot: PointerValue<'ctx>,
+        elem_ty: BasicTypeEnum<'ctx>,
+        len: u32,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -154,7 +179,11 @@ impl<'ctx> Codegen<'ctx> {
             next_class_tag: 1,
             class_extends: HashMap::new(),
             class_implements: HashMap::new(),
+            container_dtors: HashMap::new(),
             release: false,
+            global_owns: Vec::new(),
+            global_dtors: Vec::new(),
+            pending_global_inits: Vec::new(),
         }
     }
 
@@ -1773,6 +1802,20 @@ impl<'ctx> Codegen<'ctx> {
                 global.set_linkage(inkwell::module::Linkage::External);
                 let ptr = global.as_pointer_value();
                 self.globals.insert(v.name.clone(), (ptr, arr_ty));
+                // Fixed arrays of destructible elements: program-end entry
+                // with element type and static length (expanded at emission).
+                if let Type::FixedArray { elem, .. } = &v.ty {
+                    if self.dtor_name_for_ast_ty(elem.as_ref()).is_some() {
+                        if let BasicTypeEnum::ArrayType(at) = arr_ty {
+                            let elem_ty = at.get_element_type();
+                            self.global_dtors.push(GlobalDtor::Array {
+                                slot: ptr,
+                                elem_ty,
+                                len: at.len(),
+                            });
+                        }
+                    }
+                }
                 return Ok(());
             }
         }
@@ -1821,6 +1864,40 @@ impl<'ctx> Codegen<'ctx> {
         self.globals.insert(v.name.clone(), (ptr, ty));
         if matches!(&v.ty, Type::String(_)) {
             self.string_vars.insert(v.name.clone());
+        }
+        // Ownership tracking for program-end destruction.
+        match &v.ty {
+            Type::Own(inner, _) => {
+                let inner_name = match inner.as_ref() {
+                    Type::Named(n, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
+                    Type::Generic(n, _, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
+                    _ => String::new(),
+                };
+                if !inner_name.is_empty() {
+                    self.global_owns.push((ptr, inner_name));
+                }
+            }
+            _ => {
+                if let Some(name) = self.dtor_name_for_ast_ty(&v.ty) {
+                    self.global_dtors.push(GlobalDtor::One(ptr, name));
+                }
+            }
+        }
+        // Non-trivial initializers cannot const-fold: evaluate them at
+        // program start (pending queue drained in `main`).
+        if let Some(init) = &v.init {
+            let trivial = matches!(
+                init.kind,
+                ExprKind::IntLit(_)
+                    | ExprKind::BoolLit(_)
+                    | ExprKind::CharLit(_)
+                    | ExprKind::FloatLit(_)
+                    | ExprKind::StringLit(_)
+                    | ExprKind::Null
+            );
+            if !trivial {
+                self.pending_global_inits.push((v.name.clone(), init.clone()));
+            }
         }
         Ok(())
     }
@@ -2571,15 +2648,80 @@ impl<'ctx> Codegen<'ctx> {
                     self.builder.build_gep(arr, buf_ptr, &[zero64, nlen], "m.pop.slot").unwrap()
                 };
                 let elem_ty = arr.get_element_type();
-                Ok(Some(self.builder.build_load(elem_ty, eptr, "m.pop").unwrap()))
+                let loaded = self.builder.build_load(elem_ty, eptr, "m.pop").unwrap();
+                // Null the popped slot so a stale pair (for `own` element types)
+                // is never left with a live data pointer behind the decreased len.
+                self.null_own_fields(eptr, elem_ty, 0);
+                Ok(Some(loaded))
             }
             "clear" => {
+                // Destroy all live elements before clearing so `own` content is
+                // freed (mirrors the generated `__container_dtor_N` walk).
                 match &buf {
-                    Buf::Vec { st, .. } => {
+                    Buf::Vec { st, arr, len } => {
+                        let func = self.cur_fn.ok_or(CodegenError { message: "`clear` outside function".into(), span })?;
+                        let destroy_bb = self.context.append_basic_block(func, "clear.vec.destroy");
+                        let done_bb = self.context.append_basic_block(func, "clear.vec.done");
+                        self.builder.build_unconditional_branch(destroy_bb).unwrap();
+                        self.builder.position_at_end(destroy_bb);
+                        let i64_ty = self.context.i64_type();
+                        let idx_ptr = self.create_entry_block_alloca("clear.idx", i64_ty.into());
+                        self.builder.build_store(idx_ptr, i64_ty.const_zero()).unwrap();
+                        let cond_bb = self.context.append_basic_block(func, "clear.vec.cond");
+                        self.builder.build_unconditional_branch(cond_bb).unwrap();
+                        self.builder.position_at_end(cond_bb);
+                        let idx = self.builder.build_load(i64_ty, idx_ptr, "clear.idx").unwrap().into_int_value();
+                        let more = self.builder.build_int_compare(IntPredicate::SLT, idx, *len, "clear.vec.more").unwrap();
+                        self.builder.build_conditional_branch(more, destroy_bb, done_bb).unwrap();
+                        self.builder.position_at_end(destroy_bb);
+                        let buf_ptr = self.builder.build_struct_gep(*st, ptr, 0, "clear.buf.ptr").unwrap();
+                        let eptr = unsafe {
+                            self.builder
+                                .build_gep(*arr, buf_ptr, &[i64_ty.const_zero(), idx], "clear.elem")
+                                .unwrap()
+                        };
+                        self.emit_field_destroy_for_ty(eptr, (*arr).get_element_type(), 0);
+                        let next = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "clear.next").unwrap();
+                        self.builder.build_store(idx_ptr, next).unwrap();
+                        self.builder.build_unconditional_branch(cond_bb).unwrap();
+                        self.builder.position_at_end(done_bb);
                         let len_ptr = self.builder.build_struct_gep(*st, ptr, 1, "m.clear.len").unwrap();
                         self.builder.build_store(len_ptr, zero64).unwrap();
                     }
-                    Buf::Map { st, .. } => {
+                    Buf::Map { st, keys, vals, len } => {
+                        let func = self.cur_fn.ok_or(CodegenError { message: "`clear` outside function".into(), span })?;
+                        let destroy_bb = self.context.append_basic_block(func, "clear.map.destroy");
+                        let done_bb = self.context.append_basic_block(func, "clear.map.done");
+                        self.builder.build_unconditional_branch(destroy_bb).unwrap();
+                        self.builder.position_at_end(destroy_bb);
+                        let i64_ty = self.context.i64_type();
+                        let idx_ptr = self.create_entry_block_alloca("clear.idx", i64_ty.into());
+                        self.builder.build_store(idx_ptr, i64_ty.const_zero()).unwrap();
+                        let cond_bb = self.context.append_basic_block(func, "clear.map.cond");
+                        self.builder.build_unconditional_branch(cond_bb).unwrap();
+                        self.builder.position_at_end(cond_bb);
+                        let idx = self.builder.build_load(i64_ty, idx_ptr, "clear.idx").unwrap().into_int_value();
+                        let more = self.builder.build_int_compare(IntPredicate::SLT, idx, *len, "clear.map.more").unwrap();
+                        self.builder.build_conditional_branch(more, destroy_bb, done_bb).unwrap();
+                        self.builder.position_at_end(destroy_bb);
+                        let keys_ptr = self.builder.build_struct_gep(*st, ptr, 0, "clear.keys.ptr").unwrap();
+                        let vals_ptr = self.builder.build_struct_gep(*st, ptr, 1, "clear.vals.ptr").unwrap();
+                        let kptr = unsafe {
+                            self.builder
+                                .build_gep(*keys, keys_ptr, &[i64_ty.const_zero(), idx], "clear.key")
+                                .unwrap()
+                        };
+                        self.emit_field_destroy_for_ty(kptr, (*keys).get_element_type(), 0);
+                        let vptr = unsafe {
+                            self.builder
+                                .build_gep(*vals, vals_ptr, &[i64_ty.const_zero(), idx], "clear.val")
+                                .unwrap()
+                        };
+                        self.emit_field_destroy_for_ty(vptr, (*vals).get_element_type(), 0);
+                        let next = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "clear.next").unwrap();
+                        self.builder.build_store(idx_ptr, next).unwrap();
+                        self.builder.build_unconditional_branch(cond_bb).unwrap();
+                        self.builder.position_at_end(done_bb);
                         let len_ptr = self.builder.build_struct_gep(*st, ptr, 2, "m.clear.len").unwrap();
                         self.builder.build_store(len_ptr, zero64).unwrap();
                     }
@@ -4187,9 +4329,15 @@ impl<'ctx> Codegen<'ctx> {
                     // structural `own`-field destruction, or arrays of
                     // either) the same way.
                     self.track_dtor_slot(alloca, &param.ty, llvm_ty);
+                    // Vectors/maps with owned element types: register for
+                    // container-dtor invocation at scope exit.
+                    self.track_container_dtor(alloca, &param.ty, llvm_ty);
                 }
             }
 
+        }
+        if f.name == "main" {
+            self.emit_program_startup()?;
         }
         let always_returns = self.codegen_block(&f.body)?;
 
@@ -4205,6 +4353,8 @@ impl<'ctx> Codegen<'ctx> {
             self.emit_current_scope_owns();
             self.emit_current_scope_dtors();
             if self.cur_is_main {
+                // Program end: destroy owning globals (reverse declared).
+                self.emit_global_dtors();
                 let zero = self.context.i32_type().const_int(0, false);
                 self.builder.build_return(Some(&zero)).unwrap();
             } else if info.ret == crate::sema::Ty::Void {
@@ -4442,8 +4592,10 @@ impl<'ctx> Codegen<'ctx> {
                 self.vars.last_mut().unwrap().insert(param.name.clone(), (alloca, llvm_ty));
                 self.track_own_param(alloca, &param.ty);
                 self.track_dtor_slot(alloca, &param.ty, llvm_ty);
+                if matches!(&param.ty, Type::Vec { .. }) || matches!(&param.ty, Type::Map { .. }) {
+                    self.track_container_dtor(alloca, &param.ty, llvm_ty);
+                }
             }
-                        if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
         }
@@ -4644,9 +4796,52 @@ impl<'ctx> Codegen<'ctx> {
             }
         }
         self.track_dtor_array_elems(alloca, ast_ty, llvm_ty);
+        // Vectors/maps with owned element types: register for container-dtor
+        // invocation at scope exit (the generated `__container_dtor_N` walks
+        // the live range and destroys each element that needs it).
+        self.track_container_dtor(alloca, ast_ty, llvm_ty);
+    }
+
+    /// Register a vec/map slot for scope-exit container destruction when the
+    /// element/key/value type transitively owns heap data. No-op for primitive
+    /// element types (nothing to free). The stored string keys
+    /// `emit_dtor_call`, which dispatches to the generated `__container_dtor_N`.
+    fn track_container_dtor(
+        &mut self,
+        alloca: PointerValue<'ctx>,
+        ast_ty: &Type,
+        llvm_ty: BasicTypeEnum<'ctx>,
+    ) {
+        if let Type::Vec { elem, .. } = ast_ty {
+            let elem_llvm = self.llvm_ty_for(elem);
+            let need = matches!(elem_llvm, BasicTypeEnum::StructType(_) | BasicTypeEnum::ArrayType(_));
+            if need {
+                let key = self.container_dtor_for_vec(elem_llvm);
+                if let Some(top) = self.scope_dtors.last_mut() {
+                    top.push((alloca, key));
+                }
+            }
+        } else if let Type::Map { key, value, .. } = ast_ty {
+            let key_llvm = self.llvm_ty_for(key);
+            let val_llvm = self.llvm_ty_for(value);
+            let need = matches!(key_llvm, BasicTypeEnum::StructType(_) | BasicTypeEnum::ArrayType(_))
+                || matches!(val_llvm, BasicTypeEnum::StructType(_) | BasicTypeEnum::ArrayType(_));
+            if need {
+                let key = self.container_dtor_for_map(key_llvm, val_llvm);
+                if let Some(top) = self.scope_dtors.last_mut() {
+                    top.push((alloca, key));
+                }
+            }
+        }
     }
 
     fn emit_dtor_call(&mut self, alloca: PointerValue<'ctx>, class_name: &str) {
+        // Generated container destructors share the entry shape.
+        if let Some(func) = self.container_dtors.get(class_name).cloned() {
+            let arg: inkwell::values::BasicMetadataValueEnum = alloca.into();
+            let _ = self.builder.build_call(func, &[arg], "container.dtor.call");
+            return;
+        }
         if self.trait_names.contains(class_name) {
             self.emit_trait_dtor_call(alloca, class_name);
             return;
@@ -4662,6 +4857,142 @@ impl<'ctx> Codegen<'ctx> {
         if self.struct_needs_field_destroy(class_name) {
             self.emit_struct_field_destroy(alloca, class_name);
         }
+    }
+
+    /// Generated destructor for a vector slot holding owned elements:
+    /// destroys `buf[0..len)`. Memoized by element type.
+    fn container_dtor_for_vec(
+        &mut self,
+        elem_ty: BasicTypeEnum<'ctx>,
+    ) -> String {
+        let key = format!("vec:{:?}", elem_ty);
+        if self.container_dtors.contains_key(&key) {
+            return key;
+        }
+        let name = format!("__container_dtor_{}", self.container_dtors.len());
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let func = self.module.add_function(&name, self.context.void_type().fn_type(&[ptr_ty.into()], false), None);
+        self.container_dtors.insert(key.clone(), func);
+        let prev_fn = self.cur_fn;
+        let prev_block = self.builder.get_insert_block();
+        let entry = self.context.append_basic_block(func, "entry");
+        self.builder.position_at_end(entry);
+        self.cur_fn = Some(func);
+        let slot = func.get_nth_param(0).unwrap().into_pointer_value();
+        let vec_st = self.vec_struct_ty(elem_ty);
+        let i64_ty = self.context.i64_type();
+        let len_ptr = self.builder.build_struct_gep(vec_st, slot, 1, "cvec.len.ptr").unwrap();
+        let len = self.builder.build_load(i64_ty, len_ptr, "cvec.len").unwrap().into_int_value();
+        let buf_ptr = self.builder.build_struct_gep(vec_st, slot, 0, "cvec.buf").unwrap();
+        let buf_arr = match elem_ty {
+            BasicTypeEnum::IntType(it) => it.array_type(Self::VEC_CAP),
+            BasicTypeEnum::FloatType(ft) => ft.array_type(Self::VEC_CAP),
+            BasicTypeEnum::PointerType(pt) => pt.array_type(Self::VEC_CAP),
+            BasicTypeEnum::StructType(st) => st.array_type(Self::VEC_CAP),
+            BasicTypeEnum::ArrayType(at) => at.array_type(Self::VEC_CAP),
+            _ => self.context.i64_type().array_type(Self::VEC_CAP),
+        };
+        let idx_ptr = self.create_entry_block_alloca("__cdtor_idx", i64_ty.into());
+        self.builder.build_store(idx_ptr, i64_ty.const_zero()).unwrap();
+        let cond_bb = self.context.append_basic_block(func, "cdtor.cond");
+        let body_bb = self.context.append_basic_block(func, "cdtor.body");
+        let done_bb = self.context.append_basic_block(func, "cdtor.done");
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+        self.builder.position_at_end(cond_bb);
+        let idx = self.builder.build_load(i64_ty, idx_ptr, "cdtor.idx").unwrap().into_int_value();
+        let more = self.builder.build_int_compare(IntPredicate::SLT, idx, len, "cdtor.more").unwrap();
+        self.builder.build_conditional_branch(more, body_bb, done_bb).unwrap();
+        self.builder.position_at_end(body_bb);
+        let eptr = unsafe {
+            self.builder
+                .build_gep(buf_arr, buf_ptr, &[i64_ty.const_zero(), idx], "cdtor.elem")
+                .unwrap()
+        };
+        self.emit_field_destroy_for_ty(eptr, elem_ty, 0);
+        let next = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "cdtor.next").unwrap();
+        self.builder.build_store(idx_ptr, next).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+        self.builder.position_at_end(done_bb);
+        self.builder.build_return(None).unwrap();
+        self.cur_fn = prev_fn;
+        if let Some(bb) = prev_block {
+            self.builder.position_at_end(bb);
+        }
+        key
+    }
+
+    /// Generated destructor for a map slot with owned keys/values.
+    /// Memoized by key/value types.
+    fn container_dtor_for_map(
+        &mut self,
+        key_ty: BasicTypeEnum<'ctx>,
+        val_ty: BasicTypeEnum<'ctx>,
+    ) -> String {
+        let key = format!("map:{:?}:{:?}", key_ty, val_ty);
+        if self.container_dtors.contains_key(&key) {
+            return key;
+        }
+        let name = format!("__container_dtor_{}", self.container_dtors.len());
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let func = self.module.add_function(&name, self.context.void_type().fn_type(&[ptr_ty.into()], false), None);
+        self.container_dtors.insert(key.clone(), func);
+        let prev_fn = self.cur_fn;
+        let prev_block = self.builder.get_insert_block();
+        let entry = self.context.append_basic_block(func, "entry");
+        self.builder.position_at_end(entry);
+        self.cur_fn = Some(func);
+        let slot = func.get_nth_param(0).unwrap().into_pointer_value();
+        let map_st = self.map_struct_ty(key_ty, val_ty);
+        let i64_ty = self.context.i64_type();
+        let len_ptr = self.builder.build_struct_gep(map_st, slot, 2, "cmap.len.ptr").unwrap();
+        let len = self.builder.build_load(i64_ty, len_ptr, "cmap.len").unwrap().into_int_value();
+        let keys_ptr = self.builder.build_struct_gep(map_st, slot, 0, "cmap.keys").unwrap();
+        let vals_ptr = self.builder.build_struct_gep(map_st, slot, 1, "cmap.vals").unwrap();
+        let arr_of = |t: BasicTypeEnum<'ctx>| -> inkwell::types::ArrayType<'ctx> {
+            match t {
+                BasicTypeEnum::IntType(it) => it.array_type(Self::MAP_CAP),
+                BasicTypeEnum::FloatType(ft) => ft.array_type(Self::MAP_CAP),
+                BasicTypeEnum::PointerType(pt) => pt.array_type(Self::MAP_CAP),
+                BasicTypeEnum::StructType(st) => st.array_type(Self::MAP_CAP),
+                BasicTypeEnum::ArrayType(at) => at.array_type(Self::MAP_CAP),
+                _ => self.context.i64_type().array_type(Self::MAP_CAP),
+            }
+        };
+        let keys_arr = arr_of(key_ty);
+        let vals_arr = arr_of(val_ty);
+        let idx_ptr = self.create_entry_block_alloca("__cdtor_idx", i64_ty.into());
+        self.builder.build_store(idx_ptr, i64_ty.const_zero()).unwrap();
+        let cond_bb = self.context.append_basic_block(func, "cdtor.cond");
+        let body_bb = self.context.append_basic_block(func, "cdtor.body");
+        let done_bb = self.context.append_basic_block(func, "cdtor.done");
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+        self.builder.position_at_end(cond_bb);
+        let idx = self.builder.build_load(i64_ty, idx_ptr, "cdtor.idx").unwrap().into_int_value();
+        let more = self.builder.build_int_compare(IntPredicate::SLT, idx, len, "cdtor.more").unwrap();
+        self.builder.build_conditional_branch(more, body_bb, done_bb).unwrap();
+        self.builder.position_at_end(body_bb);
+        let kptr = unsafe {
+            self.builder
+                .build_gep(keys_arr, keys_ptr, &[i64_ty.const_zero(), idx], "cdtor.key")
+                .unwrap()
+        };
+        self.emit_field_destroy_for_ty(kptr, key_ty, 0);
+        let vptr = unsafe {
+            self.builder
+                .build_gep(vals_arr, vals_ptr, &[i64_ty.const_zero(), idx], "cdtor.val")
+                .unwrap()
+        };
+        self.emit_field_destroy_for_ty(vptr, val_ty, 0);
+        let next = self.builder.build_int_add(idx, i64_ty.const_int(1, false), "cdtor.next").unwrap();
+        self.builder.build_store(idx_ptr, next).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+        self.builder.position_at_end(done_bb);
+        self.builder.build_return(None).unwrap();
+        self.cur_fn = prev_fn;
+        if let Some(bb) = prev_block {
+            self.builder.position_at_end(bb);
+        }
+        format!("map:{:?}:{:?}", key_ty, val_ty)
     }
 
     /// Whether this struct/class needs structural destruction: an `own`
@@ -5054,6 +5385,54 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    /// Program startup for `main`: evaluate pending complex global
+    /// initializers in declaration order first (const-folding only covers
+    /// literals), then run the user `init` block if present (previously
+    /// emitted but never called) so it observes initialized globals.
+    fn emit_program_startup(&mut self) -> Result<(), CodegenError> {
+        let pendings = std::mem::take(&mut self.pending_global_inits);
+        for (name, init) in &pendings {
+            if let Some((slot, dest_ty)) = self.globals.get(name).cloned() {
+                let v = self.codegen_expr(init)?;
+                let v = self.box_trait_value(v, dest_ty, init.span)?;
+                let v = self.coerce_to_ty(v, dest_ty);
+                self.builder.build_store(slot, v).unwrap();
+                self.null_moved_sources(init, None);
+            }
+        }
+        if let Some(init_fn) = self.module.get_function("hella.init") {
+            self.builder.build_call(init_fn, &[], "hella.init.call").unwrap();
+        }
+        Ok(())
+    }
+
+    /// Destroy globals owning heap data at program end (`main` exit only):
+    /// `own` pairs plus user/struct destructors, reverse declaration order.
+    /// Array entries expand per static index.
+    fn emit_global_dtors(&mut self) {
+        for (ptr, inner) in self.global_owns.clone().iter().rev() {
+            self.emit_own_destroy(*ptr, inner);
+        }
+        for entry in self.global_dtors.clone().iter().rev() {
+            match entry {
+                GlobalDtor::One(ptr, name) => self.emit_dtor_call(*ptr, name),
+                GlobalDtor::Array { slot, elem_ty, len } => {
+                    let ctx: &'ctx Context = self.context;
+                    let i64_ty = ctx.i64_type();
+                    let buf_ty = elem_ty.array_type(*len);
+                    for i in (0..*len).rev() {
+                        let eptr = unsafe {
+                            self.builder
+                                .build_gep(buf_ty, *slot, &[i64_ty.const_zero(), i64_ty.const_int(i as u64, false)], "arr.elem.dtor")
+                                .unwrap()
+                        };
+                        self.emit_field_destroy_for_ty(eptr, *elem_ty, 0);
+                    }
+                }
+            }
+        }
+    }
+
     fn codegen_property(&mut self, class: &ClassDecl, prop: &PropertyDecl) -> Result<(), CodegenError> {
         if let Some(getter) = &prop.getter {
             let mangled = format!("{}__get_{}", class.name, prop.name);
@@ -5402,7 +5781,7 @@ impl<'ctx> Codegen<'ctx> {
                     .last_mut()
                     .unwrap()
                     .insert(d.name.clone(), (alloca, ty));
-                // Track vectors for `push`/index/`for` lowering.
+                // Track vectors/maps for `push`/index/`for` lowering.
                 if matches!(&d.ty, Type::Vec { .. })
                     || matches!(&d.ty, Type::Any(_))
                         && d.init.as_ref().is_some_and(|i| matches!(i.kind, ExprKind::VecEmpty(_)))
@@ -5425,6 +5804,9 @@ impl<'ctx> Codegen<'ctx> {
                 // method/dtor body never destroys its own receiver.
                 if d.name != "this" {
                     self.track_dtor_slot(alloca, &d.ty, ty);
+                    // Vectors/maps with owned element types: register for
+                    // container-dtor invocation at scope exit.
+                    self.track_container_dtor(alloca, &d.ty, ty);
                     // Track `own` slots for heap destruction (pair + free).
                     if let Type::Own(inner, _) = &d.ty {
                         let inner_name = match inner.as_ref() {
@@ -5860,6 +6242,8 @@ impl<'ctx> Codegen<'ctx> {
                     self.emit_all_owns();
                 }
                 if self.cur_is_main {
+                    // Program end: destroy owning globals (reverse declared).
+                    self.emit_global_dtors();
                     if let Some(val) = evaluated {
                         let ret_val = if val.is_int_value()
                             && val.into_int_value().get_type().get_bit_width()
@@ -8714,10 +9098,31 @@ impl<'ctx> Codegen<'ctx> {
                         }
                     }
                 }
-                for (gname, _) in &self.globals {
+                for (gname, (_, gty)) in &self.globals.clone() {
                     if gname == name || gname == lookup {
-                        // Check if global is enum/struct type name? Not needed
-                        continue;
+                        // Globals resolve like locals for member/method
+                        // dispatch (pairs report the owner for trait paths).
+                        let ty: BasicTypeEnum<'ctx> = *gty;
+                        if ty.is_struct_type() {
+                            if let Some(tn) = self.pair_owner_of(ty.into_struct_type()) {
+                                return Ok(crate::sema::Ty::Struct(tn));
+                            }
+                            if let Ok(sname) = self.ty_to_struct_name(&ty) {
+                                if self.enum_types.contains_key(&sname) {
+                                    return Ok(crate::sema::Ty::Enum(sname));
+                                }
+                                return Ok(crate::sema::Ty::Struct(sname));
+                            }
+                            return Err(CodegenError{message: format!("cannot infer type of {name}"), span: expr.span});
+                        } else if ty.is_int_type() {
+                            let bw = ty.into_int_type().get_bit_width();
+                            if bw == 1 { return Ok(crate::sema::Ty::Bool); } else { return Ok(crate::sema::Ty::Int); }
+                        } else if ty.is_pointer_type() {
+                            // String globals (and other pointers).
+                            return Ok(crate::sema::Ty::String);
+                        } else if ty.is_array_type() {
+                            return Ok(crate::sema::Ty::Array(Box::new(crate::sema::Ty::Int)));
+                        }
                     }
                 }
                 if self.enum_types.contains_key(name) || self.enum_types.contains_key(lookup) {

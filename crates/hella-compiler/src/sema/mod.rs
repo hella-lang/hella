@@ -1023,12 +1023,6 @@ impl Checker {
                 if let Ty::Enum(ref n) = **el {
                     if !self.enums.contains_key(n) { self.errors.push(SemError{message: format!("unknown type `{n}`"), span: ty.span()}); }
                 }
-                // Dynamic containers need per-element ownership (Own-P2b):
-                // elements that (transitively) own heap pairs are rejected.
-                // Fixed arrays are fine (static structural destruction).
-                if self.ty_has_own(el) {
-                    self.errors.push(SemError{message: format!("vector element type `{el}` owns heap data; `own` in vectors needs container ownership — rejected in phase 1"), span: ty.span()});
-                }
             }
             Ty::Map { key, value } => {
                 for el in [key, value] {
@@ -1040,9 +1034,6 @@ impl Checker {
                     if let Ty::Enum(ref n) = **el {
                         if !self.enums.contains_key(n) { self.errors.push(SemError{message: format!("unknown type `{n}`"), span: ty.span()}); }
                     }
-                }
-                if self.ty_has_own(key) || self.ty_has_own(value) {
-                    self.errors.push(SemError{message: format!("map with key `{key}` / value `{value}` owns heap data; `own` in maps needs container ownership — rejected in phase 1"), span: ty.span()});
                 }
             }
             Ty::Generic(n, args) => {
@@ -1783,11 +1774,6 @@ impl Checker {
                 }
             } else if let Item::Var(v) = item {
                 let mut decl_ty = self.resolve_type(&v.ty);
-                if matches!(decl_ty, Ty::Own(_)) {
-                    self.errors.push(SemError{message: "global own variables need structural destruction — rejected in phase 1".into(), span: v.span});
-                } else if self.ty_has_own(&decl_ty) {
-                    self.errors.push(SemError{message: "global variables owning heap data need structural destruction — rejected in phase 1".into(), span: v.span});
-                }
                 if decl_ty == Ty::Void {
                     self.errors.push(SemError{message: "global variable cannot have `void` type".into(), span: v.span});
                 }
@@ -5134,22 +5120,21 @@ mod tests {
         );
     }
 
-    /// Own-P2b gates: `own` inside vectors/maps and owning globals stay
-    /// rejected (need container/global ownership).
+    /// Own-P2b gates: `own` inside vectors/maps stays rejected (needs
+    /// container ownership). Owning `var` globals are allowed (runtime
+    /// Own-P2b gates: `own` inside vectors/maps is now supported (per-element
+    /// destruction via generated `__container_dtor_N`). Owning `var` globals
+    /// are allowed (runtime init + program-end destruction); `const` own
+    /// globals stay rejected (const must be constant-foldable, not runtime).
     #[test]
     fn own_containers_and_globals_rejected() {
+        assert_clean("struct Pet has\nstring name\nend\nstruct Owner has\nown Pet pet\nend\nvoid main() do\nOwner vec v = vec[]\nend\n");
+        assert_clean("struct Pet has\nstring name\nend\nstruct Owner has\nown Pet pet\nend\nOwner g = Owner has\npet = new Pet(\"r\")\nend\nvoid main() do\nend\n");
         assert_error_contains(
-            "struct Pet has\nstring name\nend\nstruct Owner has\nown Pet pet\nend\nvoid main() do\nOwner vec v = vec[]\nend\n",
-            "needs container ownership",
-        );
-        assert_error_contains(
-            "struct Pet has\nstring name\nend\nstruct Owner has\nown Pet pet\nend\nOwner g = Owner has\npet = new Pet(\"r\")\nend\nvoid main() do\nend\n",
+            "struct Pet has\nstring name\nend\nstruct Owner has\nown Pet pet\nend\nconst Owner c = Owner has\npet = new Pet(\"x\")\nend\nvoid main() do\nend\n",
             "need structural destruction",
         );
     }
-
-    /// Interpolated `{expr}` parts are type-checked like any expression
-    /// (previously skipped entirely: undefined names and visibility
     /// violations inside interpolation reached codegen).
     #[test]
     fn interpolation_parts_checked() {
