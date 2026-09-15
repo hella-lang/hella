@@ -44,7 +44,7 @@ pub enum SymKind {
 }
 
 impl SymKind {
-    fn lsp(self) -> SymbolKind {
+    pub fn lsp(self) -> SymbolKind {
         use SymKind::*;
         match self {
             Function => SymbolKind::FUNCTION,
@@ -174,7 +174,7 @@ struct ExtensionInfo {
 }
 
 /// Full-file analysis: top-level symbols plus all lexically scoped locals.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Analysis {
     top: Vec<Symbol>,
     locals: Vec<Symbol>,
@@ -982,6 +982,25 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
             .map(|s| s.name_span)
     }
 
+    /// Anchor declaration for the identifier at `offset`: its name span
+    /// plus the scope to narrow reference search to. Locals resolve
+    /// inward (shadowing-safe); top-level/imported names are document-wide.
+    /// Unresolved words get `(None, None)` — the whole-document fallback.
+    fn anchor_for(&self, word: &str, offset: usize) -> (Option<Span>, Option<Span>) {
+        if let Some(l) = innermost_local(&self.locals, word, offset, false) {
+            return (Some(l.name_span), l.scope);
+        }
+        match self
+            .top_recursive()
+            .into_iter()
+            .chain(self.imported_recursive())
+            .find(|s| s.name == word)
+        {
+            Some(s) => (Some(s.name_span), s.scope),
+            None => (None, None),
+        }
+    }
+
     /// All reference spans of the identifier at `offset` in this document.
     ///
     /// Lexer-driven (`Token::Ident` with equal slice), so strings and
@@ -997,21 +1016,7 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
         let Some(word) = ident_at(source, offset) else {
             return Vec::new();
         };
-        // Anchor: innermost visible local, else any top-level/imported
-        // symbol with this name (decl span + scope for narrowing).
-        let (decl, scope) = if let Some(l) = innermost_local(&self.locals, &word, offset, false) {
-            (Some(l.name_span), l.scope)
-        } else {
-            let found = self
-                .top_recursive()
-                .into_iter()
-                .chain(self.imported_recursive())
-                .find(|s| s.name == word);
-            match found {
-                Some(s) => (Some(s.name_span), s.scope),
-                None => (None, None),
-            }
-        };
+        let (decl, scope) = self.anchor_for(&word, offset);
         let lexed = hella_compiler::lexer::lex(source);
         let mut out = Vec::new();
         for t in &lexed.tokens {
@@ -1034,6 +1039,67 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
         out.sort_by_key(|s| s.start);
         out.dedup();
         out
+    }
+
+    /// Document highlights at `offset`: every reference span paired with
+    /// whether it is the declaration (`true` = write, `false` = read).
+    pub fn highlights(&self, source: &str, offset: usize) -> Vec<(Span, bool)> {
+        let Some(word) = ident_at(source, offset) else {
+            return Vec::new();
+        };
+        let (decl, _) = self.anchor_for(&word, offset);
+        self.reference_spans(source, offset, true)
+            .into_iter()
+            .map(|s| {
+                let is_decl = decl == Some(s);
+                (s, is_decl)
+            })
+            .collect()
+    }
+
+    /// Byte span of the identifier under the cursor (for `prepareRename`).
+    pub fn word_span_at(source: &str, offset: usize) -> Option<Span> {
+        let bytes = source.as_bytes();
+        let offset = offset.min(bytes.len());
+        let mut lo = offset;
+        while lo > 0 && (bytes[lo - 1].is_ascii_alphanumeric() || bytes[lo - 1] == b'_') {
+            lo -= 1;
+        }
+        let mut hi = offset;
+        while hi < bytes.len() && (bytes[hi].is_ascii_alphanumeric() || bytes[hi] == b'_') {
+            hi += 1;
+        }
+        if lo == hi {
+            return None;
+        }
+        Some(Span::new(lo, hi))
+    }
+
+    /// Whether `name` is a legal rename target: identifier shape, no
+    /// leading digit, not a keyword.
+    pub fn valid_ident(name: &str) -> bool {
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$') {
+            return false;
+        }
+        if name.bytes().next().is_some_and(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        !KEYWORDS.contains(&name)
+    }
+
+    /// Fuzzy case-insensitive symbol search over top-level symbols
+    /// (including members) for `workspace/symbol`. Empty queries match
+    /// nothing; results are cloned so the server can mix open documents.
+    pub fn search(&self, query: &str) -> Vec<Symbol> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let q = query.to_lowercase();
+        self.top_recursive()
+            .into_iter()
+            .filter(|s| s.kind != SymKind::Module && s.name.to_lowercase().contains(&q))
+            .cloned()
+            .collect()
     }
 
     pub fn document_symbols(&self, source: &str) -> Vec<DocumentSymbol> {
@@ -2131,6 +2197,42 @@ mod tests {
         let space = src.find(" main").unwrap(); // whitespace before `main`
         assert!(a.reference_spans(src, space, true).is_empty());
         assert!(a.reference_spans(src, src.len(), true).is_empty()); // past end
+    }
+
+    #[test]
+    fn highlights_mark_declaration_write() {
+        let src = "void main() do\n  int x = 1\n  int y = x\nend";
+        let a = analyze(src);
+        let use_off = src.find("int y = x").unwrap() + 8;
+        let hl = a.highlights(src, use_off);
+        assert_eq!(hl.len(), 2); // decl + use
+        assert_eq!(hl.iter().filter(|(_, w)| *w).count(), 1); // exactly one write
+        let decl_off = src.find("int x").unwrap() + 4;
+        let decl_span = Analysis::word_span_at(src, decl_off).unwrap();
+        assert!(hl.iter().any(|(s, w)| *s == decl_span && *w));
+    }
+
+    #[test]
+    fn rename_validation() {
+        assert!(Analysis::valid_ident("newName"));
+        assert!(Analysis::valid_ident("_x1"));
+        assert!(!Analysis::valid_ident(""));
+        assert!(!Analysis::valid_ident("1abc"));
+        assert!(!Analysis::valid_ident("has space"));
+        assert!(!Analysis::valid_ident("if")); // keyword
+        assert!(!Analysis::valid_ident("end")); // keyword
+    }
+
+    #[test]
+    fn workspace_search_finds_members() {
+        let src = "struct Point has\n  int x\nend\nint distance(int a) do\n  return a\nend\nvoid main() do\nend";
+        let a = analyze(src);
+        let hits: Vec<_> = a.search("point").iter().map(|s| s.name.clone()).collect();
+        assert!(hits.contains(&"Point".to_string()), "struct: {hits:?}");
+        let field: Vec<_> = a.search("DIST").iter().map(|s| s.name.clone()).collect();
+        assert!(field.contains(&"distance".to_string()), "case-insensitive fn: {field:?}");
+        assert!(a.search("").is_empty());
+        assert!(a.search("zzz_no_match").is_empty());
     }
 
     fn labels(items: &[CompletionItem]) -> Vec<&str> {

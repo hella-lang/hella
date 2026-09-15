@@ -71,6 +71,11 @@ impl DocumentManager {
     pub fn get(&self, uri: &Uri) -> Option<&Document> {
         self.docs.get(uri.as_str())
     }
+
+    /// URIs of all open documents (for `workspace/symbol`).
+    pub fn uris(&self) -> Vec<Uri> {
+        self.docs.values().map(|d| d.uri.clone()).collect()
+    }
 }
 
 // ── Position helpers ─────────────────────────────────────────────────

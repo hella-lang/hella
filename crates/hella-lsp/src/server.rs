@@ -9,15 +9,17 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest, RangeFormatting, References, Request as _, SignatureHelpRequest};
+use lsp_types::request::{Completion, DocumentHighlightRequest, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest, PrepareRenameRequest, RangeFormatting, References, Rename, Request as _, SignatureHelpRequest, WorkspaceSymbolRequest};
 use lsp_types::{
     CompletionParams, CompletionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentRangeFormattingParams,
-    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
-    GotoDefinitionResponse, HoverParams, InitializeResult, Location, OneOf, Position,
-    PublishDiagnosticsParams, ReferenceParams, ServerCapabilities, ServerInfo, SignatureHelp,
-    SignatureHelpOptions, SignatureHelpParams, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions,
+    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind,
+    DocumentHighlightParams, DocumentRangeFormattingParams, DocumentSymbolParams,
+    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, HoverParams,
+    InitializeResult, Location, OneOf, Position, PrepareRenameResponse, PublishDiagnosticsParams,
+    ReferenceParams, RenameOptions, RenameParams, ServerCapabilities, ServerInfo, SignatureHelp,
+    SignatureHelpOptions, SignatureHelpParams, SymbolInformation, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions, WorkspaceEdit,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 
 use crate::analysis::Analysis;
@@ -148,6 +150,12 @@ fn server_capabilities() -> ServerCapabilities {
             work_done_progress_options: Default::default(),
         }),
         references_provider: Some(OneOf::Left(true)),
+        rename_provider: Some(OneOf::Right(RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
+        document_highlight_provider: Some(OneOf::Left(true)),
+        workspace_symbol_provider: Some(OneOf::Left(true)),
         ..Default::default()
     }
 }
@@ -277,6 +285,70 @@ fn handle_request(
             let result = state
                 .references(&params)
                 .map(|l| serde_json::to_value(l))
+                .transpose()?
+                .unwrap_or(serde_json::Value::Null);
+            send_ok(connection, id, result);
+        }
+        Rename::METHOD => {
+            let (id, params) = match extract::<RenameParams>(req, Rename::METHOD) {
+                Ok(v) => v,
+                Err((id, msg)) => {
+                    send_err(connection, id, msg);
+                    return Ok(());
+                }
+            };
+            match state.rename(&params) {
+                Ok(edit) => {
+                    let result = serde_json::to_value(edit)?;
+                    send_ok(connection, id, result);
+                }
+                Err(msg) => send_err(connection, id, msg),
+            }
+        }
+        PrepareRenameRequest::METHOD => {
+            let (id, params) =
+                match extract::<TextDocumentPositionParams>(req, PrepareRenameRequest::METHOD) {
+                    Ok(v) => v,
+                    Err((id, msg)) => {
+                        send_err(connection, id, msg);
+                        return Ok(());
+                    }
+                };
+            let result = state
+                .prepare_rename(&params)
+                .map(|r| serde_json::to_value(r))
+                .transpose()?
+                .unwrap_or(serde_json::Value::Null);
+            send_ok(connection, id, result);
+        }
+        DocumentHighlightRequest::METHOD => {
+            let (id, params) =
+                match extract::<DocumentHighlightParams>(req, DocumentHighlightRequest::METHOD) {
+                    Ok(v) => v,
+                    Err((id, msg)) => {
+                        send_err(connection, id, msg);
+                        return Ok(());
+                    }
+                };
+            let result = state
+                .document_highlights(&params)
+                .map(|h| serde_json::to_value(h))
+                .transpose()?
+                .unwrap_or(serde_json::Value::Null);
+            send_ok(connection, id, result);
+        }
+        WorkspaceSymbolRequest::METHOD => {
+            let (id, params) =
+                match extract::<WorkspaceSymbolParams>(req, WorkspaceSymbolRequest::METHOD) {
+                    Ok(v) => v,
+                    Err((id, msg)) => {
+                        send_err(connection, id, msg);
+                        return Ok(());
+                    }
+                };
+            let result = state
+                .workspace_symbols(&params)
+                .map(|s| serde_json::to_value(s))
                 .transpose()?
                 .unwrap_or(serde_json::Value::Null);
             send_ok(connection, id, result);
@@ -624,6 +696,129 @@ impl State {
                 })
                 .collect(),
         )
+    }
+
+    /// Owned analysis for a document: cached when present, tolerantly
+    /// re-parsed otherwise (rename/highlights share this path).
+    fn owned_analysis(&self, uri: &lsp_types::Uri) -> Option<(crate::document::Document, Analysis)> {
+        let (doc, _) = self.doc_at(uri, &Position { line: u32::MAX, character: 0 })?;
+        if let Some(a) = self.analysis.get(doc.uri.as_str()) {
+            return Some((doc, a.clone()));
+        }
+        let out = hella_compiler::lexer::lex(&doc.text);
+        let prog = hella_compiler::parse::parse(out.tokens, doc.text.clone())
+            .ok()
+            .or_else(|| tolerant_parse(&doc.text))?;
+        Some((doc, Analysis::from_program(&prog)))
+    }
+
+    fn prepare_rename(
+        &self,
+        params: &TextDocumentPositionParams,
+    ) -> Option<PrepareRenameResponse> {
+        let (doc, offset) = self.doc_at(&params.text_document.uri, &params.position)?;
+        let span = Analysis::word_span_at(&doc.text, offset)?;
+        let word = doc.text.get(span.start..span.end)?.to_string();
+        if !Analysis::valid_ident(&word) {
+            return None;
+        }
+        Some(PrepareRenameResponse::RangeWithPlaceholder {
+            range: crate::document::span_to_range(&doc.text, span),
+            placeholder: word,
+        })
+    }
+
+    fn rename(&self, params: &RenameParams) -> Result<Option<WorkspaceEdit>, String> {
+        if !Analysis::valid_ident(&params.new_name) {
+            return Err(format!("invalid rename target `{}`", params.new_name));
+        }
+        let uri = &params.text_document_position.text_document.uri;
+        let (doc, analysis) = self
+            .owned_analysis(uri)
+            .ok_or_else(|| "document not open".to_string())?;
+        let offset = crate::document::position_to_offset(
+            &doc.text,
+            &params.text_document_position.position,
+        );
+        let spans = analysis.reference_spans(&doc.text, offset, true);
+        if spans.is_empty() {
+            return Err("nothing to rename at cursor".to_string());
+        }
+        let edits = spans
+            .into_iter()
+            .map(|s| lsp_types::TextEdit {
+                range: crate::document::span_to_range(&doc.text, s),
+                new_text: params.new_name.clone(),
+            })
+            .collect();
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(doc.uri.clone(), edits);
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }))
+    }
+
+    fn document_highlights(
+        &self,
+        params: &DocumentHighlightParams,
+    ) -> Option<Vec<DocumentHighlight>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let (doc, analysis) = self.owned_analysis(uri)?;
+        let offset = crate::document::position_to_offset(&doc.text, &params.text_document_position_params.position);
+        let hl = analysis.highlights(&doc.text, offset);
+        if hl.is_empty() {
+            return None;
+        }
+        Some(
+            hl.into_iter()
+                .map(|(s, is_decl)| DocumentHighlight {
+                    range: crate::document::span_to_range(&doc.text, s),
+                    kind: Some(if is_decl {
+                        DocumentHighlightKind::WRITE
+                    } else {
+                        DocumentHighlightKind::READ
+                    }),
+                })
+                .collect(),
+        )
+    }
+
+    fn workspace_symbols(
+        &self,
+        params: &WorkspaceSymbolParams,
+    ) -> Option<WorkspaceSymbolResponse> {
+        if params.query.is_empty() {
+            return None;
+        }
+        let mut flat = Vec::new();
+        // Deterministic order: sort open documents by URI.
+        let mut uris: Vec<_> = self.docs.uris();
+        uris.sort();
+        for uri in uris {
+            let uri = uri.clone();
+            let Some((doc, analysis)) = self.owned_analysis(&uri) else {
+                continue;
+            };
+            for sym in analysis.search(&params.query) {
+                flat.push(SymbolInformation {
+                    name: sym.name.clone(),
+                    kind: sym.kind.lsp(),
+                    tags: None,
+                    #[allow(deprecated)]
+                    deprecated: None,
+                    location: Location {
+                        uri: doc.uri.clone(),
+                        range: crate::document::span_to_range(&doc.text, sym.name_span),
+                    },
+                    container_name: None,
+                });
+            }
+            if flat.len() >= 200 {
+                break;
+            }
+        }
+        Some(WorkspaceSymbolResponse::Flat(flat))
     }
 
     fn doc_at(

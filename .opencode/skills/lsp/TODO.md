@@ -11,9 +11,10 @@ UTF-16 positions, startup progress.
 - [x] **L-1 Formatting — DONE: `textDocument/formatting` + `rangeFormatting` via `hella-fmt`** (`formatting.rs`, 5 tests, 43 total pass)
 - [x] **L-2 Signature help — DONE: `textDocument/signatureHelp`** (`signatures.rs` text-scan + `lookup_callable`, 8 tests, 51 total pass)
 - [x] **L-3 References — DONE: `textDocument/references`** (`Analysis::reference_spans`, lexer-driven, scope-narrowed, 5 tests, 56 total pass)
-- [ ] **L-4 Rename — `textDocument/rename` + `prepareRename`** — reuse L-3 locations, single-file `WorkspaceEdit`, reject on keywords/empty with `InvalidParams`. Tests: rename local, reject keyword.
-- [ ] **L-5 Workspace symbols — `workspace/symbol`** — query filter over cached analyses (top-level + members), fuzzy case-insensitive match. Tests: find fn/struct across two open docs.
-- [ ] **L-6 Document highlights — `textDocument/documentHighlight`** — same-word occurrences in doc via L-3 core. Tests: read/write kinds on locals.
+- [x] **L-4 Rename — DONE: `textDocument/rename` + `prepareRename`** (single-file `WorkspaceEdit` via L-3 spans, `valid_ident` rejects keywords/digits, `InvalidParams` on bad target)
+- [x] **L-5 Workspace symbols — DONE: `workspace/symbol`** (fuzzy case-insensitive over open docs, deterministic URI order, 200 cap, `Flat` response)
+- [x] **L-6 Document highlights — DONE: `textDocument/documentHighlight`** (L-3 core, decl = `Write`, uses = `Read`)
+- [x] **L-3b Analysis helpers — DONE** (`anchor_for`, `highlights`, `word_span_at`, `valid_ident`, `search`, `Analysis: Clone`, `DocumentManager::uris`)
 - [ ] **L-7 Type definition + implementation — `textDocument/typeDefinition`, `implementation`** — symbol `ty` → type decl location; trait method → implementor locations. Tests: var → struct, trait → impls.
 - [ ] **L-8 Code actions — `textDocument/codeAction` quickfixes** — kind `quickfix`: remove unused import (diagnostic-driven), `delete` for leaked bare `new` (Own-P1 rule), add missing `end` for unclosed block. Tests: one per fix, titles exact.
 - [ ] **L-9 Inlay hints — `textDocument/inlayHint`** — param-name hints at call sites (`param:`), inferred `let`-type hints for untyped decls, range-bounded. Tests: named-arg hint, inferred type hint.
