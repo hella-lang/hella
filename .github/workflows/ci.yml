@@ -87,9 +87,6 @@ jobs:
             fi
           done
 
-      - name: Workspace tests
-        run: cargo test --workspace
-
       # Crash triage for the hella-compiler lib segfault
       # (STATUS_ACCESS_VIOLATION): purely informational, always exits 0.
       # --list checks process startup; --skip codegen narrows the set;
@@ -112,6 +109,9 @@ jobs:
           echo "single-thread exit: $?"
           tail -12 /tmp/triage-single.log
           exit 0
+
+      - name: Workspace tests
+        run: cargo test --workspace
 
       # cargo test compiles bins only as test harnesses under
       # target/debug/deps — the runnable CLI needs an explicit build.
