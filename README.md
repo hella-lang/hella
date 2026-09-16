@@ -110,6 +110,7 @@ cargo run -p hella -- build -f examples/basics.hll && ./examples/basics; echo $?
 | `data_control.hll` | Structs, field defaults, arrays, `match`, strings, `loop`/`for`, `defer` |
 | `abstraction.hll` | Classes, constructors, traits, enums, properties |
 | `hello_io.hll` | `import std::io` and printing (`print`, `println`, `printInt`, `putChar`) |
+| `cli_args.hll` | Command-line args (`string[] args`, `args.len()`, iteration) |
 | `stdlib_io.hll` | Standard-library I/O over `extern "c"` declarations |
 | `advanced.hll` | Generics, closures, interpolation, operators, `extern`, `distinct` |
 | `variadic.hll` | Variadic functions (`...`) |

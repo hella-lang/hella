@@ -1,0 +1,16 @@
+// Command-line arguments: `int main(string[] args)` receives argv[1..]
+// (program name excluded, capped at 16). `args.len()` is the true count.
+import std::io
+
+int main(string[] args) do
+    printInt(args.len())
+    if args.is_empty() do
+        println("no args")
+        return 0
+    end
+    println(args.first())
+    for a in args do
+        println(a)
+    end
+    return 0
+end

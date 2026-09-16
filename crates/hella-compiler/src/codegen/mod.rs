@@ -65,6 +65,14 @@ pub struct Codegen<'ctx> {
     cur_is_main: bool,
     cur_class: Option<String>,
     closure_count: usize,
+    /// main's `args` array alloca plus the hidden `__hella_argc` alloca
+    /// holding the true argument count (argv[1..] length, capped at 16).
+    /// `args.len()`/`is_empty()`/`contains`/`first`/`last` and `for..in`
+    /// observe argc through these instead of the static 16 slots. Matched
+    /// by alloca pointer (never by name), so shadowing inside main is safe.
+    /// Set in the main-with-args prologue, reset on every function entry.
+    main_args_alloca: Option<PointerValue<'ctx>>,
+    main_argc_alloca: Option<PointerValue<'ctx>>,
     /// Variables holding vectors (`TYPE vec` or `any x = vec[]`). Their LLVM
     /// type is the vec struct `{ [16 x E], i64 len }`; this set distinguishes
     /// them from class instances (also structs) for `push`/index/`for`.
@@ -176,6 +184,8 @@ impl<'ctx> Codegen<'ctx> {
             cur_fn: None,
             cur_is_main: false,
             cur_class: None,
+            main_args_alloca: None,
+            main_argc_alloca: None,
             vec_vars: HashSet::new(),
             map_vars: HashSet::new(),
             string_vars: HashSet::new(),
@@ -2540,6 +2550,21 @@ impl<'ctx> Codegen<'ctx> {
         Ok(self.builder.build_load(self.context.bool_type(), found_ptr, "contains").unwrap().into_int_value())
     }
 
+    /// True argument count for main's `args` array, loaded from the hidden
+    /// `__hella_argc` slot — or `None` when `ptr` is any other array.
+    fn main_args_len(&self, ptr: PointerValue<'ctx>) -> Option<inkwell::values::IntValue<'ctx>> {
+        if self.main_args_alloca == Some(ptr) {
+            self.main_argc_alloca.map(|a| {
+                self.builder
+                    .build_load(self.context.i64_type(), a, "args.len")
+                    .unwrap()
+                    .into_int_value()
+            })
+        } else {
+            None
+        }
+    }
+
     /// Collection and string methods (`len`, `is_empty`, `pop`, `clear`,
     /// `contains`, `first`, `last`, `remove`, `get`; `push` is separate).
     /// Sema has validated arity and types. Returns `Ok(None)` when the base
@@ -2588,7 +2613,9 @@ impl<'ctx> Codegen<'ctx> {
         // Resolve buffer/length accessors per family.
         enum Buf<'ctx> {
             Vec { st: StructType<'ctx>, arr: inkwell::types::ArrayType<'ctx>, len: inkwell::values::IntValue<'ctx> },
-            Arr { arr: inkwell::types::ArrayType<'ctx>, n: u64 },
+            // Fixed arrays use the static size — except main's `args`,
+            // which carries the true argc in `dyn_len`.
+            Arr { arr: inkwell::types::ArrayType<'ctx>, n: u64, dyn_len: Option<inkwell::values::IntValue<'ctx>> },
             Map { st: StructType<'ctx>, keys: inkwell::types::ArrayType<'ctx>, vals: inkwell::types::ArrayType<'ctx>, len: inkwell::values::IntValue<'ctx> },
             Str { val: PointerValue<'ctx> },
         }
@@ -2607,7 +2634,7 @@ impl<'ctx> Codegen<'ctx> {
             }
             Family::Arr => {
                 let arr = ty.into_array_type();
-                Buf::Arr { arr, n: arr.len() as u64 }
+                Buf::Arr { arr, n: arr.len() as u64, dyn_len: self.main_args_len(ptr) }
             }
             Family::Map => {
                 let st = ty.into_struct_type();
@@ -2633,6 +2660,7 @@ impl<'ctx> Codegen<'ctx> {
             "len" => {
                 let v: BasicValueEnum<'ctx> = match &buf {
                     Buf::Vec { len, .. } | Buf::Map { len, .. } => (*len).into(),
+                    Buf::Arr { dyn_len: Some(l), .. } => (*l).into(),
                     Buf::Arr { n, .. } => self.context.i64_type().const_int(*n, false).into(),
                     Buf::Str { val } => {
                         let call = self.builder.build_call(self.get_or_declare_strlen(), &[(*val).into()], "m.strlen").unwrap();
@@ -2645,6 +2673,9 @@ impl<'ctx> Codegen<'ctx> {
                 let is0 = match &buf {
                     Buf::Vec { len, .. } | Buf::Map { len, .. } => {
                         self.builder.build_int_compare(IntPredicate::EQ, *len, zero64, "m.empty").unwrap()
+                    }
+                    Buf::Arr { dyn_len: Some(l), .. } => {
+                        self.builder.build_int_compare(IntPredicate::EQ, *l, zero64, "m.empty").unwrap()
                     }
                     Buf::Arr { n, .. } => self.context.bool_type().const_int(if *n == 0 { 1 } else { 0 }, false),
                     Buf::Str { val } => {
@@ -2759,8 +2790,14 @@ impl<'ctx> Codegen<'ctx> {
                         let buf_ptr = self.builder.build_struct_gep(*st, ptr, 0, "m.contains.buf").unwrap();
                         self.codegen_buffer_contains(buf_ptr, *arr, *len, arg_val, span)?
                     }
-                    Buf::Arr { arr, n } => {
-                        let nlen = self.context.i64_type().const_int(*n, false);
+                    Buf::Arr { arr, n, dyn_len } => {
+                        // Dynamic argc bound for main's `args` (skips the
+                        // null padding — and a potential strcmp(null)); the
+                        // static size for every other array.
+                        let nlen = match dyn_len {
+                            Some(l) => (*l).into(),
+                            None => self.context.i64_type().const_int(*n, false).into(),
+                        };
                         self.codegen_buffer_contains(ptr, *arr, nlen, arg_val, span)?
                     }
                     Buf::Map { st, keys, len, .. } => {
@@ -2779,11 +2816,18 @@ impl<'ctx> Codegen<'ctx> {
                         let buf_ptr = self.builder.build_struct_gep(*st, ptr, 0, "m.edge.buf").unwrap();
                         (buf_ptr, *arr, Some(*len))
                     }
-                    Buf::Arr { arr, n } => {
-                        if *n == 0 {
-                            self.codegen_trap_unless(self.context.bool_type().const_int(0, false), span)?;
+                    Buf::Arr { arr, n, dyn_len } => {
+                        match dyn_len {
+                            // main's `args`: `last` is the final real
+                            // argument (traps when empty); `first` is slot 0.
+                            Some(l) => (ptr, *arr, Some(*l)),
+                            None => {
+                                if *n == 0 {
+                                    self.codegen_trap_unless(self.context.bool_type().const_int(0, false), span)?;
+                                }
+                                (ptr, *arr, None)
+                            }
                         }
-                        (ptr, *arr, None)
                     }
                     _ => return Err(CodegenError{message: format!("`{method}` needs an array or vector"), span}),
                 };
@@ -4258,6 +4302,8 @@ impl<'ctx> Codegen<'ctx> {
         // `std::io` wrappers are compiled like any other Hella function.
         self.cur_fn = Some(func);
         self.cur_is_main = f.name == "main";
+        self.main_args_alloca = None;
+        self.main_argc_alloca = None;
         let entry = self.context.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
 
@@ -4290,6 +4336,12 @@ impl<'ctx> Codegen<'ctx> {
             let nonneg = nonneg.into_int_value();
             let over = self.builder.build_int_compare(IntPredicate::SGT, nonneg, i64_ty.const_int(16, false), "argc.over").unwrap();
             let count = self.builder.build_select(over, i64_ty.const_int(16, false), nonneg, "argc.count").unwrap().into_int_value();
+            // Stash the true argument count where `args.len()` and friends
+            // can load it (the array itself stays 16 statically-sized slots).
+            let argc_alloca = self.create_entry_block_alloca("__hella_argc", i64_ty.into());
+            self.builder.build_store(argc_alloca, count).unwrap();
+            self.main_args_alloca = Some(args_alloca);
+            self.main_argc_alloca = Some(argc_alloca);
             // idx loop: args[idx] = argv[idx + 1]
             let idx_ptr = self.create_entry_block_alloca("__argv_idx", i64_ty.into());
             self.builder.build_store(idx_ptr, i64_ty.const_zero()).unwrap();
@@ -6499,9 +6551,11 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.build_unconditional_branch(cond_bb).unwrap();
                 self.builder.position_at_end(cond_bb);
                 let idx_val = self.builder.build_load(idx_ty, idx_ptr, "for.idx.load").unwrap().into_int_value();
-                // Vectors iterate to their loaded length; arrays to the const size.
-                // Maps iterate over keys up to the loaded length. Strings
-                // iterate to their loaded length (strlen).
+                // Vectors iterate to their loaded length; arrays to the const size
+                // — except main's `args`, which iterates to argc so `for a in
+                // args` skips the null padding. Maps iterate over keys up to
+                // the loaded length. Strings iterate to their loaded length
+                // (strlen).
                 let limit = if iter_is_str_here {
                     let sptr = self.builder.build_load(iter_ty, iter_ptr, "for.str.ptr").unwrap().into_pointer_value();
                     let call = self.builder.build_call(self.get_or_declare_strlen(), &[sptr.into()], "for.str.len").unwrap();
@@ -6510,6 +6564,11 @@ impl<'ctx> Codegen<'ctx> {
                     let vec_st = iter_ty.into_struct_type();
                     let len_ptr = self.builder.build_struct_gep(vec_st, iter_ptr, if iter_is_map { 2 } else { 1 }, "for.iter.len.ptr").unwrap();
                     self.builder.build_load(self.context.i64_type(), len_ptr, "for.iter.len").unwrap().into_int_value()
+                } else if matches!(iter_kind, ForIterKind::Array) {
+                    match self.main_args_len(iter_ptr) {
+                        Some(dyn_len) => dyn_len,
+                        None => self.context.i64_type().const_int(iter_len_const.unwrap_or(16), false),
+                    }
                 } else {
                     self.context.i64_type().const_int(iter_len_const.unwrap_or(16), false)
                 };
@@ -9578,6 +9637,26 @@ mod tests {
         assert!(
             ir.contains("define i32 @main(i32") && ir.contains("argv.copy"),
             "expected argc/argv main, got:\n{ir}"
+        );
+    }
+
+    /// `args.len()` loads the true argc from `__hella_argc` (not the
+    /// static 16 slots); ordinary arrays keep their static size.
+    #[test]
+    fn args_len_observes_argc() {
+        let ir = compile_ir(
+            "int main(string[] args) do\n  return args.len()\nend\n",
+        );
+        assert!(
+            ir.contains("__hella_argc"),
+            "expected argc slot load for args.len(), got:\n{ir}"
+        );
+        let ir = compile_ir(
+            "void main() do\n  int arr[4] nums\n  int n = nums.len()\nend\n",
+        );
+        assert!(
+            !ir.contains("__hella_argc"),
+            "ordinary arrays must not touch the argc slot, got:\n{ir}"
         );
     }
 
