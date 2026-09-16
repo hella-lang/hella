@@ -56,7 +56,10 @@ jobs:
           # Upstream clang+llvm tarball: deterministic pin, no installer
           # quirks (the .exe installer silently landed nowhere), ships
           # llvm-config.exe + dev libs that llvm-sys needs.
-          curl -sSLf -o llvm.tar.xz https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/clang+llvm-21.1.0-x86_64-pc-windows-msvc.tar.xz
+          # Pin 21.1.8: 21.1.0 segfaults (STATUS_ACCESS_VIOLATION) in
+          # codegen tests on Windows (29 of 33 crash on first LLVM use;
+          # same tests pass on Linux/macOS and on 21.1.8).
+          curl -sSLf -o llvm.tar.xz https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/clang+llvm-21.1.8-x86_64-pc-windows-msvc.tar.xz
           mkdir -p C:/LLVM
           tar -xf llvm.tar.xz -C C:/LLVM --strip-components=1
           if [ ! -x "C:/LLVM/bin/llvm-config.exe" ]; then
