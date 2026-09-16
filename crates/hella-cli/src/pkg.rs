@@ -1003,6 +1003,126 @@ pub fn run_remove(root: &Path, pkg_root: &Path, name: &str) -> miette::Result<()
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// install / uninstall (global tools)
+// ---------------------------------------------------------------------------
+
+/// A tool source staged in a temp dir: the caller compiles it, then
+/// [`cleanup_tool`] removes the staging area.
+pub struct PreparedTool {
+    pub dir: PathBuf,
+    pub entry: PathBuf,
+    pub name: String,
+}
+
+/// Binary file name inside `bin/`: `name` plus `.exe` on Windows, where
+/// the OS requires an extension to execute a program.
+pub fn bin_path(bin_dir: &Path, tool: &str) -> PathBuf {
+    if cfg!(windows) && !tool.ends_with(".exe") {
+        bin_dir.join(format!("{tool}.exe"))
+    } else {
+        bin_dir.join(tool)
+    }
+}
+
+/// Tool names become file names: no separators, no `.`/`..`, non-empty.
+pub fn validate_tool_name(name: &str) -> miette::Result<()> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+    {
+        return Err(miette::miette!(
+            "invalid tool name `{name}` (must be a plain file name)"
+        ));
+    }
+    Ok(())
+}
+
+/// Clone a tool repository to a temp staging dir and locate its entry
+/// (`src/main.hll`, else `main.hll`). The binary name is `--bin`, else the
+/// repo's own `hella.toml` package name, else the derived source name.
+/// Never touches the current project's manifest.
+pub fn prepare_tool(
+    cache_root: &Path,
+    spec: &str,
+    bin_override: Option<&str>,
+) -> miette::Result<PreparedTool> {
+    ensure_git();
+    let req = parse_add_spec(spec, None)?;
+    let url = manifest::clone_url(&req.git);
+    let resolved = resolve_rev(&url, req.rev.as_deref())?;
+    let dir = cache_root.join(format!(
+        "hella-install-{}-{}",
+        std::process::id(),
+        scratch_nonce()
+    ));
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| {
+            miette::miette!("failed to clear {}: {e}", dir.display())
+        })?;
+    }
+    clone_resolved(&url, &resolved, &dir)?;
+    let entry = ["src/main.hll", "main.hll"]
+        .iter()
+        .map(|rel| dir.join(rel))
+        .find(|p| p.is_file())
+        .ok_or_else(|| {
+            miette::miette!(
+                "tool repository `{}` has no entry point (looked for src/main.hll and main.hll)",
+                req.git,
+            )
+        })?;
+    let mut name = bin_override
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty());
+    if name.is_none() {
+        name = manifest::read_manifest_file(&dir)
+            .ok()
+            .flatten()
+            .map(|m| m.name);
+    }
+    let name = name.unwrap_or(req.name);
+    validate_tool_name(&name)?;
+    Ok(PreparedTool { dir, entry, name })
+}
+
+/// Remove a tool staging dir (best effort: install cleanup must not fail
+/// an otherwise successful install).
+pub fn cleanup_tool(tool: &PreparedTool) {
+    let _ = std::fs::remove_dir_all(&tool.dir);
+}
+
+/// `hella uninstall <tool>`: remove the binary from `bin/`. Never touches
+/// any project's manifest or the shared `pkg/` cache.
+pub fn run_uninstall(bin_dir: &Path, tool: &str) -> miette::Result<()> {
+    validate_tool_name(tool)?;
+    let mut candidates = vec![bin_dir.join(tool)];
+    let exe = bin_path(bin_dir, tool);
+    if !candidates.contains(&exe) {
+        candidates.push(exe);
+    }
+    for path in candidates {
+        if path.is_file() {
+            std::fs::remove_file(&path).map_err(|e| {
+                miette::miette!("failed to remove {}: {e}", path.display())
+            })?;
+            // Best effort: drop the `<tool>.hellastamp` build sidecar too.
+            let mut stamp = path.as_os_str().to_owned();
+            stamp.push(".hellastamp");
+            let _ = std::fs::remove_file(PathBuf::from(stamp));
+            eprintln!("Uninstalled {}", tool);
+            return Ok(());
+        }
+    }
+    Err(miette::miette!(
+        "no installed tool named `{tool}` (looked in {})",
+        bin_dir.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1355,6 +1475,80 @@ mod tests {
         let pkg = root.join("pkg");
         let cache = root.join("cache");
         ensure_deps(&root, &pkg, &cache, &ensure_opts(false, false)).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tool_names_are_validated() {
+        assert!(validate_tool_name("mytool").is_ok());
+        assert!(validate_tool_name("my-tool_2").is_ok());
+        for bad in ["", ".", "..", "a/b", "a\\b", "a\0b"] {
+            assert!(validate_tool_name(bad).is_err(), "{bad:?}");
+        }
+        #[cfg(windows)]
+        assert_eq!(
+            bin_path(Path::new("C:\\h\\bin"), "tool"),
+            Path::new("C:\\h\\bin\\tool.exe")
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            bin_path(Path::new("/h/bin"), "tool"),
+            Path::new("/h/bin/tool")
+        );
+    }
+
+    #[test]
+    fn prepare_tool_finds_entry_and_name() {
+        let root = scratch("tool-prep");
+        let cache = root.join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let repo = make_repo(
+            &root,
+            "toolrepo",
+            &[
+                (
+                    "hella.toml",
+                    "[package]\nname = \"frob\"\nversion = \"0.1.0\"\n",
+                ),
+                ("src/main.hll", "void main() do\nend\n"),
+            ],
+            &["v0.1.0"],
+        );
+        let tool = prepare_tool(&cache, repo.to_str().unwrap(), None).unwrap();
+        assert_eq!(tool.name, "frob");
+        assert_eq!(tool.entry, tool.dir.join("src/main.hll"));
+        assert!(tool.dir.is_dir());
+        cleanup_tool(&tool);
+        assert!(!tool.dir.exists());
+        // Explicit --bin wins over the manifest name.
+        let tool = prepare_tool(&cache, repo.to_str().unwrap(), Some("custom")).unwrap();
+        assert_eq!(tool.name, "custom");
+        cleanup_tool(&tool);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prepare_tool_rejects_entryless_repos() {
+        let root = scratch("tool-noentry");
+        let cache = root.join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let repo = make_repo(&root, "libonly", &[("lib.hll", "// lib\n")], &["v1.0.0"]);
+        assert!(prepare_tool(&cache, repo.to_str().unwrap(), None).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn uninstall_removes_binaries() {
+        let root = scratch("uninstall");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_file(&bin.join("mytool"), "fake-binary");
+        write_file(&bin.join("mytool.hellastamp"), "profile=release\n");
+        run_uninstall(&bin, "mytool").unwrap();
+        assert!(!bin.join("mytool").exists());
+        assert!(!bin.join("mytool.hellastamp").exists(), "stamp sidecar goes too");
+        assert!(run_uninstall(&bin, "mytool").is_err());
+        assert!(run_uninstall(&bin, "../evil").is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

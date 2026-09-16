@@ -90,6 +90,10 @@ enum Commands {
     Add(AddArgs),
     /// Remove a third-party library dependency
     Remove(RemoveArgs),
+    /// Install a Hella tool globally (release build into `~/.hella/bin`)
+    Install(InstallArgs),
+    /// Uninstall a globally installed Hella tool
+    Uninstall(UninstallArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -281,6 +285,23 @@ struct RemoveArgs {
     name: String,
 }
 
+#[derive(Parser, Debug)]
+struct InstallArgs {
+    /// Tool source with optional `@<rev>`: `github.com/owner/repo`,
+    /// `owner/repo`, URL, or local path
+    spec: String,
+
+    /// Binary name to install as (default: the repo's package name)
+    #[arg(long)]
+    bin: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+struct UninstallArgs {
+    /// Name of the installed tool to remove
+    tool: String,
+}
+
 /// Shared knobs for the compile pipeline (used by `build`, `run` and `check`).
 struct CompileOptions<'a> {
     file: &'a Path,
@@ -317,6 +338,8 @@ fn main() -> miette::Result<()> {
         Commands::Fmt(args) => run_fmt(args),
         Commands::Add(args) => run_add(args),
         Commands::Remove(args) => run_remove(args),
+        Commands::Install(args) => run_install(args),
+        Commands::Uninstall(args) => run_uninstall(args),
     }
 }
 
@@ -707,6 +730,85 @@ fn run_remove(args: RemoveArgs) -> miette::Result<()> {
     };
     let (pkg_root, _) = pkg_dirs()?;
     pkg::run_remove(&root, &pkg_root, &args.name)
+}
+
+/// Install a Hella tool globally: clone to a temp staging dir, resolve its
+/// own dependencies, release-build, place the binary in `~/.hella/bin/`,
+/// and clean up. Never touches the current project's `hella.toml`.
+fn run_install(args: InstallArgs) -> miette::Result<()> {
+    let Some(bin_dir) = hella_compiler::modules::hella_bin_dir() else {
+        return Err(miette::miette!(
+            "cannot locate a home directory for `hella install` (needs $HOME on Unix, %USERPROFILE% on Windows)"
+        ));
+    };
+    fs::create_dir_all(&bin_dir).map_err(|e| {
+        miette::miette!("failed to create {}: {e}", bin_dir.display())
+    })?;
+    let (pkg_root, cache_root) = pkg_dirs()?;
+    let tool = pkg::prepare_tool(&cache_root, &args.spec, args.bin.as_deref())?;
+    let dest = pkg::bin_path(&bin_dir, &tool.name);
+    let result = (|| -> miette::Result<()> {
+        // The tool's own third-party deps resolve into the shared cache.
+        pkg::ensure_deps(
+            &tool.dir,
+            &pkg_root,
+            &cache_root,
+            &pkg::EnsureOptions {
+                offline: false,
+                frozen: false,
+            },
+        )?;
+        let opts = CompileOptions {
+            file: &tool.entry,
+            emit_llvm: false,
+            emit_llvm_file: None,
+            keep_obj: false,
+            print_ast: false,
+            release: true,
+            quiet: false,
+            force_color: false,
+            verbose: false,
+            exe_path: Some(dest.clone()),
+            check_only: false,
+            require_main: true,
+            force: true,
+        };
+        let _ = compile(opts)?;
+        Ok(())
+    })();
+    pkg::cleanup_tool(&tool);
+    result?;
+    eprintln!("Installed {} → {}", tool.name, dest.display());
+    if !bin_on_path(&bin_dir) {
+        eprintln!(
+            "Warning: {} is not on your $PATH — add it (e.g. `export PATH=\"$PATH:{}\"` in your shell profile)",
+            bin_dir.display(),
+            bin_dir.display(),
+        );
+    }
+    Ok(())
+}
+
+/// True when `dir` is one of the `$PATH` entries (best effort: compares
+/// canonicalized forms when both sides resolve).
+fn bin_on_path(dir: &Path) -> bool {
+    let Ok(path_var) = std::env::var("PATH") else {
+        return false;
+    };
+    let dir_canon = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    std::env::split_paths(&path_var).any(|p| {
+        p == *dir || fs::canonicalize(&p).is_ok_and(|c| c == dir_canon)
+    })
+}
+
+/// Uninstall a globally installed Hella tool.
+fn run_uninstall(args: UninstallArgs) -> miette::Result<()> {
+    let Some(bin_dir) = hella_compiler::modules::hella_bin_dir() else {
+        return Err(miette::miette!(
+            "cannot locate a home directory for `hella uninstall` (needs $HOME on Unix, %USERPROFILE% on Windows)"
+        ));
+    };
+    pkg::run_uninstall(&bin_dir, &args.tool)
 }
 
 /// Install the embedded standard library (`stdlib/**/*.hll` baked in by
