@@ -56,8 +56,8 @@ fn cli_styles() -> Styles {
 #[command(
     name = "hella",
     version = "0.1.0",
-    about = "Hella compiler",
-    long_about = "Hella compiler — build, check and run .hll programs.",
+    about = "The Hella Lang Toolchain",
+    long_about = "Hella Toolchain — build, check and run .hll programs.",
     styles = cli_styles(),
     arg_required_else_help = true,
     propagate_version = true
@@ -484,10 +484,8 @@ fn read_manifest(root: &Path) -> miette::Result<Option<Manifest>> {
     if !path.is_file() {
         return Ok(None);
     }
-    let parsed =
-        hella_compiler::manifest::read_manifest_file(root).map_err(|e| {
-            miette::miette!("invalid {}: {e}", path.display())
-        })?;
+    let parsed = hella_compiler::manifest::read_manifest_file(root)
+        .map_err(|e| miette::miette!("invalid {}: {e}", path.display()))?;
     Ok(parsed.map(|m| Manifest {
         name: m.name,
         version: m.version,
@@ -720,9 +718,8 @@ fn run_fmt(args: FmtArgs) -> miette::Result<()> {
 /// Package-cache roots for `add`/`remove`: the `pkg/` slots plus a `cache/`
 /// scratch area (falls back to the system temp dir when no home exists).
 fn pkg_dirs() -> miette::Result<(PathBuf, PathBuf)> {
-    let home = hella_compiler::modules::hella_home().unwrap_or_else(|| {
-        std::env::temp_dir().join(".hella")
-    });
+    let home = hella_compiler::modules::hella_home()
+        .unwrap_or_else(|| std::env::temp_dir().join(".hella"));
     let pkg_root = home.join("pkg");
     let cache_root = home.join("cache");
     for dir in [&pkg_root, &cache_root] {
@@ -745,7 +742,13 @@ fn run_add(args: AddArgs) -> miette::Result<()> {
         ));
     };
     let (pkg_root, cache_root) = pkg_dirs()?;
-    pkg::run_add(&root, &pkg_root, &cache_root, &args.spec, args.name.as_deref())
+    pkg::run_add(
+        &root,
+        &pkg_root,
+        &cache_root,
+        &args.spec,
+        args.name.as_deref(),
+    )
 }
 
 /// Remove a third-party library from the current project.
@@ -1004,7 +1007,11 @@ fn fail(report: Report) -> ! {
 
 /// Fetch the owning project's locked dependencies before compile (no-op
 /// outside projects and for dependency-free manifests).
-fn ensure_entry_deps(entry: &Path, offline: bool, frozen: bool) -> miette::Result<()> {
+fn ensure_entry_deps(
+    entry: &Path,
+    offline: bool,
+    frozen: bool,
+) -> miette::Result<()> {
     let root = hella_compiler::modules::project_root(entry);
     if !root.join("hella.toml").is_file() {
         return Ok(());
@@ -1465,7 +1472,9 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
             .status()
             .map_err(|e| {
                 pb.abandon();
-                miette::miette!("failed to invoke {linker} for runtime shim: {e}")
+                miette::miette!(
+                    "failed to invoke {linker} for runtime shim: {e}"
+                )
             })?;
         if !cc_status.success() {
             pb.abandon();
