@@ -108,6 +108,15 @@ jobs:
           cargo test -p hella-compiler --lib -- --test-threads=1 > /tmp/triage-single.log 2>&1
           echo "single-thread exit: $?"
           tail -12 /tmp/triage-single.log
+          echo "--- 4. one trivial codegen test alone (first-touch check: ---"
+          echo "---     crash here == every LLVM touch crashes, environmental) ---"
+          cargo test -p hella-compiler --lib -- codegen::tests::void_extension_method_verifies > /tmp/triage-one.log 2>&1
+          echo "single-test exit: $?"
+          tail -6 /tmp/triage-one.log
+          echo "--- 5. suspect test alone (confirms snippet-specific crash) ---"
+          cargo test -p hella-compiler --lib -- codegen::tests::args_len_observes_argc > /tmp/triage-suspect.log 2>&1
+          echo "suspect-test exit: $?"
+          tail -6 /tmp/triage-suspect.log
           exit 0
 
       - name: Workspace tests
