@@ -1546,6 +1546,11 @@ mod tests {
         if !deps.is_empty() {
             out.push_str("\n[dependencies]\n");
             for (name, git) in deps {
+                // Forward slashes: TOML basic strings treat `\` as escapes
+                // (a raw Windows path like `C:\Users\...` fails to parse),
+                // and this matches what `hella add` writes (normalized
+                // `local/...` sources, never backslashes).
+                let git = git.replace('\\', "/");
                 out.push_str(&format!("{name} = \"{git}\"\n"));
             }
         }
