@@ -90,6 +90,29 @@ jobs:
       - name: Workspace tests
         run: cargo test --workspace
 
+      # Crash triage for the hella-compiler lib segfault
+      # (STATUS_ACCESS_VIOLATION): purely informational, always exits 0.
+      # --list checks process startup; --skip codegen narrows the set;
+      # single-threaded orders output so the test after the last `ok` is
+      # the crasher. Runs even when `cargo test --workspace` fails.
+      - name: Triage lib test crash (Windows)
+        if: always() && runner.os == 'Windows'
+        run: |
+          set +e
+          echo "--- 1. list (startup check) ---"
+          cargo test -p hella-compiler --lib -- --list > /tmp/triage-list.log 2>&1
+          echo "list exit: $?"
+          tail -4 /tmp/triage-list.log
+          echo "--- 2. skip codegen (narrow the set) ---"
+          cargo test -p hella-compiler --lib -- --skip codegen > /tmp/triage-nocodegen.log 2>&1
+          echo "skip-codegen exit: $?"
+          tail -4 /tmp/triage-nocodegen.log
+          echo "--- 3. single-threaded (last ok + 1 == crasher) ---"
+          cargo test -p hella-compiler --lib -- --test-threads=1 > /tmp/triage-single.log 2>&1
+          echo "single-thread exit: $?"
+          tail -12 /tmp/triage-single.log
+          exit 0
+
       # cargo test compiles bins only as test harnesses under
       # target/debug/deps — the runnable CLI needs an explicit build.
       - name: Build CLI
