@@ -13,30 +13,37 @@ import std::str
 // Mutating helpers (`*Push`, `*Pop`, `*Clear`) take `ref` so the
 // caller's length/capacity header is updated.
 
+/// Returns the length of int vec `v`.
 int iLen(int vec v) do
     return v.len()
 end
 
+/// Returns true when int vec `v` is empty.
 bool iIsEmpty(int vec v) do
     return v.is_empty()
 end
 
+/// Returns true when int vec `v` contains `x`.
 bool iContains(int vec v, int x) do
     return v.contains(x)
 end
 
+/// Returns the first element of int vec `v`.
 int iFirst(int vec v) do
     return v.first()
 end
 
+/// Returns the last element of int vec `v`.
 int iLast(int vec v) do
     return v.last()
 end
 
+/// Pushes `x` onto int vec `v`.
 void iPush(ref int vec v, int x) do
     v.push(x)
 end
 
+/// Pops and returns the last element of int vec `v`.
 int iPop(ref int vec v) do
     return v.pop()
 end
@@ -46,6 +53,7 @@ end
 // unusable through any wrapper until codegen is fixed. `pop` in a loop
 // or rebinding to a fresh literal covers the need.
 
+/// Returns the sum of int vec `v`.
 int iSum(int vec v) do
     int total = 0
     int i = 0
@@ -57,6 +65,7 @@ int iSum(int vec v) do
     return total
 end
 
+/// Returns the first index of `x` in int vec `v`, or `-1`.
 int iIndexOf(int vec v, int x) do
     int i = 0
     int n = v.len()
@@ -69,10 +78,12 @@ int iIndexOf(int vec v, int x) do
     return -1
 end
 
+/// Returns the length of string vec `v`.
 int sLen(string vec v) do
     return v.len()
 end
 
+/// Returns true when string vec `v` is empty.
 bool sIsEmpty(string vec v) do
     return v.is_empty()
 end
@@ -80,6 +91,7 @@ end
 // NOTE: not `v.contains(x)` — the compiler's `contains` on string
 // (ptr-element) vecs hangs at runtime (broken ptr-compare lowering,
 // even on locals). strcmp-based loop instead.
+/// Returns true when string vec `v` contains `x` (strcmp-based).
 bool sContains(string vec v, string x) do
     int i = 0
     int n = v.len()
@@ -92,22 +104,27 @@ bool sContains(string vec v, string x) do
     return false
 end
 
+/// Returns the first element of string vec `v`.
 string sFirst(string vec v) do
     return v.first()
 end
 
+/// Returns the last element of string vec `v`.
 string sLast(string vec v) do
     return v.last()
 end
 
+/// Pushes `x` onto string vec `v`.
 void sPush(ref string vec v, string x) do
     v.push(x)
 end
 
+/// Pops and returns the last element of string vec `v`.
 string sPop(ref string vec v) do
     return v.pop()
 end
 
+/// Joins string vec `v` with `sep` between elements.
 string sJoin(string vec v, string sep) do
     string acc = ""
     int i = 0
@@ -125,10 +142,12 @@ end
 // NOTE: no `dContains` — the compiler's `contains` on double vecs
 // miscompiles f64 comparison (false even on locals). No `dSum` either:
 // `+` has no double overload in codegen yet.
+/// Returns the length of double vec `v`.
 int dLen(double vec v) do
     return v.len()
 end
 
+/// Pushes `x` onto double vec `v`.
 void dPush(ref double vec v, double x) do
     v.push(x)
 end

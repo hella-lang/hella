@@ -25,6 +25,7 @@ end
 
 // Integer helpers (pure Hella, no FFI needed).
 
+/// Returns the absolute value of `x`.
 int abs(int x) do
     if x < 0 do
         return -x
@@ -32,6 +33,7 @@ int abs(int x) do
     return x
 end
 
+/// Returns the smaller of `a` and `b`.
 int min(int a, int b) do
     if a < b do
         return a
@@ -39,6 +41,7 @@ int min(int a, int b) do
     return b
 end
 
+/// Returns the larger of `a` and `b`.
 int max(int a, int b) do
     if a > b do
         return a
@@ -46,6 +49,7 @@ int max(int a, int b) do
     return b
 end
 
+/// Clamps `v` into `[lo, hi]`.
 int clamp(int v, int lo, int hi) do
     if v < lo do
         return lo
@@ -58,14 +62,17 @@ end
 
 // Double wrappers with friendlier Hella names.
 
+/// Returns the absolute value of `x` (via `fabs`).
 double absf(double x) do
     return fabs(x)
 end
 
+/// Returns the smaller of `a` and `b` (via `fmin`).
 double minf(double a, double b) do
     return fmin(a, b)
 end
 
+/// Returns the larger of `a` and `b` (via `fmax`).
 double maxf(double a, double b) do
     return fmax(a, b)
 end

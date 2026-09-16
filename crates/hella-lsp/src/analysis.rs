@@ -138,6 +138,9 @@ pub struct Symbol {
     /// Trait names a class implements (`implements` list, base names).
     /// Used for `textDocument/implementation`.
     pub implements: Vec<String>,
+    /// Doc comment (`///`) directly above the declaration. Ordinary `//`
+    /// comments never populate this — see `hella_compiler::docs`.
+    pub doc: Option<String>,
 }
 
 impl Symbol {
@@ -200,6 +203,37 @@ impl Analysis {
         }
         a.link_extensions();
         a
+    }
+
+    /// Build a symbol table and attach `///` doc comments from `source`.
+    /// Ordinary `//` comments are ignored (see `hella_compiler::docs`).
+    pub fn from_program_with_source(prog: &ast::Program, source: &str) -> Self {
+        let mut a = Self::from_program(prog);
+        a.attach_docs(source);
+        a
+    }
+
+    /// Attach `///` docs to every known symbol (top-level, children,
+    /// locals) using the source they were parsed from. Idempotent: only
+    /// fills in symbols that lack docs.
+    pub fn attach_docs(&mut self, source: &str) {
+        for sym in self.top.iter_mut() {
+            attach_symbol_docs(sym, source);
+        }
+        for sym in self.locals.iter_mut() {
+            // Locals rarely carry docs, but a `///` above a `var` still counts.
+            if sym.doc.is_none() {
+                sym.doc = hella_compiler::docs::extract_doc_comment(source, sym.full_span.start);
+            }
+        }
+        for sym in self.imported.iter_mut() {
+            if sym.doc.is_none() {
+                sym.doc = hella_compiler::docs::extract_doc_comment(source, sym.full_span.start);
+            }
+            for child in sym.children.iter_mut() {
+                attach_symbol_docs(child, source);
+            }
+        }
     }
 
     /// Merge extension members into their target type's children (cloned;
@@ -936,6 +970,15 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
     pub fn hover(&self, source: &str, offset: usize) -> Option<Hover> {
         let sym = self.resolve_symbol_at(source, offset)?;
         let mut value = format!("**{}**\n\n```hll\n{}\n```", sym.kind_heading(), sym.detail);
+        // `///` doc comment, when present. Ordinary `//` comments never
+        // reach `Symbol::doc`, so they stay invisible here by construction.
+        if let Some(doc) = sym.doc.as_deref() {
+            let doc = doc.trim();
+            if !doc.is_empty() {
+                value.push_str("\n\n");
+                value.push_str(doc);
+            }
+        }
         // `own` slots move on assignment and are destroyed at scope exit —
         // worth surfacing where the type is hovered.
         if sym.ty.as_deref().is_some_and(|t| t.strip_prefix("own ").is_some_and(|r| !r.is_empty())) {
@@ -965,8 +1008,9 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
 
     /// Resolve the symbol the cursor is on: either the declaration itself
     /// (a symbol whose name covers `offset`) or a *reference* to some
-    /// top-level/local symbol whose name matches the word under the cursor.
-    /// Powers hover (shows the referenced symbol's info) and goto-definition.
+    /// top-level/local/imported symbol whose name matches the word under
+    /// the cursor. Powers hover (shows the referenced symbol's info) and
+    /// goto-definition.
     fn resolve_symbol_at(&self, source: &str, offset: usize) -> Option<&Symbol> {
         // 1. Cursor on a declaration name.
         if let Some(sym) = self.symbol_at(offset) {
@@ -980,6 +1024,7 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
         }
         self.top_recursive()
             .into_iter()
+            .chain(self.imported_recursive())
             .find(|s| s.name == word)
     }
 
@@ -1251,7 +1296,7 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
         }
         let (analysis, effective, adjusted) = match Self::parse_for_completion(source, offset) {
             Some((prog, eff, adj)) => {
-                let mut a = Self::from_program(&prog);
+                let mut a = Self::from_program_with_source(&prog, &eff);
                 if let Some(p) = doc_path {
                     a.load_imports(p, &prog);
                 }
@@ -1315,9 +1360,10 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
     }
 
     /// Load top-level symbols from directly imported files so their names
-    /// complete as globals (and their types resolve for member completion).
+    /// complete as globals (and their types resolve for member completion),
+    /// with `///` docs attached from each imported file's own source.
     /// Single level only; failures are skipped silently.
-    fn load_imports(&mut self, doc_path: &std::path::Path, prog: &ast::Program) {
+    pub(crate) fn load_imports(&mut self, doc_path: &std::path::Path, prog: &ast::Program) {
         let bases = hella_compiler::modules::search_bases(doc_path);
         let mut decls: Vec<&ast::ImportDecl> = Vec::new();
         fn walk<'a>(items: &'a [Item], out: &mut Vec<&'a ast::ImportDecl>) {
@@ -1351,7 +1397,7 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
                 .symbols
                 .as_ref()
                 .map(|v| v.iter().map(|(s, _)| s.as_str()).collect());
-            let mut sub_analysis = Self::from_program(&sub);
+            let mut sub_analysis = Self::from_program_with_source(&sub, &src);
             for s in std::mem::take(&mut sub_analysis.top) {
                 if s.kind == SymKind::Module {
                     continue;
@@ -1636,6 +1682,17 @@ fn make_symbol(
         params: Vec::new(),
         parent: None,
         implements: Vec::new(),
+        doc: None,
+    }
+}
+
+/// Attach `///` docs to a symbol and its children from `source`.
+fn attach_symbol_docs(sym: &mut Symbol, source: &str) {
+    if sym.doc.is_none() {
+        sym.doc = hella_compiler::docs::extract_doc_comment(source, sym.full_span.start);
+    }
+    for child in sym.children.iter_mut() {
+        attach_symbol_docs(child, source);
     }
 }
 
@@ -1820,6 +1877,12 @@ fn symbol_item(sym: &Symbol, tier: u8, snippets: bool) -> CompletionItem {
         kind: Some(sym.kind.completion()),
         detail: Some(sym.detail.clone()),
         sort_text: Some(format!("{tier}_{}", sym.name)),
+        documentation: sym.doc.as_deref().map(|d| {
+            lsp_types::Documentation::MarkupContent(lsp_types::MarkupContent {
+                kind: lsp_types::MarkupKind::Markdown,
+                value: d.to_string(),
+            })
+        }),
         ..Default::default()
     };
     // Functions/methods always snippet to calls; types snippet only when
@@ -2841,6 +2904,59 @@ mod tests {
         };
         assert!(m.value.contains("own User"), "type shown, got: {}", m.value);
         assert!(m.value.contains("heap-owned"), "ownership note, got: {}", m.value);
+    }
+
+    fn analyze_with_docs(src: &str) -> Analysis {
+        let out = hella_compiler::lexer::lex(src);
+        let prog = hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
+        Analysis::from_program_with_source(&prog, src)
+    }
+
+    fn hover_text(a: &Analysis, src: &str, offset: usize) -> String {
+        let hover = a.hover(src, offset).expect("hover resolves");
+        let HoverContents::Markup(m) = &hover.contents else {
+            panic!("expected markup hover");
+        };
+        m.value.clone()
+    }
+
+    #[test]
+    fn hover_shows_doc_comment() {
+        let src = "/// Prints hello.\nvoid print(string s) do\nend\nvoid main() do\n  print(\"x\")\nend";
+        let a = analyze_with_docs(src);
+        let use_off = src.find("print(\"x\")").unwrap();
+        let text = hover_text(&a, src, use_off);
+        assert!(text.contains("Prints hello."), "doc shown, got: {text}");
+    }
+
+    #[test]
+    fn hover_hides_normal_comment() {
+        let src = "// Prints hello.\nvoid print(string s) do\nend\nvoid main() do\n  print(\"x\")\nend";
+        let a = analyze_with_docs(src);
+        let use_off = src.find("print(\"x\")").unwrap();
+        let text = hover_text(&a, src, use_off);
+        assert!(!text.contains("Prints hello."), "normal // hidden, got: {text}");
+    }
+
+    #[test]
+    fn hover_imported_doc_resolves() {
+        let dir = scratch_import_project();
+        std::fs::write(
+            dir.join("util.hll"),
+            "/// Doubles `x`.\nint twice(int x) do\n    return x * 2\nend\n",
+        )
+        .unwrap();
+        let main = dir.join("main.hll");
+        let src = "import util\n\nvoid main() do\n  twice(1)\nend\n";
+        std::fs::write(&main, src).unwrap();
+        let out = hella_compiler::lexer::lex(src);
+        let prog = hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
+        let mut a = Analysis::from_program_with_source(&prog, src);
+        a.load_imports(&main, &prog);
+        let use_off = src.find("twice(1)").unwrap();
+        let text = hover_text(&a, src, use_off);
+        assert!(text.contains("Doubles `x`."), "imported doc shown, got: {text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

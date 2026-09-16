@@ -23,48 +23,48 @@ extern "c" from "libc" do
     int scanf(string fmt, ...)
 end
 
-// print — no trailing newline.
+/// Prints `s` to stdout with no trailing newline.
 void print(string s) do
     printf("%s", s)
 end
 
-// println — with trailing newline (libc `puts` appends `\n`).
+/// Prints `s` to stdout with a trailing newline (via libc `puts`).
 void println(string s) do
     puts(s)
 end
 
-// printInt — decimal with trailing newline.
+/// Prints `n` in decimal with a trailing newline.
 void printInt(int n) do
     printf("%ld\n", n)
 end
 
-// putChar — single character, no newline.
+/// Prints a single character `c` with no newline.
 void putChar(char c) do
     putchar(c)
 end
 
-// eprint — no trailing newline, to stderr (fd 2).
+/// Prints `s` to stderr (fd 2) with no trailing newline.
 void eprint(string s) do
     write(2, s, s.len())
 end
 
-// eprintln — with trailing newline, to stderr (fd 2).
+/// Prints `s` to stderr (fd 2) with a trailing newline.
 void eprintln(string s) do
     eprint(s)
     eprint("\n")
 end
 
-// readLine — one stdin line, WITHOUT the trailing newline.
-// Capped at 255 bytes (overlong lines continue on the next call).
-// EOF yields "".
+/// Reads one stdin line, WITHOUT the trailing newline.
+/// Capped at 255 bytes (overlong lines continue on the next call).
+/// EOF yields `""`.
 string readLine() do
     string buf = calloc(1, 256)
     scanf("%255[^\n]%*c", buf)
     return buf
 end
 
-// readInt — one stdin integer (leading whitespace skipped, one trailing
-// character consumed). EOF yields 0.
+/// Reads one stdin integer (leading whitespace skipped, one trailing
+/// character consumed). EOF yields `0`.
 int readInt() do
     int n = 0
     scanf("%ld%*c", out n)

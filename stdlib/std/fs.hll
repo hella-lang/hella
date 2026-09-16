@@ -14,10 +14,13 @@ extern "c" from "libc" do
     int strlen(string s)
 end
 
+/// Returns true when `path` exists (via `access` mode 0).
 bool exists(string path) do
     return access(path, 0) is 0
 end
 
+/// Reads the whole file at `path` as a string.
+/// Returns `""` when the file cannot be opened or is empty.
 string readFile(string path) do
     string f = fopen(path, "r")
     int size = 0
@@ -41,6 +44,8 @@ string readFile(string path) do
     return buf
 end
 
+/// Writes `data` to the file at `path`, truncating it.
+/// Does nothing when the file cannot be opened.
 void writeFile(string path, string data) do
     string f = fopen(path, "w")
     int len = 0
@@ -56,6 +61,8 @@ void writeFile(string path, string data) do
     fclose(f)
 end
 
+/// Appends `data` to the file at `path`, creating it when missing.
+/// Does nothing when the file cannot be opened.
 void appendFile(string path, string data) do
     string f = fopen(path, "a")
     int len = 0
@@ -71,6 +78,7 @@ void appendFile(string path, string data) do
     fclose(f)
 end
 
+/// Removes the file at `path`.
 void removeFile(string path) do
     remove(path)
 end

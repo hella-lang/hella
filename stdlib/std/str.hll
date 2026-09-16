@@ -9,22 +9,28 @@ extern "c" from "libc" do
     string calloc(int n, int size)
 end
 
+/// Returns the byte length of `s` (via `strlen`).
 int len(string s) do
     return strlen(s)
 end
 
+/// Returns true when `s` is empty.
 bool isEmpty(string s) do
     return strlen(s) is 0
 end
 
+/// Returns true when `a` and `b` hold the same bytes.
 bool equals(string a, string b) do
     return strcmp(a, b) is 0
 end
 
+/// Compares `a` against `b` (`< 0`, `0`, `> 0`, via `strcmp`).
 int compare(string a, string b) do
     return strcmp(a, b)
 end
 
+/// Returns true when `hay` contains `needle`.
+/// An empty `needle` always matches.
 bool contains(string hay, string needle) do
     int n = strlen(needle)
     int h = strlen(hay)
@@ -56,6 +62,8 @@ bool contains(string hay, string needle) do
     return false
 end
 
+/// Returns true when `s` starts with `prefix`.
+/// An empty `prefix` always matches.
 bool startsWith(string s, string prefix) do
     int plen = strlen(prefix)
     if plen is 0 do
@@ -67,6 +75,8 @@ bool startsWith(string s, string prefix) do
     return strncmp(s, prefix, plen) is 0
 end
 
+/// Returns true when `s` ends with `suffix`.
+/// An empty `suffix` always matches.
 bool endsWith(string s, string suffix) do
     int slen = strlen(s)
     int plen = strlen(suffix)
@@ -89,10 +99,13 @@ bool endsWith(string s, string suffix) do
     return true
 end
 
+/// Returns a heap copy of `s` (via `strdup`).
 string clone(string s) do
     return strdup(s)
 end
 
+/// Returns `s[start..stop]` (clamped to bounds).
+/// Returns `""` when `stop < start`.
 string substring(string s, int start, int stop) do
     int slen = strlen(s)
     string res = ""

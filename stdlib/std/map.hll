@@ -15,14 +15,17 @@
 
 import std::str
 
+/// Returns the number of entries in string:int map `m`.
 int siLen(string:int m) do
     return m.len()
 end
 
+/// Returns true when string:int map `m` is empty.
 bool siIsEmpty(string:int m) do
     return m.is_empty()
 end
 
+/// Returns true when string:int map `m` holds key `k`.
 bool siHas(string:int m, string k) do
     for key in m do
         if equals(key, k) do
@@ -32,6 +35,7 @@ bool siHas(string:int m, string k) do
     return false
 end
 
+/// Returns `m[k]`, or `d` when `k` is missing.
 int siGetOr(string:int m, string k, int d) do
     for key, val in m do
         if equals(key, k) do
@@ -41,14 +45,17 @@ int siGetOr(string:int m, string k, int d) do
     return d
 end
 
+/// Returns the number of entries in int:int map `m`.
 int iiLen(int:int m) do
     return m.len()
 end
 
+/// Returns true when int:int map `m` is empty.
 bool iiIsEmpty(int:int m) do
     return m.is_empty()
 end
 
+/// Returns true when int:int map `m` holds key `k`.
 bool iiHas(int:int m, int k) do
     for key in m do
         if key is k do
@@ -58,6 +65,7 @@ bool iiHas(int:int m, int k) do
     return false
 end
 
+/// Returns `m[k]`, or `d` when `k` is missing.
 int iiGetOr(int:int m, int k, int d) do
     for key, val in m do
         if key is k do
@@ -67,14 +75,17 @@ int iiGetOr(int:int m, int k, int d) do
     return d
 end
 
+/// Returns the number of entries in string:string map `m`.
 int ssLen(string:string m) do
     return m.len()
 end
 
+/// Returns true when string:string map `m` is empty.
 bool ssIsEmpty(string:string m) do
     return m.is_empty()
 end
 
+/// Returns true when string:string map `m` holds key `k`.
 bool ssHas(string:string m, string k) do
     for key in m do
         if equals(key, k) do
@@ -84,6 +95,7 @@ bool ssHas(string:string m, string k) do
     return false
 end
 
+/// Returns `m[k]`, or `d` when `k` is missing.
 string ssGetOr(string:string m, string k, string d) do
     for key, val in m do
         if equals(key, k) do

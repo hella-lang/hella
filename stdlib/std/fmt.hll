@@ -15,46 +15,54 @@ extern "c" from "libc" do
     string calloc(int n, int size)
 end
 
+/// Formats one string via `sprintf` (`fmt` holds one `%s`).
 string formatS(string fmt, string a) do
     string buf = calloc(1, 4096)
     sprintf(buf, fmt, a)
     return buf
 end
 
+/// Formats two strings via `sprintf` (`fmt` holds two `%s`).
 string formatSS(string fmt, string a, string b) do
     string buf = calloc(1, 4096)
     sprintf(buf, fmt, a, b)
     return buf
 end
 
+/// Formats one int via `sprintf` (`fmt` holds one `%d`-style verb).
 string formatD(string fmt, int n) do
     string buf = calloc(1, 4096)
     sprintf(buf, fmt, n)
     return buf
 end
 
+/// Formats two ints via `sprintf`.
 string formatDD(string fmt, int a, int b) do
     string buf = calloc(1, 4096)
     sprintf(buf, fmt, a, b)
     return buf
 end
 
+/// Formats one double via `sprintf` (`fmt` holds one `%f`-style verb).
 string formatF(string fmt, double x) do
     string buf = calloc(1, 4096)
     sprintf(buf, fmt, x)
     return buf
 end
 
+/// Formats an int plus a string via `sprintf`, in that order.
 string formatDS(string fmt, int n, string s) do
     string buf = calloc(1, 4096)
     sprintf(buf, fmt, n, s)
     return buf
 end
 
+/// Joins `parts` with `sep` between elements.
 string join(string sep, string vec parts) do
     return sJoin(parts, sep)
 end
 
+/// Returns `s` repeated `n` times (negative `n` yields `""`).
 string repeat(string s, int n) do
     string acc = ""
     int i = 0
@@ -68,6 +76,7 @@ string repeat(string s, int n) do
     return acc
 end
 
+/// Pads `s` on the left with spaces up to `width`.
 string padStart(string s, int width) do
     string acc = s
     while len(acc) < width do
@@ -76,6 +85,7 @@ string padStart(string s, int width) do
     return acc
 end
 
+/// Pads `s` on the right with spaces up to `width`.
 string padEnd(string s, int width) do
     string acc = s
     while len(acc) < width do

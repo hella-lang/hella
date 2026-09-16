@@ -641,7 +641,12 @@ impl State {
         let mut analysis = Analysis::default();
         let out = hella_compiler::lexer::lex(&doc.text);
         if let Ok(prog) = hella_compiler::parse::parse(out.tokens, doc.text.clone()) {
-            analysis = Analysis::from_program(&prog);
+            analysis = Analysis::from_program_with_source(&prog, &doc.text);
+            // Imported names (e.g. `std::io` functions) resolve for hover
+            // with their own `///` docs attached from the imported files.
+            if let Some(path) = crate::document::uri_to_path(uri) {
+                analysis.load_imports(&path, &prog);
+            }
         }
         self.analysis.insert(uri.as_str().to_string(), analysis);
     }
