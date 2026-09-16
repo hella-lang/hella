@@ -56,7 +56,21 @@ pub fn code_actions_with_imports(
     out
 }
 
+fn is_zero_width(r: &Range) -> bool {
+    r.start.line == r.end.line && r.start.character == r.end.character
+}
+
+/// Diagnostic/request overlap. A zero-width request range is a cursor:
+/// it matches any diagnostic on the same line(s), so `<leader>ca` /
+/// lightbulb works from indentation, not just exactly on the span.
+/// Non-cursor ranges use exact overlap.
 fn overlaps(a: &Range, b: &Range) -> bool {
+    if is_zero_width(b) {
+        return b.start.line >= a.start.line && b.start.line <= a.end.line;
+    }
+    if is_zero_width(a) {
+        return a.start.line >= b.start.line && a.start.line <= b.end.line;
+    }
     !(a.end.line < b.start.line
         || b.end.line < a.start.line
         || (a.end.line == b.start.line && a.end.character < b.start.character)
@@ -301,6 +315,26 @@ mod tests {
             _ => false
         }), "expected auto-import: {actions:?}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cursor_anywhere_on_line_triggers_own_fix() {
+        let text = "open class Cat has\nend\nvoid main() do\n  new Cat()\nend\n";
+        let start = text.find("new Cat()").unwrap();
+        let d = diag(
+            text,
+            start,
+            start + 9,
+            "unused `new` value is a guaranteed leak — assign it to an `own` slot or delete it",
+        );
+        // Zero-width cursor at column 0 (indentation, before the diagnostic
+        // span): editors send this when `<leader>ca` is pressed on the line.
+        let cursor = Range {
+            start: Position { line: 3, character: 0 },
+            end: Position { line: 3, character: 0 },
+        };
+        let actions = code_actions(&uri(), text, &cursor, &[d]);
+        assert_eq!(actions.len(), 1);
     }
 
     #[test]
