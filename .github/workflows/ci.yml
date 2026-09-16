@@ -53,25 +53,20 @@ jobs:
       - name: Install LLVM 21 (Windows)
         if: runner.os == 'Windows'
         run: |
-          # Official upstream installer: deterministic pin, ships
-          # llvm-config.exe + dev libs that llvm-sys needs. The NSIS
-          # /D flag is occasionally ignored, so locate the result
-          # instead of trusting the target dir, and fail loudly here
-          # (not deep inside the llvm-sys build) if it is absent.
-          curl -sSL -o llvm-installer.exe https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-win64.exe
-          MSYS_NO_PATHCONV=1 ./llvm-installer.exe /S /D=C:\LLVM
-          LLVMROOT=""
-          for cand in "C:/LLVM" "/c/Program Files/LLVM"; do
-            if [ -x "$cand/bin/llvm-config.exe" ]; then LLVMROOT="$cand"; break; fi
-          done
-          if [ -z "$LLVMROOT" ]; then
-            echo "llvm-config.exe not found; C:/LLVM tree:"
-            ls -R "C:/LLVM" 2>/dev/null | head -30 || echo "(no C:/LLVM at all)"
+          # Upstream clang+llvm tarball: deterministic pin, no installer
+          # quirks (the .exe installer silently landed nowhere), ships
+          # llvm-config.exe + dev libs that llvm-sys needs.
+          curl -sSLf -o llvm.tar.xz https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/clang+llvm-21.1.0-x86_64-pc-windows-msvc.tar.xz
+          mkdir -p C:/LLVM
+          tar -xf llvm.tar.xz -C C:/LLVM --strip-components=1
+          if [ ! -x "C:/LLVM/bin/llvm-config.exe" ]; then
+            echo "llvm-config.exe missing; C:/LLVM/bin tree:"
+            ls "C:/LLVM/bin" | head -30
             exit 1
           fi
-          "$LLVMROOT/bin/llvm-config.exe" --version
-          echo "$LLVMROOT/bin" >> "$GITHUB_PATH"
-          echo "LLVM_SYS_211_PREFIX=$LLVMROOT" >> "$GITHUB_ENV"
+          C:/LLVM/bin/llvm-config.exe --version
+          echo "C:/LLVM/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_211_PREFIX=C:/LLVM" >> "$GITHUB_ENV"
 
       - name: Workspace tests
         run: cargo test --workspace
@@ -88,14 +83,43 @@ jobs:
           done
 
       - name: Run stdlib examples
+        # Collect every result before failing so one bad example does
+        # not hide the rest. PIPESTATUS is captured on the very next
+        # line after each pipeline (anything in between clobbers it),
+        # and errexit is off so a failing stage cannot abort the step.
         run: |
-          printf 'Ada\n42\n' | ./examples/stdlib_io || exit 1
-          ./examples/stdlib_math | grep -q "math ok" || exit 1
-          ./examples/stdlib_string | grep -q "string ok" || exit 1
-          ./examples/stdlib_env | grep -q "env ok" || exit 1
-          ./examples/stdlib_fs | grep -q "fs ok" || exit 1
-          ./examples/stdlib_collections | grep -q "collections ok" || exit 1
-          ./examples/stdlib_fmt | grep -q "fmt ok" || exit 1
+          fail=0
+          set +e
+          set -o pipefail
+          printf 'Ada\n42\n' | ./examples/stdlib_io
+          rc=(${PIPESTATUS[@]})
+          echo "io printf_rc=${rc[0]} bin_rc=${rc[1]}"
+          [ "${rc[1]}" -eq 0 ] || fail=1
+          ./examples/stdlib_math | grep -q "math ok"
+          rc=(${PIPESTATUS[@]})
+          echo "math bin_rc=${rc[0]} grep_rc=${rc[1]}"
+          { [ "${rc[0]}" -eq 0 ] && [ "${rc[1]}" -eq 0 ]; } || fail=1
+          ./examples/stdlib_string | grep -q "string ok"
+          rc=(${PIPESTATUS[@]})
+          echo "str bin_rc=${rc[0]} grep_rc=${rc[1]}"
+          { [ "${rc[0]}" -eq 0 ] && [ "${rc[1]}" -eq 0 ]; } || fail=1
+          ./examples/stdlib_env | grep -q "env ok"
+          rc=(${PIPESTATUS[@]})
+          echo "env bin_rc=${rc[0]} grep_rc=${rc[1]}"
+          { [ "${rc[0]}" -eq 0 ] && [ "${rc[1]}" -eq 0 ]; } || fail=1
+          ./examples/stdlib_fs | grep -q "fs ok"
+          rc=(${PIPESTATUS[@]})
+          echo "fs bin_rc=${rc[0]} grep_rc=${rc[1]}"
+          { [ "${rc[0]}" -eq 0 ] && [ "${rc[1]}" -eq 0 ]; } || fail=1
+          ./examples/stdlib_collections | grep -q "collections ok"
+          rc=(${PIPESTATUS[@]})
+          echo "collections bin_rc=${rc[0]} grep_rc=${rc[1]}"
+          { [ "${rc[0]}" -eq 0 ] && [ "${rc[1]}" -eq 0 ]; } || fail=1
+          ./examples/stdlib_fmt | grep -q "fmt ok"
+          rc=(${PIPESTATUS[@]})
+          echo "fmt bin_rc=${rc[0]} grep_rc=${rc[1]}"
+          { [ "${rc[0]}" -eq 0 ] && [ "${rc[1]}" -eq 0 ]; } || fail=1
+          exit $fail
 
       - name: Setup smoke test (installed stdlib outside the checkout)
         run: |
