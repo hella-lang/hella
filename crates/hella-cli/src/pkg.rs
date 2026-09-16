@@ -28,13 +28,24 @@ pub struct AddRequest {
 ///
 /// An existing local path wins verbatim (so directories containing `@`
 /// work); otherwise the spec splits at the last `@`.
-pub fn parse_add_spec(spec: &str, name_override: Option<&str>) -> miette::Result<AddRequest> {
+pub fn parse_add_spec(
+    spec: &str,
+    name_override: Option<&str>,
+) -> miette::Result<AddRequest> {
     let raw = spec.trim();
     if raw.is_empty() {
-        return Err(miette::miette!("empty package spec (expected `<source>[@<rev>]`)"));
+        return Err(miette::miette!(
+            "empty package spec (expected `<source>[@<rev>]`)"
+        ));
     }
     let (source, rev) = if Path::new(raw).exists() {
-        (raw.to_string(), None)
+        // Convert Windows paths to file:// URLs for git compatibility
+        let local_path = if cfg!(windows) {
+            format!("file:///{}", raw.replace("\\", "/"))
+        } else {
+            format!("file://{raw}")
+        };
+        (local_path, None)
     } else if let Some(at) = raw.rfind('@') {
         let (s, r) = raw.split_at(at);
         let r = r[1..].trim();
@@ -75,7 +86,10 @@ fn serialize_dep_value(dep: &Dependency) -> String {
             "{{ git = \"{}\", version = \"{}\", package = \"{pkg}\" }}",
             dep.git, dep.version,
         ),
-        None => format!("{{ git = \"{}\", version = \"{}\" }}", dep.git, dep.version),
+        None => format!(
+            "{{ git = \"{}\", version = \"{}\" }}",
+            dep.git, dep.version
+        ),
     }
 }
 
@@ -107,7 +121,9 @@ pub fn insert_dep_line(text: &str, name: &str, dep: &Dependency) -> String {
     } else if let Some(h) = header {
         lines.insert(h + 1, entry);
     } else {
-        if !lines.is_empty() && !lines.last().is_some_and(|l| l.trim().is_empty()) {
+        if !lines.is_empty()
+            && !lines.last().is_some_and(|l| l.trim().is_empty())
+        {
             lines.push(String::new());
         }
         lines.push("[dependencies]".to_string());
@@ -131,7 +147,10 @@ pub fn insert_dep_line(text: &str, name: &str, dep: &Dependency) -> String {
 /// The dependency name of a `name = …` line inside `[dependencies]`,
 /// or `None` for any other line.
 fn dep_line_name(trimmed: &str) -> Option<&str> {
-    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('[') {
+    if trimmed.is_empty()
+        || trimmed.starts_with('#')
+        || trimmed.starts_with('[')
+    {
         return None;
     }
     let (key, _) = trimmed.split_once('=')?;
@@ -186,10 +205,18 @@ fn ensure_git() -> miette::Result<()> {
 
 /// Run `git` with ambient repo config neutralized (tests must not depend
 /// on the user's global gitconfig).
-fn git(args: &[&str], cwd: Option<&Path>) -> miette::Result<std::process::Output> {
+fn git(
+    args: &[&str],
+    cwd: Option<&Path>,
+) -> miette::Result<std::process::Output> {
     let mut cmd = Command::new("git");
     cmd.args(["-c", "user.email=hella@test", "-c", "user.name=hella"])
-        .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]);
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ]);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -199,7 +226,11 @@ fn git(args: &[&str], cwd: Option<&Path>) -> miette::Result<std::process::Output
     })
 }
 
-fn git_text(args: &[&str], cwd: Option<&Path>, what: &str) -> miette::Result<String> {
+fn git_text(
+    args: &[&str],
+    cwd: Option<&Path>,
+    what: &str,
+) -> miette::Result<String> {
     let out = git(args, cwd)?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
@@ -226,16 +257,13 @@ struct RemoteRefs {
 
 /// All refs of a remote without cloning (`git ls-remote`).
 fn ls_remote(url: &str) -> miette::Result<RemoteRefs> {
-    let out = git_text(
-        &["ls-remote", url],
-        None,
-        &format!("cannot reach `{url}`"),
-    )
-    .map_err(|e| {
-        miette::miette!(
-            "{e} (check the URL and your network / credentials)"
-        )
-    })?;
+    let out =
+        git_text(&["ls-remote", url], None, &format!("cannot reach `{url}`"))
+            .map_err(|e| {
+            miette::miette!(
+                "{e} (check the URL and your network / credentials)"
+            )
+        })?;
     // tag name -> (sha, peeled sha): annotated tags list both.
     let mut tags: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
     let mut head = None;
@@ -250,9 +278,8 @@ fn ls_remote(url: &str) -> miette::Result<RemoteRefs> {
             if let Some(name) = tag.strip_suffix("^{}") {
                 // Assignment RHS evaluates before the place expression,
                 // so bind the entry first (else `sha` moves too early).
-                let entry = tags
-                    .entry(name.to_string())
-                    .or_insert((sha.clone(), None));
+                let entry =
+                    tags.entry(name.to_string()).or_insert((sha.clone(), None));
                 entry.1 = Some(sha);
             } else {
                 tags.entry(tag.to_string()).or_insert((sha, None));
@@ -344,7 +371,8 @@ fn resolve_rev(url: &str, req: Option<&str>) -> miette::Result<Resolved> {
     // resolution floats to the newest matching tag and `update` can bump.
     // Use `=1.0.0` to pin one exact tag.
     if let Ok(range) = semver::VersionReq::parse(strip_v(req)) {
-        if let Some((v, t)) = pool.iter().rev().find(|(v, _)| range.matches(v)) {
+        if let Some((v, t)) = pool.iter().rev().find(|(v, _)| range.matches(v))
+        {
             return Ok(Resolved {
                 version: v.to_string(),
                 rev: t.sha.clone(),
@@ -352,9 +380,7 @@ fn resolve_rev(url: &str, req: Option<&str>) -> miette::Result<Resolved> {
                 needs_rev_parse: false,
             });
         }
-        return Err(miette::miette!(
-            "no tag of `{url}` satisfies `{req}`"
-        ));
+        return Err(miette::miette!("no tag of `{url}` satisfies `{req}`"));
     }
     // Exact tag name (non-semver tags like `stable` or `nightly`).
     if let Some(t) = refs.tags.iter().find(|t| t.name == req) {
@@ -378,7 +404,11 @@ fn resolve_rev(url: &str, req: Option<&str>) -> miette::Result<Resolved> {
 }
 
 /// Clone a resolved revision into `dest` (must not exist yet).
-fn clone_resolved(url: &str, resolved: &Resolved, dest: &Path) -> miette::Result<String> {
+fn clone_resolved(
+    url: &str,
+    resolved: &Resolved,
+    dest: &Path,
+) -> miette::Result<String> {
     if let Some(tag) = &resolved.tag {
         git_text(
             &[
@@ -467,14 +497,17 @@ fn fetch_slot(
     resolved: &Resolved,
 ) -> miette::Result<(PathBuf, String)> {
     let slot = modules::pkg_slot_dir(pkg_root, git, version);
-    if let Some((mg, _, mrev)) = manifest::read_slot_marker(&slot)
-        .map_err(|e| miette::miette!("{e}"))?
+    if let Some((mg, _, mrev)) =
+        manifest::read_slot_marker(&slot).map_err(|e| miette::miette!("{e}"))?
     {
         if mg == git && mrev == resolved.rev {
             return Ok((slot, mrev));
         }
         std::fs::remove_dir_all(&slot).map_err(|e| {
-            miette::miette!("failed to clear stale slot {}: {e}", slot.display())
+            miette::miette!(
+                "failed to clear stale slot {}: {e}",
+                slot.display()
+            )
         })?;
     } else if slot.exists() {
         // Unmanaged files where a slot should be: never merge, start clean.
@@ -495,9 +528,7 @@ fn fetch_slot(
             slot.join(manifest::slot_marker_name()),
             manifest::serialize_slot_marker(git, version, &sha),
         )
-        .map_err(|e| {
-            miette::miette!("failed to write slot marker: {e}")
-        })?;
+        .map_err(|e| miette::miette!("failed to write slot marker: {e}"))?;
         Ok(sha)
     })();
     let sha = match result {
@@ -590,7 +621,13 @@ fn resolve_and_fetch_closure(
         }
         let url = manifest::clone_url(&item.git);
         let resolved = resolve_rev(&url, Some(&item.req))?;
-        let (_, sha) = fetch_slot(pkg_root, cache_root, &item.git, &resolved.version, &resolved)?;
+        let (_, sha) = fetch_slot(
+            pkg_root,
+            cache_root,
+            &item.git,
+            &resolved.version,
+            &resolved,
+        )?;
         let pin = LockedDependency {
             name: item.name.clone(),
             git: item.git.clone(),
@@ -600,7 +637,8 @@ fn resolve_and_fetch_closure(
         };
         // Record before recursing: cuts A ↔ B cycles.
         pinned.insert(item.name.clone(), pin.clone());
-        let slot = modules::pkg_slot_dir(pkg_root, &item.git, &resolved.version);
+        let slot =
+            modules::pkg_slot_dir(pkg_root, &item.git, &resolved.version);
         if let Ok(Some(child_manifest)) = manifest::read_manifest_file(&slot) {
             for (name, dep) in &child_manifest.dependencies {
                 queue.push(WorkItem {
@@ -628,7 +666,8 @@ fn fetch_pinned(
         tag: None,
         needs_rev_parse: false,
     };
-    let (_, sha) = fetch_slot(pkg_root, cache_root, &pin.git, &pin.version, &resolved)?;
+    let (_, sha) =
+        fetch_slot(pkg_root, cache_root, &pin.git, &pin.version, &resolved)?;
     if sha != pin.rev {
         return Err(miette::miette!(
             "fetched `{}` gave {sha} but lock pins {}",
@@ -641,9 +680,9 @@ fn fetch_pinned(
 
 fn slot_is_good(pkg_root: &Path, pin: &LockedDependency) -> bool {
     let slot = modules::pkg_slot_dir(pkg_root, &pin.git, &pin.version);
-    manifest::read_slot_marker(&slot).is_ok_and(|m| {
-        matches!(m, Some((g, _, r)) if g == pin.git && r == pin.rev)
-    })
+    manifest::read_slot_marker(&slot).is_ok_and(
+        |m| matches!(m, Some((g, _, r)) if g == pin.git && r == pin.rev),
+    )
 }
 
 /// Options for [`ensure_deps`]: `--offline` never touches the network,
@@ -754,8 +793,11 @@ pub fn ensure_deps(
                     },
                 );
             }
-            let current: Vec<LockedDependency> = pins.values().cloned().collect();
-            for p in resolve_and_fetch_closure(pkg_root, cache_root, &direct, &current)? {
+            let current: Vec<LockedDependency> =
+                pins.values().cloned().collect();
+            for p in resolve_and_fetch_closure(
+                pkg_root, cache_root, &direct, &current,
+            )? {
                 pins.insert(p.name.clone(), p);
             }
         }
@@ -793,9 +835,8 @@ pub fn ensure_deps(
 // ---------------------------------------------------------------------------
 
 fn read_manifest_text(root: &Path) -> miette::Result<String> {
-    std::fs::read_to_string(root.join("hella.toml")).map_err(|e| {
-        miette::miette!("failed to read hella.toml: {e}")
-    })
+    std::fs::read_to_string(root.join("hella.toml"))
+        .map_err(|e| miette::miette!("failed to read hella.toml: {e}"))
 }
 
 /// `hella add <spec> [--name <name>]`: fetch the revision, record it in
@@ -832,7 +873,12 @@ pub fn run_add(
             package: None,
         },
     );
-    let pins = resolve_and_fetch_closure(pkg_root, cache_root, &direct, &old_lock.packages)?;
+    let pins = resolve_and_fetch_closure(
+        pkg_root,
+        cache_root,
+        &direct,
+        &old_lock.packages,
+    )?;
     let Some(pin) = pins.iter().find(|p| p.name == req.name).cloned() else {
         return Err(miette::miette!("failed to resolve `{}`", req.name));
     };
@@ -879,11 +925,8 @@ fn reachable_pins(
     lock: &Lockfile,
     pkg_root: &Path,
 ) -> Vec<LockedDependency> {
-    let by_name: BTreeMap<&str, &LockedDependency> = lock
-        .packages
-        .iter()
-        .map(|p| (p.name.as_str(), p))
-        .collect();
+    let by_name: BTreeMap<&str, &LockedDependency> =
+        lock.packages.iter().map(|p| (p.name.as_str(), p)).collect();
     let mut keep: BTreeMap<String, LockedDependency> = BTreeMap::new();
     let mut stack: Vec<String> = roots.keys().cloned().collect();
     while let Some(name) = stack.pop() {
@@ -914,7 +957,10 @@ fn reachable_pins(
 
 /// Delete every `pkg/` slot whose marker is not referenced by `lock`.
 /// Returns the number of slots removed.
-pub fn gc_unreferenced_slots(pkg_root: &Path, lock: &Lockfile) -> miette::Result<usize> {
+pub fn gc_unreferenced_slots(
+    pkg_root: &Path,
+    lock: &Lockfile,
+) -> miette::Result<usize> {
     let mut slots = Vec::new();
     collect_slots(pkg_root, &mut slots);
     let mut removed = 0usize;
@@ -973,7 +1019,11 @@ fn collect_slots(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// `hella remove <name>`: drop the dependency from `hella.toml`, prune
 /// now-unreachable pins from `hella.lock`, and delete orphaned slots.
-pub fn run_remove(root: &Path, pkg_root: &Path, name: &str) -> miette::Result<()> {
+pub fn run_remove(
+    root: &Path,
+    pkg_root: &Path,
+    name: &str,
+) -> miette::Result<()> {
     let text = read_manifest_text(root)?;
     let mut manifest = manifest::parse_manifest(&text)
         .map_err(|e| miette::miette!("invalid hella.toml: {e}"))?;
@@ -989,9 +1039,7 @@ pub fn run_remove(root: &Path, pkg_root: &Path, name: &str) -> miette::Result<()
         .map_err(|e| miette::miette!("invalid hella.lock: {e}"))?
         .unwrap_or_default();
     let pruned = reachable_pins(&manifest.dependencies, &old_lock, pkg_root);
-    let pruned_lock = Lockfile {
-        packages: pruned,
-    };
+    let pruned_lock = Lockfile { packages: pruned };
     std::fs::write(
         root.join("hella.lock"),
         manifest::serialize_lockfile(&pruned_lock),
@@ -1007,7 +1055,10 @@ pub fn run_remove(root: &Path, pkg_root: &Path, name: &str) -> miette::Result<()
 // fetch / update / list / clean
 // ---------------------------------------------------------------------------
 
-fn write_lockfile(root: &Path, packages: Vec<LockedDependency>) -> miette::Result<()> {
+fn write_lockfile(
+    root: &Path,
+    packages: Vec<LockedDependency>,
+) -> miette::Result<()> {
     std::fs::write(
         root.join("hella.lock"),
         manifest::serialize_lockfile(&Lockfile { packages }),
@@ -1105,10 +1156,7 @@ pub fn run_update(
         .unwrap_or_default();
     let pruned = reachable_pins(&manifest.dependencies, &new_lock, pkg_root);
     let pruned_lock = Lockfile { packages: pruned };
-    write_lockfile(
-        root,
-        pruned_lock.packages.clone(),
-    )?;
+    write_lockfile(root, pruned_lock.packages.clone())?;
     let removed = gc_unreferenced_slots(pkg_root, &pruned_lock)?;
 
     let new_by_name: BTreeMap<&str, &LockedDependency> = pruned_lock
@@ -1122,7 +1170,10 @@ pub fn run_update(
         targets.iter().collect()
     };
     for name in report {
-        match (old_by_name.get(name.as_str()), new_by_name.get(name.as_str())) {
+        match (
+            old_by_name.get(name.as_str()),
+            new_by_name.get(name.as_str()),
+        ) {
             (Some(o), Some(n)) if o.version != n.version || o.rev != n.rev => {
                 eprintln!("Updated {name} {} → {}", o.version, n.version);
             }
@@ -1161,7 +1212,9 @@ fn describe_pin(name: &str, pin: Option<&LockedDependency>) -> String {
 pub fn run_list(root: &Path, pkg_root: &Path) -> miette::Result<()> {
     let manifest = manifest::read_manifest_file(root)
         .map_err(|e| miette::miette!("invalid hella.toml: {e}"))?
-        .ok_or_else(|| miette::miette!("no hella.toml in {}", root.display()))?;
+        .ok_or_else(|| {
+            miette::miette!("no hella.toml in {}", root.display())
+        })?;
     if manifest.dependencies.is_empty() {
         eprintln!("No dependencies");
         return Ok(());
@@ -1169,11 +1222,8 @@ pub fn run_list(root: &Path, pkg_root: &Path) -> miette::Result<()> {
     let lock = manifest::read_lockfile(root)
         .map_err(|e| miette::miette!("invalid hella.lock: {e}"))?
         .unwrap_or_default();
-    let by_name: BTreeMap<&str, &LockedDependency> = lock
-        .packages
-        .iter()
-        .map(|p| (p.name.as_str(), p))
-        .collect();
+    let by_name: BTreeMap<&str, &LockedDependency> =
+        lock.packages.iter().map(|p| (p.name.as_str(), p)).collect();
     eprintln!("{} {}", manifest.name, manifest.version);
     let mut direct: Vec<&String> = manifest.dependencies.keys().collect();
     direct.sort();
@@ -1248,10 +1298,15 @@ fn print_list_subtree(
 
 /// `hella clean` (in a project): prune pins unreachable from the manifest
 /// and delete orphaned slots. Returns the slot count removed.
-pub fn run_clean_project(root: &Path, pkg_root: &Path) -> miette::Result<usize> {
+pub fn run_clean_project(
+    root: &Path,
+    pkg_root: &Path,
+) -> miette::Result<usize> {
     let manifest = manifest::read_manifest_file(root)
         .map_err(|e| miette::miette!("invalid hella.toml: {e}"))?
-        .ok_or_else(|| miette::miette!("no hella.toml in {}", root.display()))?;
+        .ok_or_else(|| {
+            miette::miette!("no hella.toml in {}", root.display())
+        })?;
     let old_lock = manifest::read_lockfile(root)
         .map_err(|e| miette::miette!("invalid hella.lock: {e}"))?
         .unwrap_or_default();
@@ -1266,11 +1321,16 @@ pub fn run_clean_project(root: &Path, pkg_root: &Path) -> miette::Result<usize> 
 /// `hella clean --cache` (anywhere): empty the whole `pkg/` cache and
 /// remove stale fetch/install staging dirs. `lib/` (stdlib) and `bin/`
 /// (tools) are never touched.
-pub fn run_clean_cache(pkg_root: &Path, cache_root: &Path) -> miette::Result<usize> {
+pub fn run_clean_cache(
+    pkg_root: &Path,
+    cache_root: &Path,
+) -> miette::Result<usize> {
     let mut removed = 0usize;
     if pkg_root.is_dir() {
         for entry in std::fs::read_dir(pkg_root)
-            .map_err(|e| miette::miette!("failed to read {}: {e}", pkg_root.display()))?
+            .map_err(|e| {
+                miette::miette!("failed to read {}: {e}", pkg_root.display())
+            })?
             .flatten()
         {
             let path = entry.path();
@@ -1294,11 +1354,15 @@ pub fn run_clean_cache(pkg_root: &Path, cache_root: &Path) -> miette::Result<usi
             .flatten()
         {
             let name = entry.file_name().to_string_lossy().to_string();
-            if (name.starts_with("hella-fetch-") || name.starts_with("hella-install-"))
+            if (name.starts_with("hella-fetch-")
+                || name.starts_with("hella-install-"))
                 && entry.file_type().is_ok_and(|t| t.is_dir())
             {
                 std::fs::remove_dir_all(&entry.path()).map_err(|e| {
-                    miette::miette!("failed to remove {}: {e}", entry.path().display())
+                    miette::miette!(
+                        "failed to remove {}: {e}",
+                        entry.path().display()
+                    )
                 })?;
                 removed += 1;
             }
@@ -1429,10 +1493,8 @@ mod tests {
     use super::*;
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "hella-pkg-test-{}-{tag}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir()
+            .join(format!("hella-pkg-test-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -1456,7 +1518,12 @@ mod tests {
 
     /// A local git repo with `files` committed; `tags` are applied in order
     /// (each on its own commit after the first when there are several).
-    fn make_repo(base: &Path, name: &str, files: &[(&str, &str)], tags: &[&str]) -> PathBuf {
+    fn make_repo(
+        base: &Path,
+        name: &str,
+        files: &[(&str, &str)],
+        tags: &[&str],
+    ) -> PathBuf {
         let dir = base.join(name);
         std::fs::create_dir_all(&dir).unwrap();
         for (rel, contents) in files {
@@ -1477,7 +1544,8 @@ mod tests {
     }
 
     fn lib_manifest(deps: &[(&str, &str)]) -> String {
-        let mut out = "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n".to_string();
+        let mut out =
+            "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n".to_string();
         if !deps.is_empty() {
             out.push_str("\n[dependencies]\n");
             for (name, git) in deps {
@@ -1517,13 +1585,23 @@ mod tests {
     #[test]
     fn parses_specs() {
         let r = parse_add_spec("github.com/o/r", None).unwrap();
-        assert_eq!((r.git.as_str(), r.rev, r.name.as_str()), ("github.com/o/r", None, "r"));
+        assert_eq!(
+            (r.git.as_str(), r.rev, r.name.as_str()),
+            ("github.com/o/r", None, "r")
+        );
         let r = parse_add_spec("github.com/o/r@v1.2.0", None).unwrap();
         assert_eq!(r.rev.as_deref(), Some("v1.2.0"));
         let r = parse_add_spec("owner/repo@^1.2", None).unwrap();
-        assert_eq!((r.git.as_str(), r.name.as_str()), ("github.com/owner/repo", "repo"));
-        let r = parse_add_spec("https://github.com/o/My-Lib.git", None).unwrap();
-        assert_eq!((r.git.as_str(), r.name.as_str()), ("github.com/o/My-Lib", "my_lib"));
+        assert_eq!(
+            (r.git.as_str(), r.name.as_str()),
+            ("github.com/owner/repo", "repo")
+        );
+        let r =
+            parse_add_spec("https://github.com/o/My-Lib.git", None).unwrap();
+        assert_eq!(
+            (r.git.as_str(), r.name.as_str()),
+            ("github.com/o/My-Lib", "my_lib")
+        );
         let r = parse_add_spec("github.com/o/r", Some("custom")).unwrap();
         assert_eq!(r.name, "custom");
         assert!(parse_add_spec("", None).is_err());
@@ -1539,7 +1617,16 @@ mod tests {
         std::fs::create_dir_all(&weird).unwrap();
         let r = parse_add_spec(weird.to_str().unwrap(), None).unwrap();
         assert_eq!(r.rev, None);
-        assert_eq!(r.git, format!("local{}", weird.display()));
+        // Update expected format to use file:// URL
+        let expected = if cfg!(windows) {
+            format!(
+                "file:///{}",
+                weird.display().to_string().replace("\\", "/")
+            )
+        } else {
+            format!("file://{}", weird.display())
+        };
+        assert_eq!(r.git, manifest::normalize_git_source(&expected));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1554,7 +1641,9 @@ mod tests {
         let out = insert_dep_line(text, "mylib", &dep);
         assert!(out.contains("# leading comment"));
         assert!(out.contains("name = \"app\""));
-        assert!(out.contains("mylib = { git = \"github.com/o/r\", version = \"1.0.0\" }"));
+        assert!(out.contains(
+            "mylib = { git = \"github.com/o/r\", version = \"1.0.0\" }"
+        ));
         let m = manifest::parse_manifest(&out).unwrap();
         assert_eq!(m.name, "app");
         assert!(m.dependencies.contains_key("mylib"));
@@ -1585,23 +1674,21 @@ mod tests {
             &repos,
             "outer",
             &[
-                ("hella.toml", &lib_manifest(&[("inner", inner.to_str().unwrap())])),
+                (
+                    "hella.toml",
+                    &lib_manifest(&[("inner", inner.to_str().unwrap())]),
+                ),
                 ("outer.hll", "int twice() do\n    return 84\nend\n"),
             ],
             &["v1.0.0"],
         );
 
-        run_add(
-            &e.project,
-            &e.pkg,
-            &e.cache,
-            outer.to_str().unwrap(),
-            None,
-        )
-        .unwrap();
+        run_add(&e.project, &e.pkg, &e.cache, outer.to_str().unwrap(), None)
+            .unwrap();
 
         // Manifest gained exactly one direct dep; the file header survived.
-        let text = std::fs::read_to_string(e.project.join("hella.toml")).unwrap();
+        let text =
+            std::fs::read_to_string(e.project.join("hella.toml")).unwrap();
         assert!(text.contains("# my project"));
         let m = manifest::parse_manifest(&text).unwrap();
         assert_eq!(m.dependencies.len(), 1);
@@ -1609,7 +1696,8 @@ mod tests {
         // Lock pins the full closure.
         let lock = manifest::read_lockfile(&e.project).unwrap().unwrap();
         assert_eq!(lock.packages.len(), 2);
-        let names: Vec<&str> = lock.packages.iter().map(|p| p.name.as_str()).collect();
+        let names: Vec<&str> =
+            lock.packages.iter().map(|p| p.name.as_str()).collect();
         assert!(names.contains(&"outer") && names.contains(&"inner"));
         // Slots carry sources + markers, and the resolver sees them.
         let bases = modules::dep_bases_for_project(&e.project, &e.pkg);
@@ -1623,24 +1711,34 @@ mod tests {
         );
         // Adding twice is an error, not a duplicate.
         assert!(
-            run_add(&e.project, &e.pkg, &e.cache, outer.to_str().unwrap(), None).is_err()
+            run_add(
+                &e.project,
+                &e.pkg,
+                &e.cache,
+                outer.to_str().unwrap(),
+                None
+            )
+            .is_err()
         );
         // A stray unmanaged slot is GC'd on remove; fetch state is pruned.
         let stray = e.pkg.join("github.com/o/stray/1.0.0");
         write_file(
             &stray.join(manifest::slot_marker_name()),
-            &manifest::serialize_slot_marker("github.com/o/stray", "1.0.0", "x"),
+            &manifest::serialize_slot_marker(
+                "github.com/o/stray",
+                "1.0.0",
+                "x",
+            ),
         );
         run_remove(&e.project, &e.pkg, "outer").unwrap();
-        let text = std::fs::read_to_string(e.project.join("hella.toml")).unwrap();
+        let text =
+            std::fs::read_to_string(e.project.join("hella.toml")).unwrap();
         assert!(!text.contains("outer"));
         assert!(text.contains("# my project"));
         let lock = manifest::read_lockfile(&e.project).unwrap().unwrap();
         assert!(lock.packages.is_empty());
         assert!(!stray.exists(), "orphan slots must be collected");
-        assert!(
-            modules::dep_bases_for_project(&e.project, &e.pkg).is_empty()
-        );
+        assert!(modules::dep_bases_for_project(&e.project, &e.pkg).is_empty());
     }
 
     #[test]
@@ -1654,7 +1752,10 @@ mod tests {
         );
         let url = repo.to_str().unwrap();
         let r = resolve_rev(url, None).unwrap();
-        assert_eq!((r.version.as_str(), r.tag.as_deref()), ("2.0.0", Some("v2.0.0")));
+        assert_eq!(
+            (r.version.as_str(), r.tag.as_deref()),
+            ("2.0.0", Some("v2.0.0"))
+        );
         let r = resolve_rev(url, Some("^1.0")).unwrap();
         assert_eq!(r.version, "1.0.0");
         // Bare versions float within ^ (Cargo-style); `=` pins exact.
@@ -1679,10 +1780,17 @@ mod tests {
             &[("hella.toml", &lib_manifest(&[("dup", x.to_str().unwrap())]))],
             &["v1.0.0"],
         );
-        run_add(&e.project, &e.pkg, &e.cache, mid.to_str().unwrap(), None).unwrap();
+        run_add(&e.project, &e.pkg, &e.cache, mid.to_str().unwrap(), None)
+            .unwrap();
         // Top-level `dup` (-> Y) conflicts with the transitive pin.
-        let err = run_add(&e.project, &e.pkg, &e.cache, y.to_str().unwrap(), Some("dup"))
-            .unwrap_err();
+        let err = run_add(
+            &e.project,
+            &e.pkg,
+            &e.cache,
+            y.to_str().unwrap(),
+            Some("dup"),
+        )
+        .unwrap_err();
         assert!(format!("{err:?}").contains("name conflict"), "{err:?}");
         // Incompatible version ranges conflict too.
         let err = resolve_and_fetch_closure(
@@ -1725,9 +1833,14 @@ mod tests {
             ],
             &["v1.0.0"],
         );
-        run_add(&e.project, &e.pkg, &e.cache, lib.to_str().unwrap(), None).unwrap();
-        let lock = std::fs::read_to_string(e.project.join("hella.lock")).unwrap();
-        let pin = manifest::read_lockfile(&e.project).unwrap().unwrap().packages;
+        run_add(&e.project, &e.pkg, &e.cache, lib.to_str().unwrap(), None)
+            .unwrap();
+        let lock =
+            std::fs::read_to_string(e.project.join("hella.lock")).unwrap();
+        let pin = manifest::read_lockfile(&e.project)
+            .unwrap()
+            .unwrap()
+            .packages;
         let slot = modules::pkg_slot_dir(&e.pkg, &pin[0].git, &pin[0].version);
         assert!(slot.is_dir());
         (e, lock, slot)
@@ -1736,11 +1849,15 @@ mod tests {
     #[test]
     fn ensure_is_noop_when_complete() {
         let (e, lock, _slot) = fetched_env("ensure-ok");
-        ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(false, false)).unwrap();
+        ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(false, false))
+            .unwrap();
         // Frozen and offline also pass when everything is fetched.
-        ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(false, true)).unwrap();
-        ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(true, false)).unwrap();
-        let after = std::fs::read_to_string(e.project.join("hella.lock")).unwrap();
+        ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(false, true))
+            .unwrap();
+        ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(true, false))
+            .unwrap();
+        let after =
+            std::fs::read_to_string(e.project.join("hella.lock")).unwrap();
         assert_eq!(after, lock, "complete projects must not rewrite the lock");
     }
 
@@ -1749,12 +1866,15 @@ mod tests {
         let (e, lock, slot) = fetched_env("ensure-fix");
         // Deleted slot comes back with the same marker.
         std::fs::remove_dir_all(&slot).unwrap();
-        ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(false, false)).unwrap();
+        ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(false, false))
+            .unwrap();
         assert!(slot.is_dir());
         // Deleted lock regenerates deterministically.
         std::fs::remove_file(e.project.join("hella.lock")).unwrap();
-        ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(false, false)).unwrap();
-        let after = std::fs::read_to_string(e.project.join("hella.lock")).unwrap();
+        ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(false, false))
+            .unwrap();
+        let after =
+            std::fs::read_to_string(e.project.join("hella.lock")).unwrap();
         assert_eq!(after, lock);
     }
 
@@ -1763,16 +1883,34 @@ mod tests {
         let (e, _lock, slot) = fetched_env("ensure-strict");
         std::fs::remove_dir_all(&slot).unwrap();
         assert!(
-            ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(true, false)).is_err()
+            ensure_deps(
+                &e.project,
+                &e.pkg,
+                &e.cache,
+                &ensure_opts(true, false)
+            )
+            .is_err()
         );
         assert!(
-            ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(false, true)).is_err()
+            ensure_deps(
+                &e.project,
+                &e.pkg,
+                &e.cache,
+                &ensure_opts(false, true)
+            )
+            .is_err()
         );
         // And a missing lock is a frozen error too.
         std::fs::remove_file(e.project.join("hella.lock")).unwrap();
         let _ = std::fs::create_dir_all(&slot); // slot present but unpinned
         assert!(
-            ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(false, true)).is_err()
+            ensure_deps(
+                &e.project,
+                &e.pkg,
+                &e.cache,
+                &ensure_opts(false, true)
+            )
+            .is_err()
         );
     }
 
@@ -1828,7 +1966,8 @@ mod tests {
         cleanup_tool(&tool);
         assert!(!tool.dir.exists());
         // Explicit --bin wins over the manifest name.
-        let tool = prepare_tool(&cache, repo.to_str().unwrap(), Some("custom")).unwrap();
+        let tool = prepare_tool(&cache, repo.to_str().unwrap(), Some("custom"))
+            .unwrap();
         assert_eq!(tool.name, "custom");
         cleanup_tool(&tool);
         let _ = std::fs::remove_dir_all(&root);
@@ -1839,7 +1978,12 @@ mod tests {
         let root = scratch("tool-noentry");
         let cache = root.join("cache");
         std::fs::create_dir_all(&cache).unwrap();
-        let repo = make_repo(&root, "libonly", &[("lib.hll", "// lib\n")], &["v1.0.0"]);
+        let repo = make_repo(
+            &root,
+            "libonly",
+            &[("lib.hll", "// lib\n")],
+            &["v1.0.0"],
+        );
         assert!(prepare_tool(&cache, repo.to_str().unwrap(), None).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1853,7 +1997,10 @@ mod tests {
         write_file(&bin.join("mytool.hellastamp"), "profile=release\n");
         run_uninstall(&bin, "mytool").unwrap();
         assert!(!bin.join("mytool").exists());
-        assert!(!bin.join("mytool.hellastamp").exists(), "stamp sidecar goes too");
+        assert!(
+            !bin.join("mytool.hellastamp").exists(),
+            "stamp sidecar goes too"
+        );
         assert!(run_uninstall(&bin, "mytool").is_err());
         assert!(run_uninstall(&bin, "../evil").is_err());
         let _ = std::fs::remove_dir_all(&root);
@@ -1886,7 +2033,8 @@ mod tests {
             &[("hella.toml", &lib_manifest(&[])), ("lib.hll", "// v1\n")],
             &["v1.0.0"],
         );
-        run_add(&e.project, &e.pkg, &e.cache, lib.to_str().unwrap(), None).unwrap();
+        run_add(&e.project, &e.pkg, &e.cache, lib.to_str().unwrap(), None)
+            .unwrap();
         assert_eq!(lock_versions(&e.project)["lib"], "1.0.0");
         let old_slot = modules::pkg_slot_dir(
             &e.pkg,
@@ -1910,15 +2058,20 @@ mod tests {
         let repos = scratch("update-sub-repos");
         let a = make_repo(&repos, "a", &[("a.hll", "// a\n")], &["v1.0.0"]);
         let b = make_repo(&repos, "b", &[("b.hll", "// b\n")], &["v2.0.0"]);
-        run_add(&e.project, &e.pkg, &e.cache, a.to_str().unwrap(), None).unwrap();
-        run_add(&e.project, &e.pkg, &e.cache, b.to_str().unwrap(), None).unwrap();
+        run_add(&e.project, &e.pkg, &e.cache, a.to_str().unwrap(), None)
+            .unwrap();
+        run_add(&e.project, &e.pkg, &e.cache, b.to_str().unwrap(), None)
+            .unwrap();
         commit_tag(&a, "v2.txt", "v1.5.0");
         commit_tag(&b, "v3.txt", "v2.5.0");
         run_update(&e.project, &e.pkg, &e.cache, &["a".to_string()]).unwrap();
         let versions = lock_versions(&e.project);
         assert_eq!(versions["a"], "1.5.0");
         assert_eq!(versions["b"], "2.0.0", "untargeted deps stay pinned");
-        assert!(run_update(&e.project, &e.pkg, &e.cache, &["nope".to_string()]).is_err());
+        assert!(
+            run_update(&e.project, &e.pkg, &e.cache, &["nope".to_string()])
+                .is_err()
+        );
     }
 
     #[test]
@@ -1931,7 +2084,8 @@ mod tests {
             &[("hella.toml", &lib_manifest(&[])), ("lib.hll", "// v\n")],
             &["v1.0.0"],
         );
-        run_add(&e.project, &e.pkg, &e.cache, lib.to_str().unwrap(), None).unwrap();
+        run_add(&e.project, &e.pkg, &e.cache, lib.to_str().unwrap(), None)
+            .unwrap();
         // Fetch restores a wiped cache from pins alone.
         std::fs::remove_dir_all(&e.pkg).unwrap();
         std::fs::create_dir_all(&e.pkg).unwrap();
@@ -1943,7 +2097,11 @@ mod tests {
         let stray = e.pkg.join("github.com/o/stray/1.0.0");
         write_file(
             &stray.join(manifest::slot_marker_name()),
-            &manifest::serialize_slot_marker("github.com/o/stray", "1.0.0", "x"),
+            &manifest::serialize_slot_marker(
+                "github.com/o/stray",
+                "1.0.0",
+                "x",
+            ),
         );
         let removed = run_clean_project(&e.project, &e.pkg).unwrap();
         assert_eq!(removed, 1);
