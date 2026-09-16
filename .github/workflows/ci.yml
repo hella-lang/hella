@@ -108,15 +108,21 @@ jobs:
           cargo test -p hella-compiler --lib -- --test-threads=1 > /tmp/triage-single.log 2>&1
           echo "single-thread exit: $?"
           tail -12 /tmp/triage-single.log
-          echo "--- 4. one trivial codegen test alone (first-touch check: ---"
-          echo "---     crash here == every LLVM touch crashes, environmental) ---"
-          cargo test -p hella-compiler --lib -- codegen::tests::void_extension_method_verifies > /tmp/triage-one.log 2>&1
-          echo "single-test exit: $?"
-          tail -6 /tmp/triage-one.log
-          echo "--- 5. suspect test alone (confirms snippet-specific crash) ---"
-          cargo test -p hella-compiler --lib -- codegen::tests::args_len_observes_argc > /tmp/triage-suspect.log 2>&1
-          echo "suspect-test exit: $?"
-          tail -6 /tmp/triage-suspect.log
+          echo "--- 4. per-test crash map (PASS/FAIL/CRASH per codegen test) ---"
+          cargo test -p hella-compiler --lib -- --list > /tmp/triage-names.log 2>&1
+          grep ": test$" /tmp/triage-names.log | sed 's/: test$//' | grep "^codegen" > /tmp/triage-codegen-names.txt
+          wc -l < /tmp/triage-codegen-names.txt
+          while IFS= read -r t; do
+            cargo test -p hella-compiler --lib -- --exact "$t" > /tmp/triage-one.log 2>&1
+            if grep -q "0xc0000005\|STATUS_ACCESS_VIOLATION" /tmp/triage-one.log; then
+              echo "CRASH $t"
+            elif grep -q "test result: ok" /tmp/triage-one.log; then
+              echo "PASS  $t"
+            else
+              echo "FAIL  $t"
+              tail -20 /tmp/triage-one.log
+            fi
+          done < /tmp/triage-codegen-names.txt
           exit 0
 
       - name: Workspace tests
