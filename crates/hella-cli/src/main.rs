@@ -94,6 +94,14 @@ enum Commands {
     Install(InstallArgs),
     /// Uninstall a globally installed Hella tool
     Uninstall(UninstallArgs),
+    /// Download all locked dependencies into the cache (CI-friendly)
+    Fetch,
+    /// Update dependencies to the newest matching revisions
+    Update(UpdateArgs),
+    /// Print the dependency tree
+    List,
+    /// Clean orphaned slots (in a project) or the whole cache (`--cache`)
+    Clean(CleanArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -302,6 +310,19 @@ struct UninstallArgs {
     tool: String,
 }
 
+#[derive(Parser, Debug)]
+struct UpdateArgs {
+    /// Dependencies to update (default: all)
+    names: Vec<String>,
+}
+
+#[derive(Parser, Debug)]
+struct CleanArgs {
+    /// Empty the whole package cache instead of just project orphans
+    #[arg(long, default_value_t = false)]
+    cache: bool,
+}
+
 /// Shared knobs for the compile pipeline (used by `build`, `run` and `check`).
 struct CompileOptions<'a> {
     file: &'a Path,
@@ -340,6 +361,10 @@ fn main() -> miette::Result<()> {
         Commands::Remove(args) => run_remove(args),
         Commands::Install(args) => run_install(args),
         Commands::Uninstall(args) => run_uninstall(args),
+        Commands::Fetch => run_fetch(),
+        Commands::Update(args) => run_update(args),
+        Commands::List => run_list(),
+        Commands::Clean(args) => run_clean(args),
     }
 }
 
@@ -809,6 +834,52 @@ fn run_uninstall(args: UninstallArgs) -> miette::Result<()> {
         ));
     };
     pkg::run_uninstall(&bin_dir, &args.tool)
+}
+
+/// Resolve the current project root or error with the standard hint.
+fn project_root_or_err(what: &str) -> miette::Result<PathBuf> {
+    let cwd = std::env::current_dir().map_err(|e| {
+        miette::miette!("failed to read current directory: {e}")
+    })?;
+    find_project_root(&cwd).ok_or_else(|| {
+        miette::miette!(
+            "not in a Hella project (no hella.toml found in {} or parents); run `hella new <name>` first (`{what}` needs a project)",
+            cwd.display(),
+        )
+    })
+}
+
+/// Download all locked dependencies into the cache.
+fn run_fetch() -> miette::Result<()> {
+    let root = project_root_or_err("hella fetch")?;
+    let (pkg_root, cache_root) = pkg_dirs()?;
+    pkg::run_fetch(&root, &pkg_root, &cache_root)
+}
+
+/// Update dependencies to the newest matching revisions.
+fn run_update(args: UpdateArgs) -> miette::Result<()> {
+    let root = project_root_or_err("hella update")?;
+    let (pkg_root, cache_root) = pkg_dirs()?;
+    pkg::run_update(&root, &pkg_root, &cache_root, &args.names)
+}
+
+/// Print the dependency tree.
+fn run_list() -> miette::Result<()> {
+    let root = project_root_or_err("hella list")?;
+    let (pkg_root, _) = pkg_dirs()?;
+    pkg::run_list(&root, &pkg_root)
+}
+
+/// Clean orphaned slots (in a project) or the whole cache (`--cache`).
+fn run_clean(args: CleanArgs) -> miette::Result<()> {
+    let (pkg_root, cache_root) = pkg_dirs()?;
+    if args.cache {
+        pkg::run_clean_cache(&pkg_root, &cache_root)?;
+        return Ok(());
+    }
+    let root = project_root_or_err("hella clean")?;
+    pkg::run_clean_project(&root, &pkg_root)?;
+    Ok(())
 }
 
 /// Install the embedded standard library (`stdlib/**/*.hll` baked in by

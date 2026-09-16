@@ -177,4 +177,74 @@ mod tests {
             "expected unresolvable-import diagnostic: {diags:?}"
         );
     }
+
+    /// Scoped env override with restore-on-drop (tests share one process).
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: this test binary sets HELLA_HOME in exactly one test;
+            // no other test reads it concurrently.
+            unsafe { std::env::set_var(key, value) };
+            EnvGuard { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dependency_import_resolves_through_lockfile() {
+        // Hermetic home: the resolver must find the locked slot here and
+        // nowhere else (no network, no real ~/.hella involvement).
+        let home = std::env::temp_dir().join(format!(
+            "hella-lsp-dep-home-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        let _guard = EnvGuard::set(
+            "HELLA_HOME",
+            home.to_str().expect("temp dir must be UTF-8"),
+        );
+        let git = "example.com/test/lib";
+        std::fs::create_dir_all(home.join("pkg").join(git).join("1.0.0")).unwrap();
+        std::fs::write(
+            home.join("pkg").join(git).join("1.0.0/mylib.hll"),
+            "int answer() do\n    return 42\nend\n",
+        )
+        .unwrap();
+
+        let dir = scratch_project();
+        std::fs::write(
+            dir.join("hella.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nmylib = { git = \"example.com/test/lib\", version = \"1.0.0\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("hella.lock"),
+            "[[package]]\nname = \"mylib\"\ngit = \"example.com/test/lib\"\n\
+             version = \"1.0.0\"\nrev = \"abc123\"\n",
+        )
+        .unwrap();
+        let main = dir.join("main.hll");
+        let src = "import mylib\n\nvoid main() do\n    int y = answer()\nend\n";
+        std::fs::write(&main, src).unwrap();
+        let diags = diagnostics(src, Some(&main));
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }

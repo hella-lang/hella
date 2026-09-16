@@ -340,21 +340,9 @@ fn resolve_rev(url: &str, req: Option<&str>) -> miette::Result<Resolved> {
     }
     let req = req.unwrap_or("latest");
 
-    // Exact tag (`1.2.3` also matches `v1.2.3`).
-    if let Some(t) = refs.tags.iter().find(|t| {
-        t.name == req || strip_v(&t.name) == strip_v(req)
-    }) {
-        let version = semver::Version::parse(strip_v(&t.name))
-            .map(|v| v.to_string())
-            .unwrap_or_else(|_| t.name.clone());
-        return Ok(Resolved {
-            version,
-            rev: t.sha.clone(),
-            tag: Some(t.name.clone()),
-            needs_rev_parse: false,
-        });
-    }
-    // Semver range over tags.
+    // Semver range over tags: `1.0.0` means `^1.0.0` (Cargo-style), so
+    // resolution floats to the newest matching tag and `update` can bump.
+    // Use `=1.0.0` to pin one exact tag.
     if let Ok(range) = semver::VersionReq::parse(strip_v(req)) {
         if let Some((v, t)) = pool.iter().rev().find(|(v, _)| range.matches(v)) {
             return Ok(Resolved {
@@ -367,6 +355,18 @@ fn resolve_rev(url: &str, req: Option<&str>) -> miette::Result<Resolved> {
         return Err(miette::miette!(
             "no tag of `{url}` satisfies `{req}`"
         ));
+    }
+    // Exact tag name (non-semver tags like `stable` or `nightly`).
+    if let Some(t) = refs.tags.iter().find(|t| t.name == req) {
+        let version = semver::Version::parse(strip_v(&t.name))
+            .map(|v| v.to_string())
+            .unwrap_or_else(|_| t.name.clone());
+        return Ok(Resolved {
+            version,
+            rev: t.sha.clone(),
+            tag: Some(t.name.clone()),
+            needs_rev_parse: false,
+        });
     }
     // Branch name or commit SHA: verify after clone.
     Ok(Resolved {
@@ -1004,8 +1004,309 @@ pub fn run_remove(root: &Path, pkg_root: &Path, name: &str) -> miette::Result<()
 }
 
 // ---------------------------------------------------------------------------
-// install / uninstall (global tools)
+// fetch / update / list / clean
 // ---------------------------------------------------------------------------
+
+fn write_lockfile(root: &Path, packages: Vec<LockedDependency>) -> miette::Result<()> {
+    std::fs::write(
+        root.join("hella.lock"),
+        manifest::serialize_lockfile(&Lockfile { packages }),
+    )
+    .map_err(|e| miette::miette!("failed to write hella.lock: {e}"))
+}
+
+/// `hella fetch`: ensure every locked dependency is on disk (CI-friendly:
+/// resolves + writes `hella.lock` when allowed, then reports the count).
+pub fn run_fetch(
+    root: &Path,
+    pkg_root: &Path,
+    cache_root: &Path,
+) -> miette::Result<()> {
+    ensure_deps(
+        root,
+        pkg_root,
+        cache_root,
+        &EnsureOptions {
+            offline: false,
+            frozen: false,
+        },
+    )?;
+    let count = manifest::read_lockfile(root)
+        .map_err(|e| miette::miette!("invalid hella.lock: {e}"))?
+        .map(|l| l.packages.len())
+        .unwrap_or(0);
+    eprintln!("Fetched {count} package(s)");
+    Ok(())
+}
+
+/// `hella update [names...]`: drop the pins for `names` (default: every
+/// pin — a full re-resolve) and fetch the newest matching revisions, then
+/// prune newly-orphaned transitive pins and collect their slots.
+pub fn run_update(
+    root: &Path,
+    pkg_root: &Path,
+    cache_root: &Path,
+    names: &[String],
+) -> miette::Result<()> {
+    let manifest = manifest::read_manifest_file(root)
+        .map_err(|e| miette::miette!("invalid hella.toml: {e}"))?
+        .ok_or_else(|| {
+            miette::miette!("no hella.toml in {}", root.display())
+        })?;
+    if manifest.dependencies.is_empty() {
+        eprintln!("Nothing to update (no dependencies)");
+        return Ok(());
+    }
+    let targets: Vec<String> = if names.is_empty() {
+        // Full re-resolve: drop every pin so all revisions float newest.
+        Vec::new()
+    } else {
+        for n in names {
+            if !manifest.dependencies.contains_key(n) {
+                return Err(miette::miette!(
+                    "no dependency named `{n}` (see `[dependencies]` in hella.toml)"
+                ));
+            }
+        }
+        names.to_vec()
+    };
+    let old_lock = manifest::read_lockfile(root)
+        .map_err(|e| miette::miette!("invalid hella.lock: {e}"))?
+        .unwrap_or_default();
+    let old_by_name: BTreeMap<&str, &LockedDependency> = old_lock
+        .packages
+        .iter()
+        .map(|p| (p.name.as_str(), p))
+        .collect();
+    // Interim lock: without the targets (or fully empty) so the fixpoint
+    // re-resolves them at their newest matching revisions.
+    let interim: Vec<LockedDependency> = if targets.is_empty() {
+        Vec::new() // full re-resolve
+    } else {
+        old_lock
+            .packages
+            .iter()
+            .filter(|p| !targets.contains(&p.name))
+            .cloned()
+            .collect()
+    };
+    write_lockfile(root, interim)?;
+    ensure_deps(
+        root,
+        pkg_root,
+        cache_root,
+        &EnsureOptions {
+            offline: false,
+            frozen: false,
+        },
+    )?;
+    let new_lock = manifest::read_lockfile(root)
+        .map_err(|e| miette::miette!("invalid hella.lock: {e}"))?
+        .unwrap_or_default();
+    let pruned = reachable_pins(&manifest.dependencies, &new_lock, pkg_root);
+    let pruned_lock = Lockfile { packages: pruned };
+    write_lockfile(
+        root,
+        pruned_lock.packages.clone(),
+    )?;
+    let removed = gc_unreferenced_slots(pkg_root, &pruned_lock)?;
+
+    let new_by_name: BTreeMap<&str, &LockedDependency> = pruned_lock
+        .packages
+        .iter()
+        .map(|p| (p.name.as_str(), p))
+        .collect();
+    let report: Vec<&String> = if targets.is_empty() {
+        manifest.dependencies.keys().collect()
+    } else {
+        targets.iter().collect()
+    };
+    for name in report {
+        match (old_by_name.get(name.as_str()), new_by_name.get(name.as_str())) {
+            (Some(o), Some(n)) if o.version != n.version || o.rev != n.rev => {
+                eprintln!("Updated {name} {} → {}", o.version, n.version);
+            }
+            (Some(o), Some(_)) => {
+                eprintln!("{name} already current ({})", o.version);
+            }
+            (None, Some(n)) => {
+                eprintln!("Pinned {name} {}", n.version);
+            }
+            (_, None) => {
+                eprintln!("warning: {name} has no pin after update");
+            }
+        }
+    }
+    if removed > 0 {
+        eprintln!("({removed} orphaned slot(s) cleaned)");
+    }
+    Ok(())
+}
+
+/// One line of `hella list`: the pin plus its source, or `(unpinned)`.
+fn describe_pin(name: &str, pin: Option<&LockedDependency>) -> String {
+    match pin {
+        Some(p) => format!(
+            "{name} {} ({} @{})",
+            p.version,
+            p.git,
+            &p.rev[..p.rev.len().min(12)],
+        ),
+        None => format!("{name} (unpinned)"),
+    }
+}
+
+/// `hella list`: print the dependency tree (direct deps with their
+/// transitive closure from fetched slot manifests). Cycle-safe.
+pub fn run_list(root: &Path, pkg_root: &Path) -> miette::Result<()> {
+    let manifest = manifest::read_manifest_file(root)
+        .map_err(|e| miette::miette!("invalid hella.toml: {e}"))?
+        .ok_or_else(|| miette::miette!("no hella.toml in {}", root.display()))?;
+    if manifest.dependencies.is_empty() {
+        eprintln!("No dependencies");
+        return Ok(());
+    }
+    let lock = manifest::read_lockfile(root)
+        .map_err(|e| miette::miette!("invalid hella.lock: {e}"))?
+        .unwrap_or_default();
+    let by_name: BTreeMap<&str, &LockedDependency> = lock
+        .packages
+        .iter()
+        .map(|p| (p.name.as_str(), p))
+        .collect();
+    eprintln!("{} {}", manifest.name, manifest.version);
+    let mut direct: Vec<&String> = manifest.dependencies.keys().collect();
+    direct.sort();
+    for (i, name) in direct.iter().enumerate() {
+        let last = i + 1 == direct.len();
+        print_list_subtree(
+            name,
+            by_name.get(name.as_str()).copied(),
+            pkg_root,
+            &by_name,
+            &mut HashSet::new(),
+            String::new(),
+            last,
+            true,
+        );
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn print_list_subtree(
+    name: &str,
+    pin: Option<&LockedDependency>,
+    pkg_root: &Path,
+    by_name: &BTreeMap<&str, &LockedDependency>,
+    visited: &mut HashSet<String>,
+    prefix: String,
+    last: bool,
+    is_root: bool,
+) {
+    let branch = if is_root {
+        ""
+    } else if last {
+        "└── "
+    } else {
+        "├── "
+    };
+    let mut line = format!("{prefix}{branch}{}", describe_pin(name, pin));
+    if !is_root && !visited.insert(name.to_string()) {
+        line.push_str(" (cycle)");
+        eprintln!("{line}");
+        return;
+    }
+    eprintln!("{line}");
+    let Some(pin) = pin else {
+        return;
+    };
+    let slot = modules::pkg_slot_dir(pkg_root, &pin.git, &pin.version);
+    let Ok(Some(child)) = manifest::read_manifest_file(&slot) else {
+        return;
+    };
+    let mut names: Vec<&String> = child.dependencies.keys().collect();
+    names.sort();
+    let child_prefix = if is_root {
+        String::new()
+    } else {
+        format!("{prefix}{}", if last { "    " } else { "│   " })
+    };
+    for (i, cn) in names.iter().enumerate() {
+        print_list_subtree(
+            cn,
+            by_name.get(cn.as_str()).copied(),
+            pkg_root,
+            by_name,
+            visited,
+            child_prefix.clone(),
+            i + 1 == names.len(),
+            false,
+        );
+    }
+}
+
+/// `hella clean` (in a project): prune pins unreachable from the manifest
+/// and delete orphaned slots. Returns the slot count removed.
+pub fn run_clean_project(root: &Path, pkg_root: &Path) -> miette::Result<usize> {
+    let manifest = manifest::read_manifest_file(root)
+        .map_err(|e| miette::miette!("invalid hella.toml: {e}"))?
+        .ok_or_else(|| miette::miette!("no hella.toml in {}", root.display()))?;
+    let old_lock = manifest::read_lockfile(root)
+        .map_err(|e| miette::miette!("invalid hella.lock: {e}"))?
+        .unwrap_or_default();
+    let pruned = reachable_pins(&manifest.dependencies, &old_lock, pkg_root);
+    let pruned_lock = Lockfile { packages: pruned };
+    write_lockfile(root, pruned_lock.packages.clone())?;
+    let removed = gc_unreferenced_slots(pkg_root, &pruned_lock)?;
+    eprintln!("Cleaned {removed} orphaned slot(s)");
+    Ok(removed)
+}
+
+/// `hella clean --cache` (anywhere): empty the whole `pkg/` cache and
+/// remove stale fetch/install staging dirs. `lib/` (stdlib) and `bin/`
+/// (tools) are never touched.
+pub fn run_clean_cache(pkg_root: &Path, cache_root: &Path) -> miette::Result<usize> {
+    let mut removed = 0usize;
+    if pkg_root.is_dir() {
+        for entry in std::fs::read_dir(pkg_root)
+            .map_err(|e| miette::miette!("failed to read {}: {e}", pkg_root.display()))?
+            .flatten()
+        {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                std::fs::remove_dir_all(&path).map_err(|e| {
+                    miette::miette!("failed to remove {}: {e}", path.display())
+                })?;
+            } else {
+                std::fs::remove_file(&path).map_err(|e| {
+                    miette::miette!("failed to remove {}: {e}", path.display())
+                })?;
+            }
+            removed += 1;
+        }
+    }
+    if cache_root.is_dir() {
+        for entry in std::fs::read_dir(cache_root)
+            .map_err(|e| {
+                miette::miette!("failed to read {}: {e}", cache_root.display())
+            })?
+            .flatten()
+        {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if (name.starts_with("hella-fetch-") || name.starts_with("hella-install-"))
+                && entry.file_type().is_ok_and(|t| t.is_dir())
+            {
+                std::fs::remove_dir_all(&entry.path()).map_err(|e| {
+                    miette::miette!("failed to remove {}: {e}", entry.path().display())
+                })?;
+                removed += 1;
+            }
+        }
+    }
+    eprintln!("Cleared {removed} cached entr(ies)");
+    Ok(removed)
+}
 
 /// A tool source staged in a temp dir: the caller compiles it, then
 /// [`cleanup_tool`] removes the staging area.
@@ -1356,6 +1657,12 @@ mod tests {
         assert_eq!((r.version.as_str(), r.tag.as_deref()), ("2.0.0", Some("v2.0.0")));
         let r = resolve_rev(url, Some("^1.0")).unwrap();
         assert_eq!(r.version, "1.0.0");
+        // Bare versions float within ^ (Cargo-style); `=` pins exact.
+        // (Floating itself is covered by the update tests: 1.0.0 → 1.5.0.)
+        let r = resolve_rev(url, Some("1.0.0")).unwrap();
+        assert_eq!(r.version, "1.0.0");
+        let r = resolve_rev(url, Some("=1.0.0")).unwrap();
+        assert_eq!(r.version, "1.0.0");
         assert!(resolve_rev(url, Some(">=9.0")).is_err());
     }
 
@@ -1550,5 +1857,104 @@ mod tests {
         assert!(run_uninstall(&bin, "mytool").is_err());
         assert!(run_uninstall(&bin, "../evil").is_err());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn commit_tag(repo: &Path, file: &str, tag: &str) {
+        write_file(&repo.join(file), tag);
+        git_ok(repo, &["add", "-A"]);
+        git_ok(repo, &["commit", "-m", tag, "--quiet"]);
+        git_ok(repo, &["tag", tag]);
+    }
+
+    fn lock_versions(project: &Path) -> BTreeMap<String, String> {
+        manifest::read_lockfile(project)
+            .unwrap()
+            .unwrap()
+            .packages
+            .into_iter()
+            .map(|p| (p.name, p.version))
+            .collect()
+    }
+
+    #[test]
+    fn update_floats_to_newest_and_collects_old_slots() {
+        let e = env("update");
+        let repos = scratch("update-repos");
+        let lib = make_repo(
+            &repos,
+            "lib",
+            &[("hella.toml", &lib_manifest(&[])), ("lib.hll", "// v1\n")],
+            &["v1.0.0"],
+        );
+        run_add(&e.project, &e.pkg, &e.cache, lib.to_str().unwrap(), None).unwrap();
+        assert_eq!(lock_versions(&e.project)["lib"], "1.0.0");
+        let old_slot = modules::pkg_slot_dir(
+            &e.pkg,
+            &manifest::normalize_git_source(lib.to_str().unwrap()),
+            "1.0.0",
+        );
+        assert!(old_slot.is_dir());
+
+        commit_tag(&lib, "v2.txt", "v1.1.0");
+        run_update(&e.project, &e.pkg, &e.cache, &[]).unwrap();
+        assert_eq!(lock_versions(&e.project)["lib"], "1.1.0");
+        assert!(!old_slot.exists(), "superseded slots are collected");
+        // Idempotent: a second update reports current without changes.
+        run_update(&e.project, &e.pkg, &e.cache, &[]).unwrap();
+        assert_eq!(lock_versions(&e.project)["lib"], "1.1.0");
+    }
+
+    #[test]
+    fn update_named_subset_and_rejects_unknown() {
+        let e = env("update-sub");
+        let repos = scratch("update-sub-repos");
+        let a = make_repo(&repos, "a", &[("a.hll", "// a\n")], &["v1.0.0"]);
+        let b = make_repo(&repos, "b", &[("b.hll", "// b\n")], &["v2.0.0"]);
+        run_add(&e.project, &e.pkg, &e.cache, a.to_str().unwrap(), None).unwrap();
+        run_add(&e.project, &e.pkg, &e.cache, b.to_str().unwrap(), None).unwrap();
+        commit_tag(&a, "v2.txt", "v1.5.0");
+        commit_tag(&b, "v3.txt", "v2.5.0");
+        run_update(&e.project, &e.pkg, &e.cache, &["a".to_string()]).unwrap();
+        let versions = lock_versions(&e.project);
+        assert_eq!(versions["a"], "1.5.0");
+        assert_eq!(versions["b"], "2.0.0", "untargeted deps stay pinned");
+        assert!(run_update(&e.project, &e.pkg, &e.cache, &["nope".to_string()]).is_err());
+    }
+
+    #[test]
+    fn fetch_list_and_clean() {
+        let e = env("fetchlist");
+        let repos = scratch("fetchlist-repos");
+        let lib = make_repo(
+            &repos,
+            "lib",
+            &[("hella.toml", &lib_manifest(&[])), ("lib.hll", "// v\n")],
+            &["v1.0.0"],
+        );
+        run_add(&e.project, &e.pkg, &e.cache, lib.to_str().unwrap(), None).unwrap();
+        // Fetch restores a wiped cache from pins alone.
+        std::fs::remove_dir_all(&e.pkg).unwrap();
+        std::fs::create_dir_all(&e.pkg).unwrap();
+        run_fetch(&e.project, &e.pkg, &e.cache).unwrap();
+        assert_eq!(lock_versions(&e.project)["lib"], "1.0.0");
+        // List renders without error on a healthy project.
+        run_list(&e.project, &e.pkg).unwrap();
+        // Project clean collects a stray slot but keeps referenced ones.
+        let stray = e.pkg.join("github.com/o/stray/1.0.0");
+        write_file(
+            &stray.join(manifest::slot_marker_name()),
+            &manifest::serialize_slot_marker("github.com/o/stray", "1.0.0", "x"),
+        );
+        let removed = run_clean_project(&e.project, &e.pkg).unwrap();
+        assert_eq!(removed, 1);
+        assert!(!stray.exists());
+        assert_eq!(lock_versions(&e.project)["lib"], "1.0.0");
+        // Cache clean nukes pkg contents + staging, nothing else.
+        write_file(&e.cache.join("unrelated.txt"), "keep");
+        write_file(&e.cache.join("hella-fetch-1/x"), "stale");
+        let cleared = run_clean_cache(&e.pkg, &e.cache).unwrap();
+        assert!(cleared >= 2);
+        assert!(e.cache.join("unrelated.txt").is_file());
+        assert!(std::fs::read_dir(&e.pkg).unwrap().next().is_none());
     }
 }

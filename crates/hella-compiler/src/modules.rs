@@ -54,8 +54,16 @@ impl From<ImportError> for ParseError {
 /// `%USERPROFILE%\.hella` on Windows): parent of the stdlib `lib/` dir, the
 /// third-party `pkg/` cache, the `bin/` tool installs, and the `cache/`
 /// scratch area. `None` elsewhere / when the home variable is missing.
+///
+/// The `HELLA_HOME` environment variable, when set to a non-empty path,
+/// replaces the home directory outright (hermetic CI, isolated tests):
+/// `HELLA_HOME=/tmp/hh` puts the cache in `/tmp/hh/pkg`, and so on.
 pub fn hella_home() -> Option<PathBuf> {
-    #[cfg(unix)]
+    if let Ok(h) = std::env::var("HELLA_HOME") {
+        if !h.trim().is_empty() {
+            return Some(PathBuf::from(h));
+        }
+    }    #[cfg(unix)]
     {
         std::env::var("HOME")
             .ok()
