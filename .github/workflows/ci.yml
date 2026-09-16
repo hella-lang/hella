@@ -96,12 +96,17 @@ jobs:
       - name: Workspace tests
         run: cargo test --workspace
 
-      # Native-debug the Windows codegen-test segfault: run one crashing
-      # test under cdb (ships with the VS/SDK toolset; probed, never
-      # assumed) and print the fault + native stack. Purely informational,
-      # always exits 0. Must run AFTER Workspace tests (it debugs the
-      # binaries that step builds).
-      - name: Debug lib test crash (Windows)
+      # cargo test compiles bins only as test harnesses under
+      # target/debug/deps — the runnable CLI needs an explicit build.
+      - name: Build CLI
+        run: cargo build
+
+      # Native-debug the Windows `hella build` segfault: unit tests are
+      # green, but object emission dies. Runs the first crashing example
+      # under cdb and prints the fault + native stack. Purely
+      # informational, always exits 0. Must run AFTER Build CLI (it
+      # debugs the binary that step builds).
+      - name: Debug hella build crash (Windows)
         if: always() && runner.os == 'Windows'
         timeout-minutes: 30
         run: |
@@ -119,31 +124,20 @@ jobs:
             echo "NO-CDB-AVAILABLE"
             exit 0
           fi
-          TEST_EXE=""
-          echo "PWD=$(pwd)"
-          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
-          ls 2>&1 | head -8
+          HELLA=""
           for root in "$GITHUB_WORKSPACE" "." "D:/a/hella/hella"; do
-            cand="$(ls -t "$root"/target/debug/deps/hella_compiler-*.exe 2>/dev/null | head -1)"
-            if [ -x "$cand" ]; then TEST_EXE="$cand"; break; fi
+            cand="$(ls -t "$root"/target/debug/hella.exe 2>/dev/null | head -1)"
+            if [ -x "$cand" ]; then HELLA="$cand"; break; fi
           done
-          if [ ! -x "$TEST_EXE" ]; then
-            echo "NO-DIRECT-HIT; searching tree:"
-            find target -name 'hella_compiler-*.exe' 2>/dev/null | head -5
-            echo "--- target state ---"
-            ls target 2>&1 || true
-            ls target/debug/deps 2>&1 | head -20 || true
-            echo "(Empty tree: the build itself failed — read the Workspace tests step log, likely a link error.)"
+          if [ ! -x "$HELLA" ]; then
+            echo "NO-CLI-BINARY (Build CLI must have failed — read its log)"
             exit 0
           fi
-          echo "TEST_EXE=$TEST_EXE"
-          TEST_WIN="$(cygpath -w "$TEST_EXE")"
-          # Full suite, single-threaded: the void_extension crash is
-          # fixed, but the suite still dies a few tests in — catch the
-          # next crash site wherever it is.
+          echo "HELLA=$HELLA"
+          HELLA_WIN="$(cygpath -w "$HELLA")"
           for i in 1 2; do
             echo "--- cdb attempt $i ---"
-            "$CDB" -g -G -c "g;.lastevent;r;k L100;lm m LLVM*;q" "$TEST_WIN" --test-threads=1 > /tmp/cdb-run.log 2>&1
+            "$CDB" -g -G -c "g;.lastevent;r;k L100;lm m LLVM*;q" "$HELLA_WIN" build -f examples/abstraction.hll --force > /tmp/cdb-run.log 2>&1
             grep -i -m1 "c0000005\|access violation" /tmp/cdb-run.log && break
             echo "(no crash captured)"
           done
@@ -157,11 +151,6 @@ jobs:
           echo "=== llvm modules loaded ==="
           grep -i "llvm" /tmp/cdb-run.log | head -10
           exit 0
-
-      # cargo test compiles bins only as test harnesses under
-      # target/debug/deps — the runnable CLI needs an explicit build.
-      - name: Build CLI
-        run: cargo build
 
       - name: Build every example
         run: |
