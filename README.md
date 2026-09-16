@@ -38,8 +38,26 @@ cargo run -p hella -- run -f examples/hello_io.hll
 | `hella check` | Type-check the current project |
 | `hella check -f <file>` | Type-check a single file without generating code |
 | `hella new <name>` | Scaffold a project (`--lib` for a library instead of a binary) |
+| `hella fmt [paths]` | Format Hella sources in place (`--check` to verify only) |
 | `hella setup` | Install the embedded standard library to `~/.hella/lib` (`--force` to overwrite) |
 | `hella lsp` | Run the language server (LSP over stdio) |
+| `hella add <src>[@rev]` | Add a library dep from a git URL, `owner/repo`, or local path (`--name` to rename; pins exact SHA in `hella.lock`) |
+| `hella remove <name>` | Drop a library dep and collect orphaned cache slots |
+| `hella fetch` | Download all locked dependencies (CI-friendly) |
+| `hella update [names]` | Bump deps to the newest matching revisions (default: all) |
+| `hella list` | Print the dependency tree |
+| `hella clean [--cache]` | Prune orphaned slots (or empty the whole `pkg/` cache) |
+| `hella install <src>[@rev]` | Release-build a tool into `~/.hella/bin` (`--bin` to rename; never touches `hella.toml`) |
+| `hella uninstall <tool>` | Remove a tool from `~/.hella/bin` |
+
+Dependencies live in `hella.toml` (`[dependencies]`, short import names:
+`mylib = { git = "github.com/owner/repo", version = "1.2.3" }`), with exact
+SHAs pinned in `hella.lock` and sources cached under `~/.hella/pkg`
+(never edit by hand; slots carry markers verified against the lock).
+Version requests float within `^` (Cargo-style; `=1.2.3` pins one tag).
+`build`/`run`/`check` auto-fetch missing deps; pass `--offline` to forbid
+network access or `--frozen` to also forbid lockfile changes. Set
+`HELLA_HOME` to relocate `~/.hella` (hermetic CI).
 
 `hella build` / `hella run` (without `-f`) only work inside a project directory (marked by `hella.toml`, then `src/main.hll` or `src/lib.hll`). Use `-f`/`--file` for a single file outside a project.
 

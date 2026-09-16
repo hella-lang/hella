@@ -557,7 +557,13 @@ fn run_new(args: NewArgs) -> miette::Result<()> {
     let files = [
         (
             "hella.toml".to_string(),
-            format!("name = \"{name}\"\nversion = \"0.1.0\"\n"),
+            format!(
+                "name = \"{name}\"\nversion = \"0.1.0\"\n\
+                 \n\
+                 # Third-party libraries live here once added:\n\
+                 # `hella add github.com/owner/repo[@rev]` appends\n\
+                 # `[dependencies]` and pins the exact SHA in `hella.lock`.\n"
+            ),
         ),
         (format!("src/{entry_name}"), entry_src),
         (".gitignore".to_string(), "/out/\n".to_string()),

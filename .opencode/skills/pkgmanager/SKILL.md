@@ -42,13 +42,16 @@ tool  = { git = "github.com/repo/tool", version = "0.4.0", package = "tool::cli"
 
 * Table key = short import name used in `import mylib` / `import mylib::sub`.
 * `git` = host + path, no scheme (`github.com/...`), optional `https://` accepted.
-* `version` = semver tag request (`1.2.3`, `^1.2`, `latest`); resolved to an
-  exact tag/commit and pinned in `hella.lock`.
+* `version` = semver request (`1.2.3` means `^1.2.3` Cargo-style and floats
+  to the newest matching tag on `add`/`update`; `=1.2.3` pins one exact tag;
+  `latest` takes the newest stable tag). Every resolution pins the exact
+  commit SHA in `hella.lock` — never a moving name.
 * Optional `package` = sub-path inside the repo when the Hella module root
   is not the repo root.
-* Transitive deps come from each dep's own `hella.toml`; conflicts resolve
-  newest-compatible-wins, incompatibilities are a loud `add`/`fetch` error,
-  never a silent build break.
+* Transitive deps come from each dep's own `hella.toml`; first pin wins per
+  name (direct deps first) and a conflicting `git` source or an
+  incompatible version for the same name is a loud `add`/`fetch` error,
+  never a silent downgrade.
 
 ## Commands
 
@@ -88,11 +91,18 @@ are the project's responsibility.
 * Manifest/lock parsing lives in `hella-compiler` (`src/manifest.rs`) so CLI
   and LSP share it — never re-parse TOML by hand in the CLI.
 * `toml` + `semver` crates for manifest/versions; `git` via the `git`
-  CLI (shallow `--depth 1 --branch <tag>`), no libgit2 dependency for v1.
-* `pkg/<...>/<version>/` dirs are immutable: chmod read-only after fetch,
-  re-fetch on hash mismatch, never mutate in place.
-* Shallow clones can't resolve arbitrary SHAs — full clone fallback only
-  when `@<sha>` is requested.
+  CLI (tag `ls-remote` without cloning; shallow `--depth 1 --branch <tag>`,
+  full-clone fallback for SHAs/branches), no libgit2 dependency for v1.
+* `pkg/<...>/<version>/` slots are write-once: a failed fetch never leaves
+  a half-populated slot, and every slot carries a `.hella-slot` marker
+  (`git`/`version`/`rev`) that `remove`/`clean` use for GC and `build`
+  re-verifies on use. (Deliberately no read-only chmod: it breaks Windows
+  deletes for zero tamper benefit while markers + re-verify hold.)
+* `hella.toml` edits are surgical (comments and formatting survive; a
+  full rewrite is only the fallback when the edit would not parse).
+* `HELLA_HOME`, when set, replaces `~/.hella` outright (hermetic CI,
+  isolated tests). `build` freshness already covers dep files via the
+  `expand_imports` file set — no extra tracking needed.
 * Private repos reuse the user's existing git auth (SSH agent / credential
   helper); no token flags in v1.
 * Windows: same layout under `%USERPROFILE%\.hella`, binaries get `.exe`.
