@@ -54,11 +54,24 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           # Official upstream installer: deterministic pin, ships
-          # llvm-config.exe + dev libs that llvm-sys needs.
+          # llvm-config.exe + dev libs that llvm-sys needs. The NSIS
+          # /D flag is occasionally ignored, so locate the result
+          # instead of trusting the target dir, and fail loudly here
+          # (not deep inside the llvm-sys build) if it is absent.
           curl -sSL -o llvm-installer.exe https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-win64.exe
           MSYS_NO_PATHCONV=1 ./llvm-installer.exe /S /D=C:\LLVM
-          echo "C:\LLVM\bin" >> "$GITHUB_PATH"
-          echo "LLVM_SYS_211_PREFIX=C:\LLVM" >> "$GITHUB_ENV"
+          LLVMROOT=""
+          for cand in "C:/LLVM" "/c/Program Files/LLVM"; do
+            if [ -x "$cand/bin/llvm-config.exe" ]; then LLVMROOT="$cand"; break; fi
+          done
+          if [ -z "$LLVMROOT" ]; then
+            echo "llvm-config.exe not found; C:/LLVM tree:"
+            ls -R "C:/LLVM" 2>/dev/null | head -30 || echo "(no C:/LLVM at all)"
+            exit 1
+          fi
+          "$LLVMROOT/bin/llvm-config.exe" --version
+          echo "$LLVMROOT/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_211_PREFIX=$LLVMROOT" >> "$GITHUB_ENV"
 
       - name: Workspace tests
         run: cargo test --workspace

@@ -1223,8 +1223,15 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // `std::math` (or any `from "libm"` extern) may appear. The system
     // linker drops it when unused (`--as-needed`), so passing it
     // unconditionally is harmless.
+    //
+    // `-no-pie`: codegen emits absolute relocations (non-PIC objects),
+    // which the default PIE link on Linux rejects
+    // (`relocation R_X86_64_32 ... can not be used when making a PIE
+    // object`). Long term this belongs in codegen (PIC emission);
+    // the link flag is the minimal correct fix here.
     if cfg!(target_os = "linux") {
         link.arg("-lm");
+        link.arg("-no-pie");
     }
     let link_status = link.status().map_err(|e| {
         pb.abandon();
