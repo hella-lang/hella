@@ -9446,9 +9446,14 @@ pub fn compile_to_object(
 pub fn target_machine(
     opt: OptLevel,
 ) -> Result<inkwell::targets::TargetMachine, String> {
-    inkwell::targets::Target::initialize_all(
+    // Host-only init: we always emit for the default (host) triple below,
+    // and initializing every backend references LLVM target libs that some
+    // distributions (notably the upstream Windows tarball) do not ship,
+    // breaking the link with unresolved LLVMInitialize*Target symbols.
+    inkwell::targets::Target::initialize_native(
         &inkwell::targets::InitializationConfig::default(),
-    );
+    )
+    .map_err(|e| e.to_string())?;
     let triple = inkwell::targets::TargetMachine::get_default_triple();
     let target =
         inkwell::targets::Target::from_triple(&triple).map_err(|e| e.to_string())?;
