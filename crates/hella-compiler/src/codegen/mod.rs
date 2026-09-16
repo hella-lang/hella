@@ -275,12 +275,14 @@ impl<'ctx> Codegen<'ctx> {
                 _ => {}
             }
         }
-        if let Err(e) = self.module.verify() {
-            return Err(CodegenError {
-                message: format!("LLVM verify failed: {e}"),
-                span: prog.span,
-            });
-        }
+        // NOTE: no end-of-compile `module.verify()` here. Every construct
+        // is verified at its own lowering site (`func.verify(true)` on
+        // extensions, ctors, dtors, properties, operators, conversions),
+        // and `compile_to_object` verifies again before emission, so this
+        // would be redundant — and `LLVMVerifyModule` segfaults
+        // (STATUS_ACCESS_VIOLATION) on Windows for ordinary modules while
+        // the function-level checks pass. If that upstream issue is ever
+        // fixed, the check can come back as defense in depth.
         Ok(())
     }
 
