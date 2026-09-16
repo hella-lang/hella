@@ -6,3 +6,18 @@ members = [
     "crates/hella-fmt",
     "crates/hella-lsp",
 ]
+
+# Dependencies shared between crates live here; member manifests refer
+# to them with `dep = { workspace = true }`. Single-use deps stay in
+# the crate that needs them.
+[workspace.dependencies]
+# Only the host-family backends: the per-target init fns for the rest
+# reference LLVM target libs that some distributions (notably the
+# upstream Windows tarball) do not ship, breaking the link.
+# default-features off drops inkwell's default target-all.
+inkwell = { version = "0.10", default-features = false, features = ["llvm21-1", "target-x86", "target-aarch64"] }
+clap = { version = "4", features = ["derive"] }
+miette = { version = "7", features = ["fancy"] }
+semver = "1"
+hella-compiler = { path = "crates/hella-compiler" }
+hella-fmt = { path = "crates/hella-fmt" }

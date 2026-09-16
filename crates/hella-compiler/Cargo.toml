@@ -4,17 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# Only the host-family backends: the per-target init fns for the rest
-# reference LLVM target libs that some distributions (notably the
-# upstream Windows tarball) do not ship, breaking the link.
-# default-features off drops inkwell's default target-all.
-inkwell = { version = "0.10", default-features = false, features = ["llvm21-1", "target-x86", "target-aarch64"] }
+inkwell = { workspace = true }
 logos = "0.16.1"
-miette = { version = "7", features = ["fancy"] }
+miette = { workspace = true }
 thiserror = "2"
-clap = { version = "4", features = ["derive"] }
+clap = { workspace = true }
 toml = "1.1.6"
-semver = "1"
+semver = { workspace = true }
 
 [lib]
 name = "hella_compiler"
