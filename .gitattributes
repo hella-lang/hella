@@ -1,0 +1,9 @@
+# Normalize line endings: the Hella lexer treats CRLF as a newline, but a
+# stray CR inside a string literal would lex as content — keep sources LF.
+* text=auto
+*.hll text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.c text eol=lf
+*.yml text eol=lf

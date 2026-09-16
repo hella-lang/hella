@@ -1,0 +1,82 @@
+# CI: workspace tests + every example builds + every stdlib example runs,
+# on Ubuntu, Windows, and macOS. All steps run under bash (Git Bash on
+# Windows) so loops, pipes, and grep work identically everywhere.
+#
+# LLVM 21 is required by inkwell/llvm-sys 211 and must match exactly:
+# Ubuntu gets it from apt.llvm.org, macOS from the llvm@21 keg,
+# Windows from prebuilt upstream binaries.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install LLVM 21 (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          curl -sSL https://apt.llvm.org/llvm.sh -o llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 21
+          sudo apt-get install -y llvm-21-dev clang-21
+          sudo ln -sf /usr/bin/clang-21 /usr/local/bin/clang
+          echo "LLVM_SYS_211_PREFIX=/usr/lib/llvm-21" >> "$GITHUB_ENV"
+          echo "/usr/lib/llvm-21/bin" >> "$GITHUB_PATH"
+
+      - name: Install LLVM 21 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm@21
+          LLVMPREFIX="$(brew --prefix llvm@21)"
+          echo "LLVM_SYS_211_PREFIX=${LLVMPREFIX}" >> "$GITHUB_ENV"
+          echo "${LLVMPREFIX}/bin" >> "$GITHUB_PATH"
+
+      - name: Install LLVM 21 (Windows)
+        if: runner.os == 'Windows'
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "21.1"
+
+      - name: Workspace tests
+        run: cargo test --workspace
+
+      - name: Build every example
+        run: |
+          for f in examples/*.hll; do
+            ./target/debug/hella build -f "$f" --force || exit 1
+          done
+
+      - name: Run stdlib examples
+        run: |
+          printf 'Ada\n42\n' | ./examples/stdlib_io || exit 1
+          ./examples/stdlib_math | grep -q "math ok" || exit 1
+          ./examples/stdlib_string | grep -q "string ok" || exit 1
+          ./examples/stdlib_env | grep -q "env ok" || exit 1
+          ./examples/stdlib_fs | grep -q "fs ok" || exit 1
+          ./examples/stdlib_collections | grep -q "collections ok" || exit 1
+          ./examples/stdlib_fmt | grep -q "fmt ok" || exit 1
+
+      - name: Setup smoke test (installed stdlib outside the checkout)
+        run: |
+          ./target/debug/hella setup --force
+          mkdir -p /tmp/hella-setup-smoke
+          printf 'import std::io\nint main() do\n    println("hi")\n    return 0\nend\n' > /tmp/hella-setup-smoke/smoke.hll
+          ./target/debug/hella check -f /tmp/hella-setup-smoke/smoke.hll

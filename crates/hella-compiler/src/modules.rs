@@ -43,8 +43,9 @@ impl From<ImportError> for ParseError {
     }
 }
 
-/// Standard-library home on UNIX-like systems (`~/.hella/lib`).
-/// Populated by `hella setup`. `None` elsewhere / when `$HOME` is missing.
+/// Standard-library home (`~/.hella/lib` on UNIX-like systems,
+/// `%USERPROFILE%\.hella\lib` on Windows). Populated by `hella setup`.
+/// `None` elsewhere / when the home variable is missing.
 pub fn hella_lib_dir() -> Option<PathBuf> {
     #[cfg(unix)]
     {
@@ -52,7 +53,13 @@ pub fn hella_lib_dir() -> Option<PathBuf> {
             .ok()
             .map(|h| PathBuf::from(h).join(".hella").join("lib"))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        std::env::var("USERPROFILE")
+            .ok()
+            .map(|h| PathBuf::from(h).join(".hella").join("lib"))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         None
     }

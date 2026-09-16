@@ -1,6 +1,9 @@
 /target
 *.out
 *.o
+# Windows runtime shim materialized next to link outputs (removed unless
+# --keep-obj, but never tracked). Distinct from the runtime/hella_rt.c source.
+hella_rt_gen.c
 .DS_Store
 /examples/*
 !/examples/*.hll

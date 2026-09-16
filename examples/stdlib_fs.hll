@@ -1,11 +1,16 @@
 // stdlib_fs.hll — regression for std::fs
+//
+// NOTE: scratch files live in the process working directory (relative
+// paths), not /tmp — there is no /tmp on Windows. Run from the repo root
+// so `hella_fs_test_tmp.txt` lands next to the checkout, and the test
+// removes it on success.
 
 import std::fs
 import std::io
 import std::str
 
 int main() do
-    string path = "/tmp/hella_fs_test.txt"
+    string path = "hella_fs_test_tmp.txt"
     string data = "hello fs"
     string content = ""
     string content2 = ""
@@ -19,7 +24,7 @@ int main() do
     assert equals(content2, "hello fs!") is true
     removeFile(path)
     assert exists(path) is false
-    missing = readFile("/tmp/hella_no_such_file_xyz.txt")
+    missing = readFile("hella_no_such_file_xyz.txt")
     assert isEmpty(missing) is true
     println("fs ok")
     return 0

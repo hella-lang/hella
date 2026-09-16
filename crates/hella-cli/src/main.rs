@@ -13,8 +13,14 @@ use miette::Report;
 use hella_compiler::lexer::lex;
 
 // Standard-library sources embedded at build time by `crates/hella-cli/build.rs`
-// (`stdlib/**/*.hll`), used by `hella setup` to populate `~/.hella/lib`.
+// (`stdlib/**/*.hll`), used by `hella setup` to populate the user library dir.
 include!(concat!(env!("OUT_DIR"), "/stdlib_embedded.rs"));
+
+// Platform shim (`runtime/hella_rt.c`): POSIX names missing from the MSVC C
+// runtime (`write`, `setenv`, `unsetenv`, `access`, `strdup`), defined only
+// under `_WIN32`. Compiled and linked on Windows; nothing to do elsewhere.
+#[cfg(windows)]
+const HELLA_RT_C: &str = include_str!("../../../runtime/hella_rt.c");
 
 /// Hella brand green #00A693 as an ANSI truecolor style.
 fn brand_style() -> Style {
@@ -285,6 +291,16 @@ impl Project {
         self.root
             .join("out")
             .join(if release { "release" } else { "debug" })
+    }
+
+    /// Binary file name: `name` plus `.exe` on Windows, where the OS
+    /// requires an extension to execute a program.
+    fn bin_filename(&self) -> String {
+        if cfg!(windows) {
+            format!("{}.exe", self.bin_name)
+        } else {
+            self.bin_name.clone()
+        }
     }
 }
 
@@ -640,7 +656,7 @@ fn run_fmt(args: FmtArgs) -> miette::Result<()> {
 fn run_setup(args: SetupArgs) -> miette::Result<()> {
     let Some(dest_root) = hella_compiler::modules::hella_lib_dir() else {
         return Err(miette::miette!(
-            "`hella setup` is only supported on UNIX-like systems for now"
+            "cannot locate a home directory for `hella setup` (needs $HOME on Unix, %USERPROFILE% on Windows)"
         ));
     };
     let mut installed = 0usize;
@@ -756,7 +772,7 @@ fn run_build(args: BuildArgs) -> miette::Result<()> {
         entry
             .project
             .as_ref()
-            .map(|p| p.out_dir(args.release).join(&p.bin_name))
+            .map(|p| p.out_dir(args.release).join(p.bin_filename()))
     });
     let opts = CompileOptions {
         file: &entry.path,
@@ -806,7 +822,7 @@ fn run_run(args: RunArgs) -> miette::Result<()> {
     // Rebuilds are skipped while sources are unchanged (see freshness in
     // `compile`), so repeated `run` is cheap.
     let exe_path = match &entry.project {
-        Some(p) => p.out_dir(args.release).join(&p.bin_name),
+        Some(p) => p.out_dir(args.release).join(p.bin_filename()),
         None => default_exe_path(&entry.path, None),
     };
 
@@ -1160,20 +1176,63 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // ── Link ─────────────────────────────────────────────────────────
     pb.set_message(format!("Linking {}", exe_path.display()));
     let t_link = Instant::now();
-    let link_status = Command::new("clang")
-        .arg(&obj_path)
-        .arg("-o")
-        .arg(&exe_path)
-        .status()
-        .map_err(|e| {
+    let linker = find_linker().map_err(|e| {
+        pb.abandon();
+        e
+    })?;
+    let mut link = Command::new(&linker);
+    // Windows: the MSVC C runtime lacks a few POSIX names the stdlib
+    // declares (`write`, `setenv`, `unsetenv`, `access`, `strdup`), so
+    // compile the embedded `runtime/hella_rt.c` shim and link it along.
+    // The shim is a no-op TU everywhere else and is skipped there.
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut extra_paths: Vec<PathBuf> = Vec::new();
+    #[cfg(windows)]
+    {
+        let rt_src = obj_path.with_file_name("hella_rt_gen.c");
+        let rt_obj = obj_path.with_file_name("hella_rt_gen.o");
+        if let Err(e) = fs::write(&rt_src, HELLA_RT_C) {
             pb.abandon();
-            miette::miette!(
-                "failed to invoke clang: {e} — is Xcode CLT installed?"
-            )
-        })?;
+            return Err(miette::miette!(
+                "failed to write {}: {e}",
+                rt_src.display()
+            ));
+        }
+        extra_paths.push(rt_src.clone());
+        extra_paths.push(rt_obj.clone());
+        let cc_status = Command::new(&linker)
+            .arg("-c")
+            .arg(&rt_src)
+            .arg("-o")
+            .arg(&rt_obj)
+            .status()
+            .map_err(|e| {
+                pb.abandon();
+                miette::miette!("failed to invoke {linker} for runtime shim: {e}")
+            })?;
+        if !cc_status.success() {
+            pb.abandon();
+            return Err(miette::miette!(
+                "compiling the Windows runtime shim failed with {linker}"
+            ));
+        }
+        link.arg(&rt_obj);
+    }
+    link.arg(&obj_path).arg("-o").arg(&exe_path);
+    // Linux does not fold libm into libc: `-lm` is required wherever
+    // `std::math` (or any `from "libm"` extern) may appear. The system
+    // linker drops it when unused (`--as-needed`), so passing it
+    // unconditionally is harmless.
+    if cfg!(target_os = "linux") {
+        link.arg("-lm");
+    }
+    let link_status = link.status().map_err(|e| {
+        pb.abandon();
+        miette::miette!("failed to invoke {linker}: {e} — {}", link_hint())
+    })?;
     if !link_status.success() {
         pb.abandon();
-        return Err(miette::miette!("linking failed with clang"));
+        return Err(miette::miette!("linking failed with {linker}"));
     }
     pb.inc(1);
     if opts.verbose {
@@ -1187,6 +1246,9 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
 
     if !opts.keep_obj {
         let _ = fs::remove_file(&obj_path);
+        for extra in &extra_paths {
+            let _ = fs::remove_file(extra);
+        }
     }
     // Record what produced this binary so a later invocation can prove
     // freshness without recompiling (profile + toolchain version; sources
@@ -1206,6 +1268,39 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         ),
     );
     Ok(Some(exe_path))
+}
+
+/// C linker used for the final link (and the Windows runtime shim):
+/// `$HELLA_LINKER` wins, else the first available of `clang`, `cc`.
+/// `cc` covers Linux boxes without clang (typically gcc) while `clang`
+/// is the only practical driver on Windows (MSVC `link.exe` backend)
+/// and macOS (Xcode CLT).
+fn find_linker() -> miette::Result<String> {
+    if let Ok(l) = std::env::var("HELLA_LINKER") {
+        if !l.trim().is_empty() {
+            return Ok(l);
+        }
+    }
+    for cand in ["clang", "cc"] {
+        if Command::new(cand).arg("--version").output().is_ok() {
+            return Ok(cand.to_string());
+        }
+    }
+    Err(miette::miette!(
+        "no C linker found (tried `clang`, `cc`) — {}",
+        link_hint()
+    ))
+}
+
+/// Platform-appropriate hint for installing a C linker.
+fn link_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "install the Xcode command line tools (`xcode-select --install`)"
+    } else if cfg!(target_os = "windows") {
+        "install LLVM (https://releases.llvm.org/download.html) or set HELLA_LINKER"
+    } else {
+        "install clang or gcc (e.g. `apt install clang`) or set HELLA_LINKER"
+    }
 }
 
 /// Sidecar recording the profile + toolchain that produced a binary.
@@ -1299,7 +1394,8 @@ fn codegen_to_object(
 
 /// Default executable path: the input file with its extension stripped
 /// (`examples/hello.hll` → `examples/hello`), i.e. a proper binary with no
-/// `.out` suffix. An explicit `-o/--output` is used verbatim.
+/// `.out` suffix, plus `.exe` on Windows where the OS needs an extension
+/// to execute a program. An explicit `-o/--output` is used verbatim.
 fn default_exe_path(input: &Path, override_: Option<PathBuf>) -> PathBuf {
     if let Some(o) = override_ {
         return o;
@@ -1308,6 +1404,9 @@ fn default_exe_path(input: &Path, override_: Option<PathBuf>) -> PathBuf {
     // Strip only a real extension (e.g. `.hll`); extensionless input stays as-is.
     if input.extension().is_some() {
         p.set_extension("");
+    }
+    if cfg!(windows) && p.extension().is_none() {
+        p.set_extension("exe");
     }
     p
 }
