@@ -68,17 +68,24 @@ jobs:
           echo "C:/LLVM/bin" >> "$GITHUB_PATH"
           echo "LLVM_SYS_211_PREFIX=C:/LLVM" >> "$GITHUB_ENV"
 
-      # llvm-config --system-libs names libxml2s.lib but the tarball
-      # does not ship it under that name; the sibling libxml2 import
-      # lib satisfies the same symbols (DLL resolves via PATH above).
-      - name: Provide libxml2s.lib (Windows)
+      # llvm-config --system-libs names libs the tarball does not ship
+      # (currently libxml2s.lib). Nothing we link — IR building and
+      # object emission — references XML symbols, so a stub archive
+      # satisfies link.exe: unreferenced members are never pulled in.
+      # If a future LNK2001 names real xml symbols, this needs revisit.
+      - name: Stub missing LLVM system libs (Windows)
         if: runner.os == 'Windows'
         run: |
-          ls C:/LLVM/lib | grep -i -E "xml|zstd" || true
-          if [ ! -f C:/LLVM/lib/libxml2s.lib ] && [ -f C:/LLVM/lib/libxml2.lib ]; then
-            cp C:/LLVM/lib/libxml2.lib C:/LLVM/lib/libxml2s.lib
-            echo "aliased libxml2.lib as libxml2s.lib"
-          fi
+          ls C:/LLVM/lib | grep -i -E "xml|zstd" || echo "(no xml/zstd libs shipped)"
+          cd "$RUNNER_TEMP"
+          for lib in xml2s; do
+            if [ ! -f "C:/LLVM/lib/lib${lib}.lib" ]; then
+              echo "void hella_stub_${lib}(void) {}" > "stub_${lib}.c"
+              "C:/LLVM/bin/clang.exe" -c "stub_${lib}.c" -o "stub_${lib}.o"
+              "C:/LLVM/bin/llvm-ar.exe" rcs "C:/LLVM/lib/lib${lib}.lib" "stub_${lib}.o"
+              echo "stubbed lib${lib}.lib"
+            fi
+          done
 
       - name: Workspace tests
         run: cargo test --workspace
