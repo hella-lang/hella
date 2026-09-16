@@ -39,13 +39,10 @@ pub fn parse_add_spec(
         ));
     }
     let (source, rev) = if Path::new(raw).exists() {
-        // Convert Windows paths to file:// URLs for git compatibility
-        let local_path = if cfg!(windows) {
-            format!("file:///{}", raw.replace("\\", "/"))
-        } else {
-            format!("file://{raw}")
-        };
-        (local_path, None)
+        // An existing local path: normalize directly (backslashes, drive
+        // letters, and UNC are handled in `normalize_git_source`, keeping
+        // the slot path free of Windows-illegal `:` characters).
+        (raw.to_string(), None)
     } else if let Some(at) = raw.rfind('@') {
         let (s, r) = raw.split_at(at);
         let r = r[1..].trim();

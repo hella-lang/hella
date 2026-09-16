@@ -128,8 +128,17 @@ pub fn sanitize_version_segment(version: &str) -> String {
 /// Cache slot for one dependency version: `<pkg_root>/<git>/<version>/`.
 /// `git` is already normalized (host + path, no scheme); each `/` becomes
 /// a directory level, e.g. `github.com/owner/repo` + `1.2.3` →
-/// `<pkg_root>/github.com/owner/repo/1.2.3`.
+/// `<pkg_root>/github.com/owner/repo/1.2.3`. Local Windows paths arrive in
+/// the Windows-safe `local/__drive_C/...` / `local/__unc__/...` encoding
+/// (see `manifest::normalize_git_source`); legacy `local/C:/...` values
+/// (with `:`) are migrated on the fly so `create_dir_all` never fails with
+/// OS error 123 on Windows.
 pub fn pkg_slot_dir(pkg_root: &Path, git: &str, version: &str) -> PathBuf {
+    let git = if git.contains([':', '\\']) {
+        crate::manifest::normalize_git_source(git)
+    } else {
+        git.to_string()
+    };
     pkg_root
         .join(git.trim_matches('/'))
         .join(sanitize_version_segment(version))

@@ -100,15 +100,30 @@ pub fn is_valid_dep_name(name: &str) -> bool {
 /// Absolute local paths map under `local/` (`/tmp/foo` → `local/tmp/foo`)
 /// so they stay rooted inside the `pkg/` cache. Empty results are rejected
 /// by the caller.
+///
+/// Windows paths are encoded without characters that are illegal in file
+/// names on Windows (`:`): `C:\Users\foo` (or `C:/Users/foo`,
+/// `file:///C:/Users/foo`) → `local/__drive_C/Users/foo`, and UNC
+/// `\\server\share\dir` → `local/__unc__/server/share/dir`. [`clone_url`]
+/// reverses the mapping, so slots stay `create_dir_all`-safe on Windows
+/// (previously `local/C:/...` failed with OS error 123).
 pub fn normalize_git_source(raw: &str) -> String {
-    let mut s = raw.trim().to_string();
+    let trimmed = raw.trim();
     // Already normalized (e.g. re-parsed from a manifest): never prefix twice.
-    if s.starts_with("local/") {
-        while s.ends_with('/') {
-            s.pop();
+    // Pre-fix `local/C:/...` values (with a colon) and backslashes are
+    // re-encoded so stale locks migrate to the Windows-safe form.
+    if let Some(rest) = trimmed.strip_prefix("local/") {
+        if !rest.contains([':', '\\']) {
+            let mut v = trimmed.to_string();
+            while v.ends_with('/') {
+                v.pop();
+            }
+            return v;
         }
-        return s;
+        return encode_local_path(&rest.replace('\\', "/"));
     }
+    // Unify separators first so `C:\...` and `\\server\...` are recognized.
+    let mut s = trimmed.replace('\\', "/");
     for prefix in ["https://", "http://", "file://"] {
         if let Some(rest) = s.strip_prefix(prefix) {
             s = rest.to_string();
@@ -121,8 +136,8 @@ pub fn normalize_git_source(raw: &str) -> String {
     if let Some(rest) = s.strip_suffix(".git") {
         s = rest.to_string();
     }
-    if s.starts_with('/') {
-        return format!("local{s}");
+    if is_windows_drive_path(&s) || s.starts_with("//") || s.starts_with('/') {
+        return encode_local_path(&s);
     }
     if !s.contains('/') {
         return s;
@@ -135,11 +150,75 @@ pub fn normalize_git_source(raw: &str) -> String {
     s
 }
 
+/// True for `C:/...`, `C:`, `/C:/...`, `/C:` (any letter case).
+fn is_windows_drive_path(s: &str) -> bool {
+    let d = s.strip_prefix('/').unwrap_or(s);
+    let b = d.as_bytes();
+    b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b.len() == 2 || b[2] == b'/')
+}
+
+/// Map a slash-normalized absolute local path into the `local/` slot
+/// namespace without Windows-illegal characters (`:`).
+fn encode_local_path(p: &str) -> String {
+    // UNC: `//server/share/...`.
+    if p.starts_with("//") {
+        let rest = p.trim_start_matches('/');
+        return format!("local/__unc__/{rest}");
+    }
+    // Drive: `C:/...`, `C:`, `/C:/...`, `/C:` → `local/__drive_C/...`.
+    let d = p.strip_prefix('/').unwrap_or(p);
+    if is_windows_drive_path(p) || is_windows_drive_path(d) {
+        let drive = d[..1].to_ascii_uppercase();
+        let rest = d[2..].trim_start_matches('/');
+        if rest.is_empty() {
+            return format!("local/__drive_{drive}");
+        }
+        return format!("local/__drive_{drive}/{rest}");
+    }
+    if p.starts_with('/') {
+        return format!("local{p}");
+    }
+    // Should be unreachable for absolute inputs (legacy `local/` remainders
+    // without a leading slash): keep it rooted anyway.
+    let p = p.trim_start_matches('/');
+    format!("local/{p}")
+}
+
 /// Clone URL for a normalized `git` source: `local/...` maps back to the
-/// absolute path, everything else gains `https://`.
+/// absolute path (Windows drive/UNC encodings reversed), everything else
+/// gains `https://`.
 pub fn clone_url(git: &str) -> String {
     match git.strip_prefix("local/") {
-        Some(path) => format!("/{path}"),
+        Some(path) => {
+            if let Some(rest) = path.strip_prefix("__drive_") {
+                let mut it = rest.splitn(2, '/');
+                let drive = it.next().unwrap_or("");
+                let tail = it.next().unwrap_or("");
+                if drive.len() == 1 && drive.as_bytes()[0].is_ascii_alphabetic()
+                {
+                    let d = drive.to_ascii_uppercase();
+                    if tail.is_empty() {
+                        return format!("{d}:/");
+                    }
+                    return format!("{d}:/{tail}");
+                }
+            }
+            if path == "__unc__" {
+                return "//".to_string();
+            }
+            if let Some(rest) = path.strip_prefix("__unc__/") {
+                return format!("//{rest}");
+            }
+            // Legacy pre-fix values (`local/C:/...`, backslashes): still
+            // resolve to a usable absolute path for git.
+            if path.contains(':') || path.contains('\\') {
+                return path.replace('\\', "/");
+            }
+            format!("/{path}")
+        }
         None => format!("https://{git}"),
     }
 }
@@ -688,6 +767,64 @@ mod tests {
             "https://github.com/a/b"
         );
         assert_eq!(clone_url("local/tmp/foo"), "/tmp/foo");
+    }
+
+    #[test]
+    fn normalizes_windows_paths_without_illegal_chars() {
+        // Drive paths (any separator / scheme spelling) share one encoding
+        // with no `:` (illegal in Windows file names — OS error 123).
+        for raw in [
+            r"C:\Users\runner\lib",
+            "C:/Users/runner/lib",
+            "file:///C:/Users/runner/lib",
+            "/C:/Users/runner/lib",
+        ] {
+            let git = normalize_git_source(raw);
+            assert_eq!(git, "local/__drive_C/Users/runner/lib", "{raw:?}");
+            assert!(!git.contains([':', '\\']), "{raw:?}");
+        }
+        // Only the drive letter canonicalizes to uppercase; the rest of
+        // the path keeps its case.
+        assert_eq!(
+            normalize_git_source(r"c:\Users\runner\lib"),
+            "local/__drive_C/Users/runner/lib"
+        );
+        // Round-trip back to an absolute path git understands.
+        assert_eq!(
+            clone_url("local/__drive_C/Users/runner/lib"),
+            "C:/Users/runner/lib"
+        );
+        assert_eq!(clone_url("local/__drive_C"), "C:/");
+        // UNC paths get their own prefix.
+        let unc = normalize_git_source(r"\\server\share\dir");
+        assert_eq!(unc, "local/__unc__/server/share/dir");
+        assert_eq!(clone_url(&unc), "//server/share/dir");
+        // Legacy pre-fix values migrate instead of poisoning slots.
+        assert_eq!(
+            normalize_git_source("local/C:/Users/runner/lib"),
+            "local/__drive_C/Users/runner/lib"
+        );
+        assert_eq!(
+            clone_url("local/C:/Users/runner/lib"),
+            "C:/Users/runner/lib"
+        );
+        // Lowercase drives canonicalize to uppercase (one slot per path).
+        assert_eq!(
+            normalize_git_source("c:/foo"),
+            normalize_git_source("C:/foo")
+        );
+        // Slots stay free of Windows-illegal `:` even for legacy values.
+        for legacy in [
+            "local/__drive_C/Users/runner/lib",
+            "local/C:/Users/runner/lib",
+        ] {
+            let slot = crate::modules::pkg_slot_dir(
+                std::path::Path::new("/pkg"),
+                legacy,
+                "1.0.0",
+            );
+            assert!(!slot.to_string_lossy().contains(':'), "{legacy:?}");
+        }
     }
 
     #[test]
