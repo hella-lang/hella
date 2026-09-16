@@ -2550,6 +2550,28 @@ impl<'ctx> Codegen<'ctx> {
         Ok(self.builder.build_load(self.context.bool_type(), found_ptr, "contains").unwrap().into_int_value())
     }
 
+    /// True when `ty` is a lowered range value
+    /// (`{i64 start, i64 end, i1 inclusive}`) as opposed to a vec/map whose
+    /// first field is a buffer array.
+    fn is_range_struct(ty: BasicTypeEnum<'ctx>) -> bool {
+        if !ty.is_struct_type() {
+            return false;
+        }
+        let st = ty.into_struct_type();
+        if st.count_fields() != 3 {
+            return false;
+        }
+        let f0_is_i64 = matches!(
+            st.get_field_type_at_index(0).unwrap(),
+            BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+        );
+        let f2_is_i1 = matches!(
+            st.get_field_type_at_index(2).unwrap(),
+            BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+        );
+        f0_is_i64 && f2_is_i1
+    }
+
     /// True argument count for main's `args` array, loaded from the hidden
     /// `__hella_argc` slot — or `None` when `ptr` is any other array.
     fn main_args_len(&self, ptr: PointerValue<'ctx>) -> Option<inkwell::values::IntValue<'ctx>> {
@@ -6489,7 +6511,7 @@ impl<'ctx> Codegen<'ctx> {
                 // (sema rejects it first; this is the backstop, replacing the
                 // old silent len-16/var-0 fallback that miscompiled valid
                 // non-`Ident` iters).
-                enum ForIterKind { Array, Vec, Map, Str }
+                enum ForIterKind { Array, Vec, Map, Str, Range }
                 let (iter_ptr, iter_ty, iter_kind): (PointerValue<'ctx>, BasicTypeEnum<'ctx>, ForIterKind) = if let ExprKind::Ident(ref arr_name) = f.iter.kind {
                     let (p, t) = self.lookup_var(arr_name).ok_or(CodegenError{message: format!("undefined variable `{arr_name}`"), span: f.iter.span})?;
                     if t.is_array_type() {
@@ -6498,10 +6520,12 @@ impl<'ctx> Codegen<'ctx> {
                         (p, t, ForIterKind::Vec)
                     } else if t.is_struct_type() && self.is_map_var(arr_name) {
                         (p, t, ForIterKind::Map)
+                    } else if t.is_struct_type() && Self::is_range_struct(t) {
+                        (p, t, ForIterKind::Range)
                     } else if t.is_pointer_type() || self.is_string_var(arr_name) {
                         (p, t, ForIterKind::Str)
                     } else {
-                        return Err(CodegenError{message: "`for` iterable must be array, vector, map, or string".into(), span: f.iter.span});
+                        return Err(CodegenError{message: "`for` iterable must be array, vector, map, string, or range".into(), span: f.iter.span});
                     }
                 } else {
                     let v = self.codegen_expr(&f.iter)?;
@@ -6514,11 +6538,21 @@ impl<'ctx> Codegen<'ctx> {
                         (tmp, vt, ForIterKind::Str)
                     } else if vt.is_struct_type() {
                         // Vec is `{buf, len}` (2 fields), map is
-                        // `{keys, vals, len}` (3 fields).
-                        match vt.into_struct_type().count_fields() {
-                            3 => (tmp, vt, ForIterKind::Map),
-                            2 => (tmp, vt, ForIterKind::Vec),
-                            _ => return Err(CodegenError{message: "`for` iterable must be array, vector, map, or string".into(), span: f.iter.span}),
+                        // `{keys, vals, len}` (3 fields) — but only when the
+                        // first field is a buffer array. A range value
+                        // `{i64 start, i64 end, i1 inclusive}` also has 3
+                        // fields and must iterate lazily, never as a map
+                        // (that miscompile hung forever on garbage bounds).
+                        let st = vt.into_struct_type();
+                        let first_is_buf = matches!(
+                            st.get_field_type_at_index(0).unwrap(),
+                            BasicTypeEnum::ArrayType(_)
+                        );
+                        match st.count_fields() {
+                            3 if first_is_buf => (tmp, vt, ForIterKind::Map),
+                            3 if Self::is_range_struct(vt) => (tmp, vt, ForIterKind::Range),
+                            2 if first_is_buf => (tmp, vt, ForIterKind::Vec),
+                            _ => return Err(CodegenError{message: "`for` iterable must be array, vector, map, string, or range".into(), span: f.iter.span}),
                         }
                     } else {
                         return Err(CodegenError{message: "`for` iterable must be array, vector, map, or string".into(), span: f.iter.span});
@@ -6569,6 +6603,21 @@ impl<'ctx> Codegen<'ctx> {
                         Some(dyn_len) => dyn_len,
                         None => self.context.i64_type().const_int(iter_len_const.unwrap_or(16), false),
                     }
+                } else if matches!(iter_kind, ForIterKind::Range) {
+                    // Lazy range bound: max((inclusive ? end+1 : end) - start, 0).
+                    let i64_ty = self.context.i64_type();
+                    let rst = iter_ty.into_struct_type();
+                    let start_ptr = self.builder.build_struct_gep(rst, iter_ptr, 0, "for.range.start.ptr").unwrap();
+                    let end_ptr = self.builder.build_struct_gep(rst, iter_ptr, 1, "for.range.end.ptr").unwrap();
+                    let incl_ptr = self.builder.build_struct_gep(rst, iter_ptr, 2, "for.range.incl.ptr").unwrap();
+                    let start = self.builder.build_load(i64_ty, start_ptr, "for.range.start").unwrap().into_int_value();
+                    let end = self.builder.build_load(i64_ty, end_ptr, "for.range.end").unwrap().into_int_value();
+                    let incl = self.builder.build_load(self.context.bool_type(), incl_ptr, "for.range.incl").unwrap().into_int_value();
+                    let end_p1 = self.builder.build_int_add(end, i64_ty.const_int(1, false), "for.range.endp1").unwrap();
+                    let end_excl = self.builder.build_select(incl, end_p1, end, "for.range.endx").unwrap().into_int_value();
+                    let span = self.builder.build_int_sub(end_excl, start, "for.range.span").unwrap();
+                    let pos = self.builder.build_int_compare(IntPredicate::SGT, span, i64_ty.const_zero(), "for.range.pos").unwrap();
+                    self.builder.build_select(pos, span, i64_ty.const_zero(), "for.range.count").unwrap().into_int_value()
                 } else {
                     self.context.i64_type().const_int(iter_len_const.unwrap_or(16), false)
                 };
@@ -6605,6 +6654,14 @@ impl<'ctx> Codegen<'ctx> {
                             }
                             _ => None,
                         }
+                    } else if matches!(iter_kind, ForIterKind::Range) && arr_ty.is_struct_type() {
+                        // Range iteration yields `start + idx` (i64); the
+                        // bound above already encodes start/end/inclusivity.
+                        let rst = arr_ty.into_struct_type();
+                        let start_ptr = self.builder.build_struct_gep(rst, arr_ptr, 0, "for.range.vstart.ptr").unwrap();
+                        let start = self.builder.build_load(self.context.i64_type(), start_ptr, "for.range.vstart").unwrap().into_int_value();
+                        let v = self.builder.build_int_add(start, idx_val, "for.range.var").unwrap();
+                        Some(v.into())
                     } else if arr_ty.is_pointer_type() {
                         // Strings: byte-stepped load, zero-extended to `char`
                         // (i32). Other pointers cannot occur per sema.
@@ -9630,6 +9687,19 @@ mod tests {
     fn for_over_array_literal_verifies() {
         compile_src(
             "void main() do\n  for x in [10, 20, 30] do\n  end\nend\n",
+        );
+    }
+
+    /// `for i in a..b` iterates lazily (never as a map: the range struct
+    /// `{i64, i64, i1}` shares the 3-field shape, which used to hang).
+    #[test]
+    fn for_over_range_uses_range_bound() {
+        let ir = compile_ir(
+            "void main() do\n  for i in 0..3 do\n  end\nend\n",
+        );
+        assert!(
+            ir.contains("for.range.span"),
+            "expected lazy range bound, got:\n{ir}"
         );
     }
 
