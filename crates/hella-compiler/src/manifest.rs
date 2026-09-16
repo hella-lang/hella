@@ -253,11 +253,11 @@ fn parse_dependency(name: &str, v: &toml::Value) -> Result<Dependency, ManifestE
 /// level) and the `[package]` section form; unknown top-level keys and
 /// unknown `[package]` keys are ignored for forward compatibility.
 pub fn parse_manifest(text: &str) -> Result<Manifest, ManifestError> {
-    let value: toml::Value = text.parse().map_err(|e: toml::de::Error| {
+    // NOTE (toml 1.x): `str::parse::<toml::Value>()` parses a TOML *value*,
+    // not a document, so `name = "x"` fails with "expected nothing". A
+    // document must be parsed as `toml::Table`.
+    let table: toml::Table = text.parse().map_err(|e: toml::de::Error| {
         ManifestError::Invalid(format!("malformed hella.toml: {e}"))
-    })?;
-    let table = value.as_table().ok_or_else(|| {
-        ManifestError::Invalid("malformed hella.toml: expected TOML table".to_string())
     })?;
 
     // Identity: `[package]` section wins, else legacy top-level keys.
@@ -357,12 +357,10 @@ pub fn parse_lockfile(text: &str) -> Result<Lockfile, ManifestError> {
     if text.trim().is_empty() {
         return Ok(Lockfile::default());
     }
-    let value: toml::Value = text.parse().map_err(|e: toml::de::Error| {
+    let value: toml::Table = text.parse().map_err(|e: toml::de::Error| {
         ManifestError::Invalid(format!("malformed hella.lock: {e}"))
     })?;
-    let table = value.as_table().ok_or_else(|| {
-        ManifestError::Invalid("malformed hella.lock: expected TOML table".to_string())
-    })?;
+    let table = &value;
     let mut packages = Vec::new();
     match table.get("package") {
         None => {}
@@ -517,18 +515,13 @@ pub fn read_slot_marker(slot: &Path) -> Result<Option<(String, String, String)>,
         path: path.display().to_string(),
         source: e,
     })?;
-    let value: toml::Value = text.parse().map_err(|e: toml::de::Error| {
+    let value: toml::Table = text.parse().map_err(|e: toml::de::Error| {
         ManifestError::Invalid(format!(
             "malformed slot marker {}: {e}",
             path.display()
         ))
     })?;
-    let table = value.as_table().ok_or_else(|| {
-        ManifestError::Invalid(format!(
-            "malformed slot marker {}: expected TOML table",
-            path.display()
-        ))
-    })?;
+    let table = &value;
     let get = |key: &str| {
         table
             .get(key)

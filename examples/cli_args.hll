@@ -2,6 +2,7 @@
 // (program name excluded, capped at 16). `args.len()` is the true count.
 import std::io
 
+
 int main(string[] args) do
     printInt(args.len())
     if args.is_empty() do
