@@ -2550,6 +2550,19 @@ impl<'ctx> Codegen<'ctx> {
         Ok(self.builder.build_load(self.context.bool_type(), found_ptr, "contains").unwrap().into_int_value())
     }
 
+    /// Module global capturing argv[0] (the program name) in main's
+    /// prologue. Created on demand, zero-init null (libraries without a
+    /// main read null — the stdlib wrapper maps that to `""`).
+    fn argv0_global(&self) -> PointerValue<'ctx> {
+        if let Some(g) = self.module.get_global("__hella_argv0") {
+            return g.as_pointer_value();
+        }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let g = self.module.add_global(ptr_ty, None, "__hella_argv0");
+        g.set_initializer(&ptr_ty.const_null());
+        g.as_pointer_value()
+    }
+
     /// True when `ty` is a lowered range value
     /// (`{i64 start, i64 end, i1 inclusive}`) as opposed to a vec/map whose
     /// first field is a buffer array.
@@ -3423,20 +3436,18 @@ impl<'ctx> Codegen<'ctx> {
             })
             .collect();
         let is_c_varargs = f.params.iter().any(|p| p.is_variadic && p.name.is_empty());
-        // Special ABI for `main`: C `int main()` is always i32;
-        // `int main(string[] args)` is `i32 (i32 argc, ptr argv)` with `args`
-        // populated from argv (see the prologue below).
+        // Special ABI for `main`: every form is C `i32 (i32 argc, ptr argv)`
+        // at LLVM level — even the no-args forms (crt0 always passes
+        // argc/argv; undeclared extras would simply go unread). The prologue
+        // captures argv[0] for `__hella_progname()`, and the `string[] args`
+        // form additionally fills `args` from argv[1..] (see below).
         let is_main_with_args = f.name == "main"
             && f.params.len() == 1
             && f.params[0].name == "args"
             && matches!(&f.params[0].ty, Type::Array(el, _) if matches!(el.as_ref(), Type::String(_)));
         let fn_ty = if f.name == "main" {
-            if is_main_with_args {
-                let ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-                self.context.i32_type().fn_type(&[self.context.i32_type().into(), ptr.into()], false)
-            } else {
-                self.context.i32_type().fn_type(&param_types, is_c_varargs)
-            }
+            let ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+            self.context.i32_type().fn_type(&[self.context.i32_type().into(), ptr.into()], false)
         } else {
             match ret_sema {
                 crate::sema::Ty::Void => {
@@ -4332,6 +4343,21 @@ impl<'ctx> Codegen<'ctx> {
         self.vars.push(HashMap::new());
         self.own_slots.push(Vec::new());
         self.scope_dtors.push(Vec::new());
+        // Every `main` captures argv[0] (the program name) into the
+        // `__hella_argv0` global for `__hella_progname()` — all main forms
+        // declare `(i32 argc, ptr argv)` at LLVM level, so this works with
+        // or without a Hella-level `args` parameter.
+        if f.name == "main" {
+            let i64_ty = self.context.i64_type();
+            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+            let argc = self.builder.build_int_s_extend(func.get_nth_param(0).unwrap().into_int_value(), i64_ty, "argc64").unwrap();
+            let argv = func.get_nth_param(1).unwrap().into_pointer_value();
+            let has_argv0 = self.builder.build_int_compare(IntPredicate::SGT, argc, i64_ty.const_zero(), "argv0.has").unwrap();
+            let slot0 = unsafe { self.builder.build_gep(ptr_ty, argv, &[i64_ty.const_zero()], "argv0.slot").unwrap() };
+            let s0 = self.builder.build_load(ptr_ty, slot0, "argv0.str").unwrap();
+            let v0 = self.builder.build_select(has_argv0, s0, ptr_ty.const_null().into(), "argv0").unwrap();
+            self.builder.build_store(self.argv0_global(), v0).unwrap();
+        }
         // Special handling for `int main(string[] args)`: the LLVM function
         // is C `i32 (i32 argc, ptr argv)`; `args` is a local `[16 x string]`
         // filled with argv[1..] (program name excluded, C#/Java-style),
@@ -7644,6 +7670,16 @@ impl<'ctx> Codegen<'ctx> {
                 // NOTE (real stdlib): no `print`-family fast path. Calls to
                 // `std::io` functions lower through the ordinary function /
                 // extern resolution below.
+                // Compiler intrinsic: `__hella_progname()` reads the
+                // `__hella_argv0` global captured in main's prologue. It is
+                // declared as an ordinary `extern` in stdlib (sema untouched)
+                // and the call is never emitted, so no libc symbol is needed.
+                if callee == "__hella_progname" {
+                    let g = self.argv0_global();
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let v = self.builder.build_load(ptr_ty, g, "progname").unwrap();
+                    return Ok(v.into());
+                }
                 // Check for class constructor call: ClassName(args) -> allocate + ctor
                 if let Some(ctors) = self.class_constructors.get(callee).cloned() {
                     // pick ctor by arity, allowing omitted trailing defaults
@@ -9732,6 +9768,33 @@ mod tests {
         assert!(
             !ir.contains("__hella_argc"),
             "ordinary arrays must not touch the argc slot, got:\n{ir}"
+        );
+    }
+
+    /// `__hella_progname()` never emits a call: it loads the `__hella_argv0`
+    /// global captured in main's prologue. Every main form declares
+    /// `(i32 argc, ptr argv)` at LLVM level so this works with or without
+    /// a Hella-level `args` parameter.
+    #[test]
+    fn progname_loads_argv0_without_call() {
+        let src = "extern \"c\" from \"libc\" do\n    string __hella_progname()\nend\nvoid main() do\n    string p = __hella_progname()\nend\n";
+        let ir = compile_ir(src);
+        assert!(
+            ir.contains("define i32 @main(i32"),
+            "every main takes (argc, argv), got:\n{ir}"
+        );
+        assert!(
+            ir.contains("__hella_argv0"),
+            "expected argv0 capture, got:\n{ir}"
+        );
+        // The extern declaration may exist, but no call to it must be
+        // emitted (there is no such libc symbol).
+        let calls_it = ir
+            .lines()
+            .any(|l| l.trim_start().starts_with("call ") && l.contains("__hella_progname"));
+        assert!(
+            !calls_it,
+            "the intrinsic call must not be emitted, got:\n{ir}"
         );
     }
 

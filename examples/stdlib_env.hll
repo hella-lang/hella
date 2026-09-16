@@ -23,6 +23,8 @@ int main() do
     assert hasEnv("HELLA_TEST_ENV") is false
     dir = cwd()
     assert isEmpty(dir) is false
+    // argv[0] is always present, even with no user args
+    assert isEmpty(progName()) is false
     println("env ok")
     return 0
 end
