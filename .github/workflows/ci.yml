@@ -118,7 +118,12 @@ jobs:
           fi
           TEST_EXE="$(ls -t target/debug/deps/hella_compiler-*.exe 2>/dev/null | head -1)"
           if [ ! -x "$TEST_EXE" ]; then
-            echo "NO-TEST-BINARY"
+            echo "NO-DIRECT-HIT; searching tree:"
+            find target -name 'hella_compiler-*.exe' 2>/dev/null | head -5
+            echo "--- target state ---"
+            ls target 2>&1 || true
+            ls target/debug/deps 2>&1 | head -20 || true
+            echo "(Empty tree: the build itself failed — read the Workspace tests step log, likely a link error.)"
             exit 0
           fi
           echo "TEST_EXE=$TEST_EXE"
