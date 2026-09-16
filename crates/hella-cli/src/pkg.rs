@@ -5,7 +5,7 @@
 //! ambient `$HOME`) so they are unit-testable with fixture directories.
 //! The CLI wires the real `~/.hella` locations in `main.rs`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -456,20 +456,22 @@ fn copy_dir_without_git(src: &Path, dst: &Path) -> miette::Result<()> {
 }
 
 /// Fetch one dependency into its immutable `pkg/` slot (no-op when the
-/// slot already carries a matching marker). Returns the slot path.
+/// slot already carries a matching marker). Returns the slot path and the
+/// actual commit SHA (a branch request resolves to its tip at fetch time,
+/// so the pin records the exact SHA, never the moving name).
 fn fetch_slot(
     pkg_root: &Path,
     cache_root: &Path,
     git: &str,
     version: &str,
     resolved: &Resolved,
-) -> miette::Result<PathBuf> {
+) -> miette::Result<(PathBuf, String)> {
     let slot = modules::pkg_slot_dir(pkg_root, git, version);
     if let Some((mg, _, mrev)) = manifest::read_slot_marker(&slot)
         .map_err(|e| miette::miette!("{e}"))?
     {
         if mg == git && mrev == resolved.rev {
-            return Ok(slot);
+            return Ok((slot, mrev));
         }
         std::fs::remove_dir_all(&slot).map_err(|e| {
             miette::miette!("failed to clear stale slot {}: {e}", slot.display())
@@ -498,9 +500,17 @@ fn fetch_slot(
         })?;
         Ok(sha)
     })();
+    let sha = match result {
+        Ok(sha) => sha,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&scratch);
+            // A failed fetch must never leave a half-populated slot behind.
+            let _ = std::fs::remove_dir_all(&slot);
+            return Err(e);
+        }
+    };
     let _ = std::fs::remove_dir_all(&scratch);
-    result?;
-    Ok(slot)
+    Ok((slot, sha))
 }
 
 fn scratch_nonce() -> u64 {
@@ -580,12 +590,12 @@ fn resolve_and_fetch_closure(
         }
         let url = manifest::clone_url(&item.git);
         let resolved = resolve_rev(&url, Some(&item.req))?;
-        fetch_slot(pkg_root, cache_root, &item.git, &resolved.version, &resolved)?;
+        let (_, sha) = fetch_slot(pkg_root, cache_root, &item.git, &resolved.version, &resolved)?;
         let pin = LockedDependency {
             name: item.name.clone(),
             git: item.git.clone(),
             version: resolved.version.clone(),
-            rev: resolved.rev.clone(),
+            rev: sha,
             package: item.package.clone(),
         };
         // Record before recursing: cuts A ↔ B cycles.
@@ -603,6 +613,179 @@ fn resolve_and_fetch_closure(
         }
     }
     Ok(pinned.into_values().collect())
+}
+
+/// Fetch an already-pinned dependency by its exact commit SHA, without
+/// re-resolving versions (used to backfill missing slots).
+fn fetch_pinned(
+    pkg_root: &Path,
+    cache_root: &Path,
+    pin: &LockedDependency,
+) -> miette::Result<()> {
+    let resolved = Resolved {
+        version: pin.version.clone(),
+        rev: pin.rev.clone(),
+        tag: None,
+        needs_rev_parse: false,
+    };
+    let (_, sha) = fetch_slot(pkg_root, cache_root, &pin.git, &pin.version, &resolved)?;
+    if sha != pin.rev {
+        return Err(miette::miette!(
+            "fetched `{}` gave {sha} but lock pins {}",
+            pin.name,
+            pin.rev,
+        ));
+    }
+    Ok(())
+}
+
+fn slot_is_good(pkg_root: &Path, pin: &LockedDependency) -> bool {
+    let slot = modules::pkg_slot_dir(pkg_root, &pin.git, &pin.version);
+    manifest::read_slot_marker(&slot).is_ok_and(|m| {
+        matches!(m, Some((g, _, r)) if g == pin.git && r == pin.rev)
+    })
+}
+
+/// Options for [`ensure_deps`]: `--offline` never touches the network,
+/// `--frozen` additionally forbids lockfile changes (CI reproducibility).
+pub struct EnsureOptions {
+    pub offline: bool,
+    pub frozen: bool,
+}
+
+/// Make sure every dependency of the project at `root` is fetched into
+/// `pkg_root` (resolving + writing `hella.lock` when allowed). Fast path
+/// touches no network and needs no `git`: when all pins have matching
+/// slots this is pure local verification.
+pub fn ensure_deps(
+    root: &Path,
+    pkg_root: &Path,
+    cache_root: &Path,
+    opts: &EnsureOptions,
+) -> miette::Result<()> {
+    let manifest = manifest::read_manifest_file(root)
+        .map_err(|e| miette::miette!("invalid hella.toml: {e}"))?;
+    let Some(manifest) = manifest else {
+        return Ok(());
+    };
+    if manifest.dependencies.is_empty() {
+        return Ok(());
+    }
+    let old_lock = manifest::read_lockfile(root)
+        .map_err(|e| miette::miette!("invalid hella.lock: {e}"))?
+        .unwrap_or_default();
+    let mut pins: BTreeMap<String, LockedDependency> = old_lock
+        .packages
+        .iter()
+        .map(|p| (p.name.clone(), p.clone()))
+        .collect();
+
+    // Fixpoint: traverse the reachable closure through fetched slots,
+    // fetching whatever is unpinned or missing until everything verifies.
+    for _ in 0..8 {
+        // Expected set: direct deps plus whatever fetched slots declare.
+        let mut expected: BTreeMap<String, (String, String)> = manifest
+            .dependencies
+            .iter()
+            .map(|(n, d)| (n.clone(), (d.git.clone(), d.version.clone())))
+            .collect();
+        let mut stack: Vec<String> = expected.keys().cloned().collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        while let Some(name) = stack.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let Some(pin) = pins.get(&name) else {
+                continue;
+            };
+            let slot = modules::pkg_slot_dir(pkg_root, &pin.git, &pin.version);
+            if let Ok(Some(child)) = manifest::read_manifest_file(&slot) {
+                for (cn, cd) in &child.dependencies {
+                    expected
+                        .entry(cn.clone())
+                        .or_insert((cd.git.clone(), cd.version.clone()));
+                    stack.push(cn.clone());
+                }
+            }
+        }
+        let missing: Vec<String> = expected
+            .keys()
+            .filter(|n| !pins.contains_key(*n))
+            .cloned()
+            .collect();
+        // Stale pins outside the reachable set are left alone (only
+        // `remove` prunes); every other pin must have a matching slot.
+        let bad: Vec<LockedDependency> = pins
+            .values()
+            .filter(|p| !slot_is_good(pkg_root, p))
+            .cloned()
+            .collect();
+        if missing.is_empty() && bad.is_empty() {
+            break;
+        }
+        if opts.offline {
+            return Err(miette::miette!(
+                "dependencies missing from {} ({} unpinned, {} unfetched); \
+                 re-run without `--offline` or run `hella fetch` with network access",
+                pkg_root.display(),
+                missing.len(),
+                bad.len(),
+            ));
+        }
+        if opts.frozen {
+            return Err(miette::miette!(
+                "lockfile out of date ({} unpinned, {} unfetched); \
+                 run `hella fetch` to update it (`--frozen` forbids changes)",
+                missing.len(),
+                bad.len(),
+            ));
+        }
+        ensure_git();
+        if !missing.is_empty() {
+            let mut direct = BTreeMap::new();
+            for name in &missing {
+                let (git, req) = &expected[name];
+                direct.insert(
+                    name.clone(),
+                    Dependency {
+                        git: git.clone(),
+                        version: req.clone(),
+                        package: None,
+                    },
+                );
+            }
+            let current: Vec<LockedDependency> = pins.values().cloned().collect();
+            for p in resolve_and_fetch_closure(pkg_root, cache_root, &direct, &current)? {
+                pins.insert(p.name.clone(), p);
+            }
+        }
+        for pin in &bad {
+            fetch_pinned(pkg_root, cache_root, pin)?;
+        }
+    }
+
+    let merged: Vec<LockedDependency> = pins.values().cloned().collect();
+    let changed = merged != old_lock.packages;
+    if changed {
+        std::fs::write(
+            root.join("hella.lock"),
+            manifest::serialize_lockfile(&Lockfile { packages: merged }),
+        )
+        .map_err(|e| miette::miette!("failed to write hella.lock: {e}"))?;
+    }
+    // Final verification (also catches a non-converging graph).
+    let failures: Vec<&str> = pins
+        .values()
+        .filter(|p| !slot_is_good(pkg_root, p))
+        .map(|p| p.name.as_str())
+        .collect();
+    if !failures.is_empty() {
+        return Err(miette::miette!(
+            "could not fetch dependencies: {}",
+            failures.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1096,5 +1279,82 @@ mod tests {
     fn remove_unknown_name_errors() {
         let e = env("rmunknown");
         assert!(run_remove(&e.project, &e.pkg, "nope").is_err());
+    }
+
+    fn ensure_opts(offline: bool, frozen: bool) -> EnsureOptions {
+        EnsureOptions { offline, frozen }
+    }
+
+    /// Project with one fetched dep; returns (env, lock text, slot path).
+    fn fetched_env(tag: &str) -> (Env, String, PathBuf) {
+        let e = env(tag);
+        let repos = scratch(&format!("{tag}-repos"));
+        let lib = make_repo(
+            &repos,
+            "lib",
+            &[
+                ("hella.toml", &lib_manifest(&[])),
+                ("lib.hll", "int x() do\n    return 1\nend\n"),
+            ],
+            &["v1.0.0"],
+        );
+        run_add(&e.project, &e.pkg, &e.cache, lib.to_str().unwrap(), None).unwrap();
+        let lock = std::fs::read_to_string(e.project.join("hella.lock")).unwrap();
+        let pin = manifest::read_lockfile(&e.project).unwrap().unwrap().packages;
+        let slot = modules::pkg_slot_dir(&e.pkg, &pin[0].git, &pin[0].version);
+        assert!(slot.is_dir());
+        (e, lock, slot)
+    }
+
+    #[test]
+    fn ensure_is_noop_when_complete() {
+        let (e, lock, _slot) = fetched_env("ensure-ok");
+        ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(false, false)).unwrap();
+        // Frozen and offline also pass when everything is fetched.
+        ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(false, true)).unwrap();
+        ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(true, false)).unwrap();
+        let after = std::fs::read_to_string(e.project.join("hella.lock")).unwrap();
+        assert_eq!(after, lock, "complete projects must not rewrite the lock");
+    }
+
+    #[test]
+    fn ensure_refetches_missing_slots_and_regenerates_locks() {
+        let (e, lock, slot) = fetched_env("ensure-fix");
+        // Deleted slot comes back with the same marker.
+        std::fs::remove_dir_all(&slot).unwrap();
+        ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(false, false)).unwrap();
+        assert!(slot.is_dir());
+        // Deleted lock regenerates deterministically.
+        std::fs::remove_file(e.project.join("hella.lock")).unwrap();
+        ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(false, false)).unwrap();
+        let after = std::fs::read_to_string(e.project.join("hella.lock")).unwrap();
+        assert_eq!(after, lock);
+    }
+
+    #[test]
+    fn ensure_offline_and_frozen_refuse_network() {
+        let (e, _lock, slot) = fetched_env("ensure-strict");
+        std::fs::remove_dir_all(&slot).unwrap();
+        assert!(
+            ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(true, false)).is_err()
+        );
+        assert!(
+            ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(false, true)).is_err()
+        );
+        // And a missing lock is a frozen error too.
+        std::fs::remove_file(e.project.join("hella.lock")).unwrap();
+        let _ = std::fs::create_dir_all(&slot); // slot present but unpinned
+        assert!(
+            ensure_deps(&e.project, &e.pkg, &e.cache, &ensure_opts(false, true)).is_err()
+        );
+    }
+
+    #[test]
+    fn ensure_without_manifest_is_ok() {
+        let root = scratch("ensure-plain");
+        let pkg = root.join("pkg");
+        let cache = root.join("cache");
+        ensure_deps(&root, &pkg, &cache, &ensure_opts(false, false)).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

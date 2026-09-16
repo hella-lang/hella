@@ -156,6 +156,14 @@ struct BuildArgs {
     /// Force recompilation even if output is up to date
     #[arg(long, default_value_t = false)]
     force: bool,
+
+    /// Do not touch the network; error if any dependency is unfetched
+    #[arg(long, default_value_t = false)]
+    offline: bool,
+
+    /// Error instead of resolving or updating hella.lock (CI reproducibility)
+    #[arg(long, default_value_t = false)]
+    frozen: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -192,6 +200,14 @@ struct RunArgs {
     /// Force recompilation even if output is up to date
     #[arg(long, default_value_t = false)]
     force: bool,
+
+    /// Do not touch the network; error if any dependency is unfetched
+    #[arg(long, default_value_t = false)]
+    offline: bool,
+
+    /// Error instead of resolving or updating hella.lock (CI reproducibility)
+    #[arg(long, default_value_t = false)]
+    frozen: bool,
 
     /// Arguments forwarded to the program (use `--` to separate them)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -238,6 +254,14 @@ struct CheckArgs {
     /// Show verbose progress (default: summary lines)
     #[arg(long, default_value_t = false)]
     verbose: bool,
+
+    /// Do not touch the network; error if any dependency is unfetched
+    #[arg(long, default_value_t = false)]
+    offline: bool,
+
+    /// Error instead of resolving or updating hella.lock (CI reproducibility)
+    #[arg(long, default_value_t = false)]
+    frozen: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -799,8 +823,25 @@ fn fail(report: Report) -> ! {
     std::process::exit(1);
 }
 
+/// Fetch the owning project's locked dependencies before compile (no-op
+/// outside projects and for dependency-free manifests).
+fn ensure_entry_deps(entry: &Path, offline: bool, frozen: bool) -> miette::Result<()> {
+    let root = hella_compiler::modules::project_root(entry);
+    if !root.join("hella.toml").is_file() {
+        return Ok(());
+    }
+    let (pkg_root, cache_root) = pkg_dirs()?;
+    pkg::ensure_deps(
+        &root,
+        &pkg_root,
+        &cache_root,
+        &pkg::EnsureOptions { offline, frozen },
+    )
+}
+
 fn run_build(args: BuildArgs) -> miette::Result<()> {
     let entry = resolve_entry(args.file.clone())?;
+    ensure_entry_deps(&entry.path, args.offline, args.frozen)?;
     // Project mode redirects output to `out/debug|release/<name>` unless
     // `-o` is given; file mode keeps the legacy next-to-source default.
     let exe_path = args.output.clone().or_else(|| {
@@ -830,6 +871,7 @@ fn run_build(args: BuildArgs) -> miette::Result<()> {
 
 fn run_check(args: CheckArgs) -> miette::Result<()> {
     let entry = resolve_entry(args.file.clone())?;
+    ensure_entry_deps(&entry.path, args.offline, args.frozen)?;
     let require_main = entry.path.file_stem().is_some_and(|s| s == "main");
     let opts = CompileOptions {
         file: &entry.path,
@@ -852,6 +894,7 @@ fn run_check(args: CheckArgs) -> miette::Result<()> {
 
 fn run_run(args: RunArgs) -> miette::Result<()> {
     let entry = resolve_entry(args.file.clone())?;
+    ensure_entry_deps(&entry.path, args.offline, args.frozen)?;
     // The binary persists: project mode uses `out/debug|release/<name>`
     // (ignored by VCS), file mode the legacy next-to-source default.
     // Rebuilds are skipped while sources are unchanged (see freshness in

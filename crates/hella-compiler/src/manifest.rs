@@ -102,6 +102,13 @@ pub fn is_valid_dep_name(name: &str) -> bool {
 /// by the caller.
 pub fn normalize_git_source(raw: &str) -> String {
     let mut s = raw.trim().to_string();
+    // Already normalized (e.g. re-parsed from a manifest): never prefix twice.
+    if s.starts_with("local/") {
+        while s.ends_with('/') {
+            s.pop();
+        }
+        return s;
+    }
     for prefix in ["https://", "http://", "file://"] {
         if let Some(rest) = s.strip_prefix(prefix) {
             s = rest.to_string();
@@ -678,6 +685,11 @@ mod tests {
             "local/tmp/foo"
         );
         assert_eq!(normalize_git_source("/tmp/foo"), "local/tmp/foo");
+        assert_eq!(
+            normalize_git_source("local/tmp/foo"),
+            "local/tmp/foo",
+            "normalization must be idempotent"
+        );
         assert_eq!(
             clone_url("github.com/a/b"),
             "https://github.com/a/b"
