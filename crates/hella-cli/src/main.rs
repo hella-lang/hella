@@ -387,50 +387,14 @@ fn read_manifest(root: &Path) -> miette::Result<Option<Manifest>> {
     if !path.is_file() {
         return Ok(None);
     }
-    let text = fs::read_to_string(&path).map_err(|e| {
-        miette::miette!("failed to read {}: {e}", path.display())
-    })?;
-    let mut name: Option<String> = None;
-    let mut version: Option<String> = None;
-    for (lineno, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let (key, value) = line.split_once('=').ok_or_else(|| {
-            miette::miette!(
-                "malformed {} line {}: {line:?}",
-                path.display(),
-                lineno + 1
-            )
+    let parsed =
+        hella_compiler::manifest::read_manifest_file(root).map_err(|e| {
+            miette::miette!("invalid {}: {e}", path.display())
         })?;
-        let value = value.trim();
-        let value = value
-            .strip_prefix('"')
-            .and_then(|v| v.strip_suffix('"'))
-            .or_else(|| {
-                value.strip_prefix('\'').and_then(|v| v.strip_suffix('\''))
-            })
-            .ok_or_else(|| {
-                miette::miette!(
-                    "malformed {} line {}: value must be quoted",
-                    path.display(),
-                    lineno + 1
-                )
-            })?;
-        match key.trim() {
-            "name" => name = Some(value.to_string()),
-            "version" => version = Some(value.to_string()),
-            _ => {}
-        }
-    }
-    match (name, version) {
-        (Some(name), Some(version)) => Ok(Some(Manifest { name, version })),
-        _ => Err(miette::miette!(
-            "{} must define `name` and `version`",
-            path.display()
-        )),
-    }
+    Ok(parsed.map(|m| Manifest {
+        name: m.name,
+        version: m.version,
+    }))
 }
 
 /// Create a new Hella project: `hella.toml` manifest, VCS-ignored `out/`
