@@ -56,9 +56,12 @@ jobs:
           # Upstream clang+llvm tarball: deterministic pin, no installer
           # quirks (the .exe installer silently landed nowhere), ships
           # llvm-config.exe + dev libs that llvm-sys needs.
-          # Pin 21.1.8: 21.1.0 segfaults (STATUS_ACCESS_VIOLATION) in
-          # codegen tests on Windows (29 of 33 crash on first LLVM use;
-          # same tests pass on Linux/macOS and on 21.1.8).
+          # Pin 21.1.8 (newest 21.1.x; matches Linux/macOS drift).
+          # NOTE: codegen tests segfault nondeterministically on Windows
+          # (STATUS_ACCESS_VIOLATION; different survivors per run, same
+          # snippets pass on Linux/macOS) — under investigation, see the
+          # triage step below. Not an LLVM-version issue (21.1.0 and 21.1.8
+          # behave the same).
           curl -sSLf -o llvm.tar.xz https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/clang+llvm-21.1.8-x86_64-pc-windows-msvc.tar.xz
           mkdir -p C:/LLVM
           tar -xf llvm.tar.xz -C C:/LLVM --strip-components=1
@@ -90,42 +93,51 @@ jobs:
             fi
           done
 
-      # Crash triage for the hella-compiler lib segfault
-      # (STATUS_ACCESS_VIOLATION): purely informational, always exits 0.
-      # --list checks process startup; --skip codegen narrows the set;
-      # single-threaded orders output so the test after the last `ok` is
-      # the crasher. Runs even when `cargo test --workspace` fails.
-      - name: Triage lib test crash (Windows)
+      # Native-debug the Windows codegen-test segfault: run one crashing
+      # test under cdb (ships with the VS/SDK toolset; probed, never
+      # assumed) and print the fault + native stack. Purely informational,
+      # always exits 0. Replaces the earlier crash-map probes: a stack
+      # trace names the exact crashing call, no inference needed.
+      - name: Debug lib test crash (Windows)
         if: always() && runner.os == 'Windows'
+        timeout-minutes: 30
         run: |
           set +e
-          echo "--- 1. list (startup check) ---"
-          cargo test -p hella-compiler --lib -- --list > /tmp/triage-list.log 2>&1
-          echo "list exit: $?"
-          tail -4 /tmp/triage-list.log
-          echo "--- 2. skip codegen (narrow the set) ---"
-          cargo test -p hella-compiler --lib -- --skip codegen > /tmp/triage-nocodegen.log 2>&1
-          echo "skip-codegen exit: $?"
-          tail -4 /tmp/triage-nocodegen.log
-          echo "--- 3. single-threaded (last ok + 1 == crasher) ---"
-          cargo test -p hella-compiler --lib -- --test-threads=1 > /tmp/triage-single.log 2>&1
-          echo "single-thread exit: $?"
-          tail -12 /tmp/triage-single.log
-          echo "--- 4. per-test crash map (PASS/FAIL/CRASH per codegen test) ---"
-          cargo test -p hella-compiler --lib -- --list > /tmp/triage-names.log 2>&1
-          grep ": test$" /tmp/triage-names.log | sed 's/: test$//' | grep "^codegen" > /tmp/triage-codegen-names.txt
-          wc -l < /tmp/triage-codegen-names.txt
-          while IFS= read -r t; do
-            cargo test -p hella-compiler --lib -- --exact "$t" > /tmp/triage-one.log 2>&1
-            if grep -q "0xc0000005\|STATUS_ACCESS_VIOLATION" /tmp/triage-one.log; then
-              echo "CRASH $t"
-            elif grep -q "test result: ok" /tmp/triage-one.log; then
-              echo "PASS  $t"
-            else
-              echo "FAIL  $t"
-              tail -20 /tmp/triage-one.log
-            fi
-          done < /tmp/triage-codegen-names.txt
+          CDB=""
+          if [ -x "C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe" ]; then
+            CDB="C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe"
+          else
+            echo "probing for cdb:"
+            ls "C:/Program Files (x86)/Windows Kits/10/Debuggers/" 2>&1 || true
+            CDB="$(find 'C:/Program Files (x86)/Windows Kits' -name 'cdb.exe' 2>/dev/null | grep -i '/x64/' | head -1)"
+          fi
+          echo "CDB=$CDB"
+          if [ -z "$CDB" ] || [ ! -x "$CDB" ]; then
+            echo "NO-CDB-AVAILABLE"
+            exit 0
+          fi
+          TEST_EXE="$(ls -t target/debug/deps/hella_compiler-*.exe 2>/dev/null | head -1)"
+          if [ ! -x "$TEST_EXE" ]; then
+            echo "NO-TEST-BINARY"
+            exit 0
+          fi
+          echo "TEST_EXE=$TEST_EXE"
+          TEST_WIN="$(cygpath -w "$TEST_EXE")"
+          for i in 1 2 3 4; do
+            echo "--- cdb attempt $i ---"
+            "$CDB" -g -G -c "g;.lastevent;r;k L100;lm m LLVM*;q" "$TEST_WIN" --test-threads=1 --exact codegen::tests::void_extension_method_verifies > /tmp/cdb-run.log 2>&1
+            grep -i -m1 "c0000005\|access violation" /tmp/cdb-run.log && break
+            echo "(no crash captured)"
+          done
+          A="$(grep -n -m1 -i "last event" /tmp/cdb-run.log | cut -d: -f1)"
+          B="$(grep -n -m1 "^quit" /tmp/cdb-run.log | cut -d: -f1)"
+          if [ -n "$A" ] && [ -n "$B" ]; then
+            sed -n "${A},${B}p" /tmp/cdb-run.log | head -100
+          else
+            tail -30 /tmp/cdb-run.log
+          fi
+          echo "=== llvm modules loaded ==="
+          grep -i "llvm" /tmp/cdb-run.log | head -10
           exit 0
 
       - name: Workspace tests
