@@ -145,35 +145,27 @@ pub fn dep_module_root(pkg_root: &Path, dep: &crate::manifest::LockedDependency)
 }
 
 /// Dependency search bases for the project owning `project_root`: one
-/// module root per locked dependency in `hella.lock` (falling back to the
-/// `hella.toml` request version when no pin exists yet), in manifest order.
-/// Only existing directories are returned. Returns empty when there is no
-/// manifest, no `pkg` dir, or no dependencies — plain projects are unaffected.
+/// module root per locked dependency in `hella.lock` — the full closure,
+/// direct *and* transitive, so a dependency's own `import`s resolve against
+/// the importing project's bases. Manifest-only deps without a pin yet fall
+/// back to their requested version. Only existing directories are returned.
+/// Returns empty when there is no manifest or nothing is fetched yet —
+/// plain projects are unaffected.
 pub fn dep_bases_for_project(project_root: &Path, pkg_root: &Path) -> Vec<PathBuf> {
     let Ok(Some(manifest)) = crate::manifest::read_manifest_file(project_root) else {
         return Vec::new();
     };
-    if manifest.dependencies.is_empty() {
-        return Vec::new();
-    }
     let locked = crate::manifest::read_lockfile(project_root)
         .ok()
         .flatten()
         .unwrap_or_default();
+    if manifest.dependencies.is_empty() && locked.packages.is_empty() {
+        return Vec::new();
+    }
     let mut bases = Vec::new();
-    for (name, req) in &manifest.dependencies {
-        // Skip names that could never be imported (defensive: the manifest
-        // parser already rejects them, but lockfiles are hand-editable).
-        if !crate::manifest::is_valid_dep_name(name) {
-            continue;
-        }
-        let pinned = locked.packages.iter().find(|p| &p.name == name);
-        let (git, version, package) = match pinned {
-            Some(p) => (p.git.clone(), p.version.clone(), p.package.clone()),
-            None => (req.git.clone(), req.version.clone(), req.package.clone()),
-        };
-        let slot = pkg_slot_dir(pkg_root, &git, &version);
-        let root = match &package {
+    let mut push_slot = |git: &str, version: &str, package: &Option<String>| {
+        let slot = pkg_slot_dir(pkg_root, git, version);
+        let root = match package {
             Some(pkg) => {
                 let mut r = slot;
                 for seg in pkg.split("::") {
@@ -186,6 +178,25 @@ pub fn dep_bases_for_project(project_root: &Path, pkg_root: &Path) -> Vec<PathBu
         if root.is_dir() && !bases.contains(&root) {
             bases.push(root);
         }
+    };
+    // Direct deps first (manifest order), so their modules win ties.
+    for (name, req) in &manifest.dependencies {
+        // Skip names that could never be imported (defensive: the manifest
+        // parser already rejects them, but lockfiles are hand-editable).
+        if !crate::manifest::is_valid_dep_name(name) {
+            continue;
+        }
+        match locked.packages.iter().find(|p| &p.name == name) {
+            Some(p) => push_slot(&p.git, &p.version, &p.package),
+            None => push_slot(&req.git, &req.version, &req.package),
+        }
+    }
+    // Then transitive pins (lock order is by name — deterministic).
+    for p in &locked.packages {
+        if !crate::manifest::is_valid_dep_name(&p.name) {
+            continue;
+        }
+        push_slot(&p.git, &p.version, &p.package);
     }
     bases
 }

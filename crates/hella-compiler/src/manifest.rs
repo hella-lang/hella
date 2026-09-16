@@ -95,11 +95,14 @@ pub fn is_valid_dep_name(name: &str) -> bool {
 }
 
 /// Normalize a `git` source: trim whitespace, strip one leading
-/// `https://` / `http://`, strip trailing slashes and an optional `.git`
-/// suffix. Empty results are rejected by the caller.
+/// `https://` / `http://` / `file://`, strip trailing slashes and an
+/// optional `.git` suffix. Bare `owner/repo` gains a `github.com/` prefix.
+/// Absolute local paths map under `local/` (`/tmp/foo` → `local/tmp/foo`)
+/// so they stay rooted inside the `pkg/` cache. Empty results are rejected
+/// by the caller.
 pub fn normalize_git_source(raw: &str) -> String {
     let mut s = raw.trim().to_string();
-    for prefix in ["https://", "http://"] {
+    for prefix in ["https://", "http://", "file://"] {
         if let Some(rest) = s.strip_prefix(prefix) {
             s = rest.to_string();
             break;
@@ -111,7 +114,27 @@ pub fn normalize_git_source(raw: &str) -> String {
     if let Some(rest) = s.strip_suffix(".git") {
         s = rest.to_string();
     }
+    if s.starts_with('/') {
+        return format!("local{s}");
+    }
+    if !s.contains('/') {
+        return s;
+    }
+    // `owner/repo` (no dot in the first segment) defaults to GitHub.
+    let first = s.split('/').next().unwrap_or("");
+    if !first.contains('.') && !first.contains(':') {
+        return format!("github.com/{s}");
+    }
     s
+}
+
+/// Clone URL for a normalized `git` source: `local/...` maps back to the
+/// absolute path, everything else gains `https://`.
+pub fn clone_url(git: &str) -> String {
+    match git.strip_prefix("local/") {
+        Some(path) => format!("/{path}"),
+        None => format!("https://{git}"),
+    }
 }
 
 /// A version request is `latest`, `*`, or anything `semver::VersionReq`
@@ -407,6 +430,112 @@ pub fn serialize_lockfile(lock: &Lockfile) -> String {
     out
 }
 
+/// Derive the default short import name from a normalized `git` source:
+/// the last path segment, lowercased, with non-alphanumerics mapped to
+/// `_` (`github.com/Owner/My-Lib` → `my_lib`). A leading digit or the
+/// reserved `std` gains a leading underscore.
+pub fn derive_dep_name(git: &str) -> String {
+    let last = git
+        .trim_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(git);
+    let mut name: String = last
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // Collapse runs and trim edges so `-foo-` / `foo.bar` read cleanly.
+    let mut collapsed = String::with_capacity(name.len());
+    let mut prev_underscore = false;
+    for c in name.chars() {
+        if c == '_' {
+            if !prev_underscore {
+                collapsed.push(c);
+            }
+            prev_underscore = true;
+        } else {
+            collapsed.push(c);
+            prev_underscore = false;
+        }
+    }
+    name = collapsed.trim_matches('_').to_string();
+    if name.is_empty() {
+        name = "dep".to_string();
+    }
+    if name.chars().next().is_some_and(|c| c.is_ascii_digit()) || name == "std" {
+        name = format!("_{name}");
+    }
+    if !is_valid_dep_name(&name) {
+        // Paranoia fallback: keep only valid chars (always succeeds —
+        // worst case the `dep` default above).
+        let filtered: String = name
+            .chars()
+            .filter(|c| *c == '_' || c.is_ascii_alphanumeric())
+            .collect();
+        name = if is_valid_dep_name(&filtered) {
+            filtered
+        } else {
+            "dep".to_string()
+        };
+    }
+    name
+}
+
+/// Marker file written into every fetched `pkg/` slot (`.hella-slot`):
+/// the exact source the slot was populated from, so `remove`/`clean` can
+/// garbage-collect unreferenced slots regardless of directory depth.
+pub fn slot_marker_name() -> &'static str {
+    ".hella-slot"
+}
+
+/// Serialize a slot marker.
+pub fn serialize_slot_marker(git: &str, version: &str, rev: &str) -> String {
+    format!("git = \"{git}\"\nversion = \"{version}\"\nrev = \"{rev}\"\n")
+}
+
+/// Read a slot marker. `Ok(None)` when the directory holds no marker
+/// (not a managed slot); `Err` on malformed content.
+pub fn read_slot_marker(slot: &Path) -> Result<Option<(String, String, String)>, ManifestError> {
+    let path = slot.join(slot_marker_name());
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| ManifestError::Io {
+        path: path.display().to_string(),
+        source: e,
+    })?;
+    let value: toml::Value = text.parse().map_err(|e: toml::de::Error| {
+        ManifestError::Invalid(format!(
+            "malformed slot marker {}: {e}",
+            path.display()
+        ))
+    })?;
+    let table = value.as_table().ok_or_else(|| {
+        ManifestError::Invalid(format!(
+            "malformed slot marker {}: expected TOML table",
+            path.display()
+        ))
+    })?;
+    let get = |key: &str| {
+        table
+            .get(key)
+            .and_then(value_to_string)
+            .ok_or_else(|| {
+                ManifestError::Invalid(format!(
+                    "malformed slot marker {}: missing `{key}`",
+                    path.display()
+                ))
+            })
+    };
+    Ok(Some((get("git")?, get("version")?, get("rev")?)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,5 +672,28 @@ mod tests {
             normalize_git_source("  github.com/a/b/ "),
             "github.com/a/b"
         );
+        assert_eq!(normalize_git_source("owner/repo"), "github.com/owner/repo");
+        assert_eq!(
+            normalize_git_source("file:///tmp/foo"),
+            "local/tmp/foo"
+        );
+        assert_eq!(normalize_git_source("/tmp/foo"), "local/tmp/foo");
+        assert_eq!(
+            clone_url("github.com/a/b"),
+            "https://github.com/a/b"
+        );
+        assert_eq!(clone_url("local/tmp/foo"), "/tmp/foo");
+    }
+
+    #[test]
+    fn derives_dep_names() {
+        assert_eq!(derive_dep_name("github.com/Owner/My-Lib"), "my_lib");
+        assert_eq!(derive_dep_name("github.com/o/foo.bar"), "foo_bar");
+        assert_eq!(derive_dep_name("github.com/o/2fast"), "_2fast");
+        assert_eq!(derive_dep_name("github.com/o/std"), "_std");
+        assert_eq!(derive_dep_name("local/tmp/my-lib"), "my_lib");
+        for n in ["my_lib", "foo_bar", "_2fast", "_std"] {
+            assert!(is_valid_dep_name(n), "{n}");
+        }
     }
 }

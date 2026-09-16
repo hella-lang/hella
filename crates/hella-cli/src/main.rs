@@ -16,6 +16,8 @@ use hella_compiler::lexer::lex;
 // (`stdlib/**/*.hll`), used by `hella setup` to populate the user library dir.
 include!(concat!(env!("OUT_DIR"), "/stdlib_embedded.rs"));
 
+mod pkg;
+
 // Platform shim (`runtime/hella_rt.c`): POSIX names missing from the MSVC C
 // runtime (`write`, `setenv`, `unsetenv`, `access`, `strdup`), defined only
 // under `_WIN32`. Compiled and linked on Windows; nothing to do elsewhere.
@@ -84,6 +86,10 @@ enum Commands {
     New(NewArgs),
     /// Format Hella source files (canonical style, in place)
     Fmt(FmtArgs),
+    /// Add a third-party library (`<source>[@<rev>]`, git URL or local path)
+    Add(AddArgs),
+    /// Remove a third-party library dependency
+    Remove(RemoveArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -234,6 +240,23 @@ struct CheckArgs {
     verbose: bool,
 }
 
+#[derive(Parser, Debug)]
+struct AddArgs {
+    /// Package source with optional `@<rev>`: `github.com/owner/repo`,
+    /// `owner/repo`, URL, or local path (e.g. `github.com/owner/repo@v1.2.0`)
+    spec: String,
+
+    /// Short import name to register (default: derived from the repo name)
+    #[arg(long)]
+    name: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+struct RemoveArgs {
+    /// Short import name of the dependency to remove
+    name: String,
+}
+
 /// Shared knobs for the compile pipeline (used by `build`, `run` and `check`).
 struct CompileOptions<'a> {
     file: &'a Path,
@@ -268,6 +291,8 @@ fn main() -> miette::Result<()> {
         Commands::Setup(args) => run_setup(args),
         Commands::New(args) => run_new(args),
         Commands::Fmt(args) => run_fmt(args),
+        Commands::Add(args) => run_add(args),
+        Commands::Remove(args) => run_remove(args),
     }
 }
 
@@ -612,6 +637,52 @@ fn run_fmt(args: FmtArgs) -> miette::Result<()> {
         changed,
     );
     Ok(())
+}
+
+/// Package-cache roots for `add`/`remove`: the `pkg/` slots plus a `cache/`
+/// scratch area (falls back to the system temp dir when no home exists).
+fn pkg_dirs() -> miette::Result<(PathBuf, PathBuf)> {
+    let home = hella_compiler::modules::hella_home().unwrap_or_else(|| {
+        std::env::temp_dir().join(".hella")
+    });
+    let pkg_root = home.join("pkg");
+    let cache_root = home.join("cache");
+    for dir in [&pkg_root, &cache_root] {
+        fs::create_dir_all(dir).map_err(|e| {
+            miette::miette!("failed to create {}: {e}", dir.display())
+        })?;
+    }
+    Ok((pkg_root, cache_root))
+}
+
+/// Add a third-party library to the current project.
+fn run_add(args: AddArgs) -> miette::Result<()> {
+    let cwd = std::env::current_dir().map_err(|e| {
+        miette::miette!("failed to read current directory: {e}")
+    })?;
+    let Some(root) = find_project_root(&cwd) else {
+        return Err(miette::miette!(
+            "not in a Hella project (no hella.toml found in {} or parents); run `hella new <name>` first",
+            cwd.display()
+        ));
+    };
+    let (pkg_root, cache_root) = pkg_dirs()?;
+    pkg::run_add(&root, &pkg_root, &cache_root, &args.spec, args.name.as_deref())
+}
+
+/// Remove a third-party library from the current project.
+fn run_remove(args: RemoveArgs) -> miette::Result<()> {
+    let cwd = std::env::current_dir().map_err(|e| {
+        miette::miette!("failed to read current directory: {e}")
+    })?;
+    let Some(root) = find_project_root(&cwd) else {
+        return Err(miette::miette!(
+            "not in a Hella project (no hella.toml found in {} or parents)",
+            cwd.display()
+        ));
+    };
+    let (pkg_root, _) = pkg_dirs()?;
+    pkg::run_remove(&root, &pkg_root, &args.name)
 }
 
 /// Install the embedded standard library (`stdlib/**/*.hll` baked in by
