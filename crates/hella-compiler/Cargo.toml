@@ -4,7 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-inkwell = { version = "0.10", features = ["llvm21-1"] }
+# Only the host-family backends: the per-target init fns for the rest
+# reference LLVM target libs that some distributions (notably the
+# upstream Windows tarball) do not ship, breaking the link.
+# default-features off drops inkwell's default target-all.
+inkwell = { version = "0.10", default-features = false, features = ["llvm21-1", "target-x86", "target-aarch64"] }
 logos = "0.16.1"
 miette = { version = "7", features = ["fancy"] }
 thiserror = "2"
