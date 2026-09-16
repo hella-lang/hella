@@ -205,7 +205,26 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     pub fn get_module_ir(&self) -> String {
-        self.module.print_to_string().to_string()
+        // NOTE: never `print_to_string` here. It returns an LLVMString
+        // whose drop calls LLVMDisposeMessage, which segfaults
+        // (STATUS_ACCESS_VIOLATION) on Windows — upstream Windows LLVM
+        // builds use rpmalloc and the free crosses heaps. Round-trip
+        // through a temp file instead: `print_to_file` creates no
+        // LLVMString on success.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "hella-ir-{}-{}.ll",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed),
+        ));
+        self.module
+            .print_to_file(&path)
+            .expect("failed to write module IR to temp file");
+        let ir =
+            std::fs::read_to_string(&path).expect("failed to read module IR back");
+        let _ = std::fs::remove_file(&path);
+        ir
     }
 
     /// Run the standard O3 pipeline over the module via the new pass
