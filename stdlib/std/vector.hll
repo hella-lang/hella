@@ -1,0 +1,134 @@
+// std::vector — vector helpers for Hella (real stdlib: pure Hella).
+// Import via: import std::vector
+// (named `vector`, not `vec`: `vec` is a compiler keyword and cannot
+// appear as an import path segment).
+
+import std::str
+//
+// Thin facades over the compiler's vector methods (`len`, `is_empty`,
+// `push`, `pop`, `contains`, `first`, `last`) plus loop-based extras
+// the method surface lacks (`iSum`, `iIndexOf`, `sJoin`).
+// No overloading in Hella, so one prefix per element type:
+// `i*` = int vec, `s*` = string vec, `d*` = double vec.
+// Mutating helpers (`*Push`, `*Pop`, `*Clear`) take `ref` so the
+// caller's length/capacity header is updated.
+
+int iLen(int vec v) do
+    return v.len()
+end
+
+bool iIsEmpty(int vec v) do
+    return v.is_empty()
+end
+
+bool iContains(int vec v, int x) do
+    return v.contains(x)
+end
+
+int iFirst(int vec v) do
+    return v.first()
+end
+
+int iLast(int vec v) do
+    return v.last()
+end
+
+void iPush(ref int vec v, int x) do
+    v.push(x)
+end
+
+int iPop(ref int vec v) do
+    return v.pop()
+end
+
+// NOTE: no `iClear`/`sClear` facades: the compiler's `clear()` method
+// fails LLVM verification even on locals (dangling idx loop), so it is
+// unusable through any wrapper until codegen is fixed. `pop` in a loop
+// or rebinding to a fresh literal covers the need.
+
+int iSum(int vec v) do
+    int total = 0
+    int i = 0
+    int n = v.len()
+    while i < n do
+        total = total + v[i]
+        i = i + 1
+    end
+    return total
+end
+
+int iIndexOf(int vec v, int x) do
+    int i = 0
+    int n = v.len()
+    while i < n do
+        if v[i] is x do
+            return i
+        end
+        i = i + 1
+    end
+    return -1
+end
+
+int sLen(string vec v) do
+    return v.len()
+end
+
+bool sIsEmpty(string vec v) do
+    return v.is_empty()
+end
+
+// NOTE: not `v.contains(x)` — the compiler's `contains` on string
+// (ptr-element) vecs hangs at runtime (broken ptr-compare lowering,
+// even on locals). strcmp-based loop instead.
+bool sContains(string vec v, string x) do
+    int i = 0
+    int n = v.len()
+    while i < n do
+        if equals(v[i], x) do
+            return true
+        end
+        i = i + 1
+    end
+    return false
+end
+
+string sFirst(string vec v) do
+    return v.first()
+end
+
+string sLast(string vec v) do
+    return v.last()
+end
+
+void sPush(ref string vec v, string x) do
+    v.push(x)
+end
+
+string sPop(ref string vec v) do
+    return v.pop()
+end
+
+string sJoin(string vec v, string sep) do
+    string acc = ""
+    int i = 0
+    int n = v.len()
+    while i < n do
+        if i > 0 do
+            acc = "{acc}{sep}"
+        end
+        acc = "{acc}{v[i]}"
+        i = i + 1
+    end
+    return acc
+end
+
+// NOTE: no `dContains` — the compiler's `contains` on double vecs
+// miscompiles f64 comparison (false even on locals). No `dSum` either:
+// `+` has no double overload in codegen yet.
+int dLen(double vec v) do
+    return v.len()
+end
+
+void dPush(ref double vec v, double x) do
+    v.push(x)
+end

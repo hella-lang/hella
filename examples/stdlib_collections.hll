@@ -1,0 +1,65 @@
+// stdlib_collections.hll — regression for std::vector + std::map
+
+import std::vector
+import std::map
+import std::io
+import std::str
+
+int main() do
+    int vec nums = [1, 2, 3]
+    string vec names = ["John"]
+    string:int ages = has "John": 25 end
+    int:int squares = has 2: 4 end
+    string:string caps = has "us": "dc" end
+    double vec ds = [1.5]
+    string joined = ""
+    int total = 0
+    assert iLen(nums) is 3
+    assert iContains(nums, 2) is true
+    assert iContains(nums, 9) is false
+    assert iFirst(nums) is 1
+    assert iLast(nums) is 3
+    assert iSum(nums) is 6
+    assert iIndexOf(nums, 2) is 1
+    assert iIndexOf(nums, 9) is -1
+    iPush(ref nums, 4)
+    assert iLen(nums) is 4
+    assert iSum(nums) is 10
+    assert iPop(ref nums) is 4
+    assert iLen(nums) is 3
+    assert sLen(names) is 1
+    assert sContains(names, "John") is true
+    assert sContains(names, "Jane") is false
+    assert equals(sFirst(names), "John") is true
+    sPush(ref names, "Jane")
+    assert sLen(names) is 2
+    assert equals(sLast(names), "Jane") is true
+    joined = sJoin(names, ",")
+    assert equals(joined, "John,Jane") is true
+    assert sPop(ref names) is "Jane"
+    assert dLen(ds) is 1
+    dPush(ref ds, 2.5)
+    assert dLen(ds) is 2
+    assert siLen(ages) is 1
+    assert siHas(ages, "John") is true
+    assert siHas(ages, "Bob") is false
+    assert siGetOr(ages, "John", 0) is 25
+    assert siGetOr(ages, "Bob", 99) is 99
+    assert iiHas(squares, 2) is true
+    assert iiHas(squares, 3) is false
+    assert iiGetOr(squares, 3, 7) is 7
+    assert iiLen(squares) is 1
+    assert iiIsEmpty(squares) is false
+    assert ssLen(caps) is 1
+    assert ssHas(caps, "us") is true
+    assert ssHas(caps, "fr") is false
+    assert equals(ssGetOr(caps, "us", "?"), "dc") is true
+    assert equals(ssGetOr(caps, "fr", "?"), "?") is true
+    assert ssIsEmpty(caps) is false
+    assert siHas(ages, "John") is true
+    assert siIsEmpty(ages) is false
+    total = iSum(nums) + siGetOr(ages, "Bob", 99) + iiGetOr(squares, 2, 0)
+    assert total is 109
+    println("collections ok")
+    return 0
+end

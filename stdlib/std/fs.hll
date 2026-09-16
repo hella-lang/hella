@@ -1,0 +1,76 @@
+// std::fs — file I/O for Hella (real stdlib: pure Hella + extern FFI).
+// Import via: import std::fs
+
+extern "c" from "libc" do
+    string fopen(string path, string mode)
+    int fclose(string file)
+    int fseek(string file, int offset, int origin)
+    int ftell(string file)
+    int fread(string buf, int size, int count, string file)
+    int fwrite(string buf, int size, int count, string file)
+    int remove(string path)
+    int access(string path, int mode)
+    string calloc(int n, int size)
+    int strlen(string s)
+end
+
+bool exists(string path) do
+    return access(path, 0) is 0
+end
+
+string readFile(string path) do
+    string f = fopen(path, "r")
+    int size = 0
+    string buf = ""
+    if f is null do
+        return ""
+    end
+    fseek(f, 0, 2)
+    size = ftell(f)
+    fseek(f, 0, 0)
+    if size < 0 do
+        size = 0
+    end
+    if size is 0 do
+        fclose(f)
+        return ""
+    end
+    buf = calloc(1, size + 1)
+    fread(buf, 1, size, f)
+    fclose(f)
+    return buf
+end
+
+void writeFile(string path, string data) do
+    string f = fopen(path, "w")
+    int len = 0
+    if f is null do
+        return
+    end
+    len = strlen(data)
+    if len is 0 do
+        fclose(f)
+        return
+    end
+    fwrite(data, 1, len, f)
+    fclose(f)
+end
+
+void appendFile(string path, string data) do
+    string f = fopen(path, "a")
+    int len = 0
+    if f is null do
+        return
+    end
+    len = strlen(data)
+    if len is 0 do
+        fclose(f)
+        return
+    end
+    fwrite(data, 1, len, f)
+    fclose(f)
+end
+
+void removeFile(string path) do
+    remove(path)
+end

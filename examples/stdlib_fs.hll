@@ -1,0 +1,26 @@
+// stdlib_fs.hll — regression for std::fs
+
+import std::fs
+import std::io
+import std::str
+
+int main() do
+    string path = "/tmp/hella_fs_test.txt"
+    string data = "hello fs"
+    string content = ""
+    string content2 = ""
+    string missing = ""
+    writeFile(path, data)
+    assert exists(path) is true
+    content = readFile(path)
+    assert equals(content, data) is true
+    appendFile(path, "!")
+    content2 = readFile(path)
+    assert equals(content2, "hello fs!") is true
+    removeFile(path)
+    assert exists(path) is false
+    missing = readFile("/tmp/hella_no_such_file_xyz.txt")
+    assert isEmpty(missing) is true
+    println("fs ok")
+    return 0
+end

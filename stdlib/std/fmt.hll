@@ -1,0 +1,85 @@
+// std::fmt — formatting helpers for Hella (real stdlib: pure Hella + extern FFI).
+// Import via: import std::fmt
+//
+// `sprintf`-backed concrete formatters (C varargs have no Hella-level
+// spread/forwarding syntax, so one function per arity/type-shape),
+// plus pure-Hella interpolation helpers (`join`, `repeat`, `padStart`,
+// `padEnd`). Buffers are 4096-byte `calloc` slabs; longer output is
+// truncated by libc, never overflows.
+
+import std::str
+import std::vector
+
+extern "c" from "libc" do
+    int sprintf(string buf, string fmt, ...)
+    string calloc(int n, int size)
+end
+
+string formatS(string fmt, string a) do
+    string buf = calloc(1, 4096)
+    sprintf(buf, fmt, a)
+    return buf
+end
+
+string formatSS(string fmt, string a, string b) do
+    string buf = calloc(1, 4096)
+    sprintf(buf, fmt, a, b)
+    return buf
+end
+
+string formatD(string fmt, int n) do
+    string buf = calloc(1, 4096)
+    sprintf(buf, fmt, n)
+    return buf
+end
+
+string formatDD(string fmt, int a, int b) do
+    string buf = calloc(1, 4096)
+    sprintf(buf, fmt, a, b)
+    return buf
+end
+
+string formatF(string fmt, double x) do
+    string buf = calloc(1, 4096)
+    sprintf(buf, fmt, x)
+    return buf
+end
+
+string formatDS(string fmt, int n, string s) do
+    string buf = calloc(1, 4096)
+    sprintf(buf, fmt, n, s)
+    return buf
+end
+
+string join(string sep, string vec parts) do
+    return sJoin(parts, sep)
+end
+
+string repeat(string s, int n) do
+    string acc = ""
+    int i = 0
+    if n < 0 do
+        n = 0
+    end
+    while i < n do
+        acc = "{acc}{s}"
+        i = i + 1
+    end
+    return acc
+end
+
+string padStart(string s, int width) do
+    string acc = s
+    while len(acc) < width do
+        acc = " {acc}"
+    end
+    return acc
+end
+
+string padEnd(string s, int width) do
+    string acc = s
+    while len(acc) < width do
+        acc = "{acc} "
+    end
+    return acc
+end

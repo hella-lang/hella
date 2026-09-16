@@ -32,6 +32,32 @@ without its `import` is a sema error (`undefined function`) by design.
     `bool contains`/`startsWith`/`endsWith`, `string clone`/`substring`
   - via `strlen`/`strcmp`/`strncmp`/`strdup`/`calloc`; `contains`/`endsWith`/
     `substring` are pure Hella loops (no `Range` iteration — while loops)
+- `std::env` — `stdlib/std/env.hll`
+  - `string getEnv(string name)` (getenv + "" on miss, `string is null` now allowed), `bool hasEnv`, `void setEnv`/`unsetEnv` (setenv/unsetenv), `string cwd()` (getcwd + calloc)
+- `std::fs` — `stdlib/std/fs.hll`
+  - `bool exists(string path)` (access), `string readFile`/`void writeFile`/`appendFile`/`removeFile` (fopen/fseek/ftell/fread/fwrite/remove)
+- `std::vector` — `stdlib/std/vector.hll` (pure Hella; named `vector` because
+  `vec` is a compiler keyword and cannot be an import segment)
+  - int vec: `iLen`/`iIsEmpty`/`iContains`/`iFirst`/`iLast`, `iPush`/`iPop`
+    (`ref`), `iSum`/`iIndexOf` (loops)
+  - string vec: `sLen`/`sIsEmpty`/`sFirst`/`sLast`, `sPush`/`sPop` (`ref`),
+    `sContains`/`sJoin` (loops over `equals`/interpolation — the
+    `contains` method hangs on ptr-element vecs)
+  - double vec: `dLen`, `dPush` (`ref`) only (`contains` miscompiles f64,
+    `+` has no double overload)
+  - no `*Clear`: `clear()` fails LLVM verification even on locals
+- `std::map` — `stdlib/std/map.hll` (pure Hella, read-only)
+  - `si*` (string:int), `ii*` (int:int), `ss*` (string:string):
+    `Len`/`IsEmpty` (methods) + `Has`/`GetOr` (`for`-in loops — keyed
+    methods and `m[k]` fail verification through by-value params)
+  - mutate with direct local calls (`m.remove(k)`); `ref`-param method
+    calls do not codegen
+- `std::fmt` — `stdlib/std/fmt.hll`
+  - `formatS`/`formatSS`/`formatD`/`formatDD`/`formatF`/`formatDS` over
+    `sprintf` into 4KB `calloc` slabs (one fn per arity/shape — Hella has
+    no spread/forwarding syntax for C varargs)
+  - `join(sep, parts)` (via `sJoin`), `repeat`, `padStart`/`padEnd`
+    (interpolation loops)
 - `std::types` — `stdlib/std/types.hll` (doc-only manifest of the implicit
   environment: `bool string i8…u128 int uint float double`; importing is a no-op)
 
@@ -55,4 +81,6 @@ printf 'Ada\n42\n' | ./stdlib_io
 
 ## Not yet
 
-`std::env` (getEnv, argCount), `std::fs` (readFile/writeFile), `std::vec`/`std::map` helpers, `std::fmt` (format/join).
+`std::env` argument plumbing (`argCount`/`argAt`), `std::option`/`std::result`
+(generic enum payloads codegen as `i64` only), trait-extension sugar
+(`extend string do … end`).

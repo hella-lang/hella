@@ -1,0 +1,25 @@
+// stdlib_env.hll — regression for std::env
+
+import std::env
+import std::io
+import std::str
+
+int main() do
+    string home = getEnv("HOME")
+    // HOME should exist on macOS/Linux, non-empty
+    assert isEmpty(home) is false
+    println("HOME ok")
+    string missing = getEnv("THIS_VAR_DOES_NOT_EXIST_hella_test")
+    assert isEmpty(missing) is true
+    assert hasEnv("HOME") is true
+    assert hasEnv("THIS_VAR_DOES_NOT_EXIST_hella_test") is false
+    // set and check
+    setEnv("HELLA_TEST_ENV", "hello_env")
+    assert equals(getEnv("HELLA_TEST_ENV"), "hello_env") is true
+    unsetEnv("HELLA_TEST_ENV")
+    assert isEmpty(getEnv("HELLA_TEST_ENV")) is true
+    string dir = cwd()
+    assert isEmpty(dir) is false
+    println("env ok")
+    return 0
+end

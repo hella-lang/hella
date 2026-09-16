@@ -1,0 +1,94 @@
+// std::map — map helpers for Hella (real stdlib: pure Hella).
+// Import via: import std::map
+//
+// Read-only facades (`len`, `is_empty` via methods; `*Has`, `*GetOr`
+// via `for`-in iteration). No overloading in Hella, so one prefix per
+// key/value pair: `si*` = string:int, `ii*` = int:int,
+// `ss*` = string:string.
+//
+// NOTE: no mutating facades (`remove`/`clear`, keyed `contains`/
+// `get_or` methods, `m[k]` subscript): key-taking map operations fail
+// LLVM verification through by-value params, and `ref` params cannot
+// carry map method calls (`cannot infer type`) until codegen is fixed.
+// Mutate maps with direct method calls on locals (`m.remove(k)`).
+// Missing-key reads yield the zero value; `*GetOr` supplies a fallback.
+
+import std::str
+
+int siLen(string:int m) do
+    return m.len()
+end
+
+bool siIsEmpty(string:int m) do
+    return m.is_empty()
+end
+
+bool siHas(string:int m, string k) do
+    for key in m do
+        if equals(key, k) do
+            return true
+        end
+    end
+    return false
+end
+
+int siGetOr(string:int m, string k, int d) do
+    for key, val in m do
+        if equals(key, k) do
+            return val
+        end
+    end
+    return d
+end
+
+int iiLen(int:int m) do
+    return m.len()
+end
+
+bool iiIsEmpty(int:int m) do
+    return m.is_empty()
+end
+
+bool iiHas(int:int m, int k) do
+    for key in m do
+        if key is k do
+            return true
+        end
+    end
+    return false
+end
+
+int iiGetOr(int:int m, int k, int d) do
+    for key, val in m do
+        if key is k do
+            return val
+        end
+    end
+    return d
+end
+
+int ssLen(string:string m) do
+    return m.len()
+end
+
+bool ssIsEmpty(string:string m) do
+    return m.is_empty()
+end
+
+bool ssHas(string:string m, string k) do
+    for key in m do
+        if equals(key, k) do
+            return true
+        end
+    end
+    return false
+end
+
+string ssGetOr(string:string m, string k, string d) do
+    for key, val in m do
+        if equals(key, k) do
+            return val
+        end
+    end
+    return d
+end

@@ -581,6 +581,51 @@ impl Checker {
         None
     }
 
+    /// Convert unknown single-uppercase `Struct("T")` into `Generic("T")`
+    /// recursively (vec/array/map/pointer/optional/tuple/function args).
+    /// Lets `T vec`, `T arr`, `K:V` etc. name generic params.
+    fn canonicalize_generic_param(ty: Ty, ck: &Checker) -> Ty {
+        // Helper: is `n` an unbound single-uppercase param?
+        let is_param = |n: &str| -> bool {
+            let lookup = n.rsplit("::").next().unwrap_or(n);
+            lookup.len() == 1
+                && lookup.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && !ck.structs.contains_key(lookup)
+                && !ck.classes.contains_key(lookup)
+                && !ck.enums.contains_key(lookup)
+                && !ck.traits.contains_key(lookup)
+        };
+        match ty {
+            Ty::Struct(n) if is_param(&n) => {
+                Ty::Generic(n.rsplit("::").next().unwrap_or(&n).to_string(), vec![])
+            }
+            Ty::Array(e) => Ty::Array(Box::new(Self::canonicalize_generic_param(*e, ck))),
+            Ty::Vec(e) => Ty::Vec(Box::new(Self::canonicalize_generic_param(*e, ck))),
+            Ty::FixedArray { elem, size } => Ty::FixedArray {
+                elem: Box::new(Self::canonicalize_generic_param(*elem, ck)),
+                size,
+            },
+            Ty::Map { key, value } => Ty::Map {
+                key: Box::new(Self::canonicalize_generic_param(*key, ck)),
+                value: Box::new(Self::canonicalize_generic_param(*value, ck)),
+            },
+            Ty::Pointer(e) => Ty::Pointer(Box::new(Self::canonicalize_generic_param(*e, ck))),
+            Ty::Optional(e) => Ty::Optional(Box::new(Self::canonicalize_generic_param(*e, ck))),
+            Ty::Tuple(es) => {
+                Ty::Tuple(es.into_iter().map(|e| Self::canonicalize_generic_param(e, ck)).collect())
+            }
+            Ty::Generic(n, args) => Ty::Generic(
+                n,
+                args.into_iter().map(|a| Self::canonicalize_generic_param(a, ck)).collect(),
+            ),
+            Ty::Function(ret, params) => Ty::Function(
+                Box::new(Self::canonicalize_generic_param(*ret, ck)),
+                params.into_iter().map(|p| Self::canonicalize_generic_param(p, ck)).collect(),
+            ),
+            other => other,
+        }
+    }
+
     /// True when `own` appears anywhere inside a type (including as the
     /// whole type — callers exclude positions they already validated).
     fn contains_own(ty: &Ty) -> bool {
@@ -910,6 +955,13 @@ impl Checker {
             }
         }
         let mut t = Ty::from(ty);
+        // Canonicalize single-uppercase `Struct("T")` (unknown) into
+        // `Generic("T")` in *nested* positions, so `T vec`, `T arr`,
+        // `K:V` maps etc. work as generic params. Top-level bare `T`
+        // keeps the existing early-return path below untouched.
+        if !matches!(t, Ty::Struct(_)) {
+            t = Self::canonicalize_generic_param(t, self);
+        }
         // Handle generic type params: if t is Struct with name that is a generic param, treat as Generic
         if let Ty::Struct(ref n) = t {
             let lookup = n.rsplit("::").next().unwrap_or(n);
@@ -2832,7 +2884,9 @@ impl Checker {
                         // Allow `own T is own U` (any inner) and `own is null`.
                         let own_pair = matches!(&lt, Ty::Own(_)) && (matches!(&rt, Ty::Own(_)) || matches!(&rt, Ty::Any));
                         let own_pair_rev = matches!(&rt, Ty::Own(_)) && matches!(&lt, Ty::Any);
-                        if !(own_pair || own_pair_rev) && lt != rt {
+                        let string_null = (lt == Ty::String && rt == Ty::Any) || (rt == Ty::String && lt == Ty::Any);
+                        let pointer_null = matches!(&lt, Ty::Pointer(_)) && rt == Ty::Any || matches!(&rt, Ty::Pointer(_)) && lt == Ty::Any;
+                        if !(own_pair || own_pair_rev || string_null || pointer_null) && lt != rt {
                             self.errors.push(SemError{message: format!("`is` requires matching types, found `{lt}` and `{rt}`"), span: expr.span});
                         }
                         Ty::Bool

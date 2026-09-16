@@ -1,0 +1,37 @@
+// stdlib_fmt.hll — regression for std::fmt (interpolation parity)
+
+import std::fmt
+import std::io
+import std::str
+
+int main() do
+    string who = "bob"
+    int n = 42
+    string vec parts = ["a", "b"]
+    string a = ""
+    string b = ""
+    string c = ""
+    string d = ""
+    string e = ""
+    string f = ""
+    a = formatS("hi %s!", who)
+    assert equals(a, "hi {who}!") is true
+    b = formatSS("%s=%s", "k", "v")
+    assert equals(b, "k=v") is true
+    c = formatD("n=%d", n)
+    assert equals(c, "n={n}") is true
+    d = formatDD("%d+%d", 1, 2)
+    assert equals(d, "1+2") is true
+    e = formatDS("%d %s", 7, who)
+    assert equals(e, "7 {who}") is true
+    assert equals(formatF("x=%.1f", 2.5), "x=2.5") is true
+    f = join(",", parts)
+    assert equals(f, "a,b") is true
+    assert equals(repeat("ab", 3), "ababab") is true
+    assert equals(repeat("ab", 0), "") is true
+    assert equals(padStart("hi", 4), "  hi") is true
+    assert equals(padEnd("hi", 4), "hi  ") is true
+    assert equals(padStart("hello", 3), "hello") is true
+    println("fmt ok")
+    return 0
+end

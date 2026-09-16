@@ -7018,6 +7018,18 @@ impl<'ctx> Codegen<'ctx> {
                             let li = self.builder.build_ptr_to_int(lptr, self.context.i64_type(), "is.li").unwrap();
                             let ri = self.builder.build_ptr_to_int(rptr, self.context.i64_type(), "is.ri").unwrap();
                             self.builder.build_int_compare(IntPredicate::EQ, li, ri, "is").unwrap().into()
+                        } else if l.is_pointer_value() && r.is_pointer_value() {
+                            let li = self.builder.build_ptr_to_int(l.into_pointer_value(), self.context.i64_type(), "is.li").unwrap();
+                            let ri = self.builder.build_ptr_to_int(r.into_pointer_value(), self.context.i64_type(), "is.ri").unwrap();
+                            self.builder.build_int_compare(IntPredicate::EQ, li, ri, "is").unwrap().into()
+                        } else if l.is_pointer_value() {
+                            let li = self.builder.build_ptr_to_int(l.into_pointer_value(), self.context.i64_type(), "is.li").unwrap();
+                            let ri = if r.is_int_value() { r.into_int_value() } else { self.builder.build_ptr_to_int(r.into_pointer_value(), self.context.i64_type(), "is.ri").unwrap() };
+                            self.builder.build_int_compare(IntPredicate::EQ, li, ri, "is").unwrap().into()
+                        } else if r.is_pointer_value() {
+                            let ri = self.builder.build_ptr_to_int(r.into_pointer_value(), self.context.i64_type(), "is.ri").unwrap();
+                            let li = if l.is_int_value() { l.into_int_value() } else { self.builder.build_ptr_to_int(l.into_pointer_value(), self.context.i64_type(), "is.li").unwrap() };
+                            self.builder.build_int_compare(IntPredicate::EQ, li, ri, "is").unwrap().into()
                         } else {
                             self.builder.build_int_compare(IntPredicate::EQ, l.into_int_value(), r.into_int_value(), "is").unwrap().into()
                         }
@@ -7028,6 +7040,18 @@ impl<'ctx> Codegen<'ctx> {
                             let rptr = self.builder.build_extract_value(r.into_struct_value(), 0, "isnot.rdata").unwrap().into_pointer_value();
                             let li = self.builder.build_ptr_to_int(lptr, self.context.i64_type(), "isnot.li").unwrap();
                             let ri = self.builder.build_ptr_to_int(rptr, self.context.i64_type(), "isnot.ri").unwrap();
+                            self.builder.build_int_compare(IntPredicate::NE, li, ri, "isnot").unwrap().into()
+                        } else if l.is_pointer_value() && r.is_pointer_value() {
+                            let li = self.builder.build_ptr_to_int(l.into_pointer_value(), self.context.i64_type(), "isnot.li").unwrap();
+                            let ri = self.builder.build_ptr_to_int(r.into_pointer_value(), self.context.i64_type(), "isnot.ri").unwrap();
+                            self.builder.build_int_compare(IntPredicate::NE, li, ri, "isnot").unwrap().into()
+                        } else if l.is_pointer_value() {
+                            let li = self.builder.build_ptr_to_int(l.into_pointer_value(), self.context.i64_type(), "isnot.li").unwrap();
+                            let ri = if r.is_int_value() { r.into_int_value() } else { self.builder.build_ptr_to_int(r.into_pointer_value(), self.context.i64_type(), "isnot.ri").unwrap() };
+                            self.builder.build_int_compare(IntPredicate::NE, li, ri, "isnot").unwrap().into()
+                        } else if r.is_pointer_value() {
+                            let ri = self.builder.build_ptr_to_int(r.into_pointer_value(), self.context.i64_type(), "isnot.ri").unwrap();
+                            let li = if l.is_int_value() { l.into_int_value() } else { self.builder.build_ptr_to_int(l.into_pointer_value(), self.context.i64_type(), "isnot.li").unwrap() };
                             self.builder.build_int_compare(IntPredicate::NE, li, ri, "isnot").unwrap().into()
                         } else {
                             self.builder.build_int_compare(IntPredicate::NE, l.into_int_value(), r.into_int_value(), "isnot").unwrap().into()
