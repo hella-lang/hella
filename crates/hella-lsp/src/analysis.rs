@@ -2906,6 +2906,59 @@ mod tests {
         assert!(m.value.contains("heap-owned"), "ownership note, got: {}", m.value);
     }
 
+    #[test]
+    fn real_stdlib_io_docs_attach() {
+        let io = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stdlib/std/io.hll");
+        let src = std::fs::read_to_string(&io).unwrap();
+        let out = hella_compiler::lexer::lex(&src);
+        assert!(out.errors.is_empty());
+        let prog = hella_compiler::parse::parse(out.tokens, src.clone()).unwrap();
+        let a = Analysis::from_program_with_source(&prog, &src);
+        let print = a
+            .top_symbols()
+            .iter()
+            .find(|s| s.name == "print")
+            .unwrap();
+        assert_eq!(
+            print.doc.as_deref(),
+            Some("Prints `s` to stdout with no trailing newline.")
+        );
+        // Hover on the declaration shows the doc.
+        let off = src.find("void print").unwrap() + 6;
+        let text = hover_text(&a, &src, off);
+        assert!(text.contains("Prints `s`"), "hover shows doc, got: {text}");
+    }
+
+    #[test]
+    fn hover_std_io_through_real_resolver() {
+        // End-to-end like the server: `import std::io` in a repo project
+        // must resolve to the live checkout file (with `///` docs), and
+        // hovering the use must show the doc.
+        let entry = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/stdlib_io.hll");
+        assert!(entry.is_file(), "repo example exists: {}", entry.display());
+        let bases = hella_compiler::modules::search_bases(&entry);
+        let resolved = hella_compiler::modules::resolve_import(
+            &["std".to_string(), "io".to_string()],
+            &bases,
+        )
+        .expect("std::io resolves");
+        assert!(
+            resolved.ends_with("stdlib/std/io.hll"),
+            "live checkout, got: {}",
+            resolved.display()
+        );
+        let src = "import std::io\n\nvoid main() do\n  print(\"x\")\nend\n";
+        let out = hella_compiler::lexer::lex(src);
+        let prog = hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
+        let mut a = Analysis::from_program_with_source(&prog, src);
+        a.load_imports(&entry, &prog);
+        let use_off = src.find("print(\"x\")").unwrap();
+        let text = hover_text(&a, src, use_off);
+        assert!(text.contains("Prints `s`"), "hover shows doc, got: {text}");
+    }
+
     fn analyze_with_docs(src: &str) -> Analysis {
         let out = hella_compiler::lexer::lex(src);
         let prog = hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
