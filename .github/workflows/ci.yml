@@ -138,9 +138,12 @@ jobs:
           fi
           echo "TEST_EXE=$TEST_EXE"
           TEST_WIN="$(cygpath -w "$TEST_EXE")"
-          for i in 1 2 3 4; do
+          # Full suite, single-threaded: the void_extension crash is
+          # fixed, but the suite still dies a few tests in — catch the
+          # next crash site wherever it is.
+          for i in 1 2; do
             echo "--- cdb attempt $i ---"
-            "$CDB" -g -G -c "g;.lastevent;r;k L100;lm m LLVM*;q" "$TEST_WIN" --test-threads=1 --exact codegen::tests::void_extension_method_verifies > /tmp/cdb-run.log 2>&1
+            "$CDB" -g -G -c "g;.lastevent;r;k L100;lm m LLVM*;q" "$TEST_WIN" --test-threads=1 > /tmp/cdb-run.log 2>&1
             grep -i -m1 "c0000005\|access violation" /tmp/cdb-run.log && break
             echo "(no crash captured)"
           done
