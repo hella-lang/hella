@@ -68,6 +68,18 @@ jobs:
           echo "C:/LLVM/bin" >> "$GITHUB_PATH"
           echo "LLVM_SYS_211_PREFIX=C:/LLVM" >> "$GITHUB_ENV"
 
+      # llvm-config --system-libs names libxml2s.lib but the tarball
+      # does not ship it under that name; the sibling libxml2 import
+      # lib satisfies the same symbols (DLL resolves via PATH above).
+      - name: Provide libxml2s.lib (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          ls C:/LLVM/lib | grep -i -E "xml|zstd" || true
+          if [ ! -f C:/LLVM/lib/libxml2s.lib ] && [ -f C:/LLVM/lib/libxml2.lib ]; then
+            cp C:/LLVM/lib/libxml2.lib C:/LLVM/lib/libxml2s.lib
+            echo "aliased libxml2.lib as libxml2s.lib"
+          fi
+
       - name: Workspace tests
         run: cargo test --workspace
 
@@ -99,7 +111,11 @@ jobs:
           rc=(${PIPESTATUS[@]})
           echo "math bin_rc=${rc[0]} grep_rc=${rc[1]}"
           { [ "${rc[0]}" -eq 0 ] && [ "${rc[1]}" -eq 0 ]; } || fail=1
-          ./examples/stdlib_string | grep -q "string ok"
+          # Linux only: unbuffer stdout so a crash no longer swallows
+          # all evidence — with block buffering an abort before exit
+          # flush hides whether println was even reached.
+          if [ "$(uname)" = "Linux" ]; then STDBUF="stdbuf -o0"; else STDBUF=""; fi
+          $STDBUF ./examples/stdlib_string | grep -q "string ok"
           rc=(${PIPESTATUS[@]})
           echo "str bin_rc=${rc[0]} grep_rc=${rc[1]}"
           { [ "${rc[0]}" -eq 0 ] && [ "${rc[1]}" -eq 0 ]; } || fail=1
