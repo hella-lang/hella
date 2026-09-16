@@ -36,7 +36,8 @@ jobs:
           curl -sSL https://apt.llvm.org/llvm.sh -o llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 21
-          sudo apt-get install -y llvm-21-dev clang-21
+          # llvm-sys links Polly statically: needs the dev package too.
+          sudo apt-get install -y llvm-21-dev clang-21 libpolly-21-dev
           sudo ln -sf /usr/bin/clang-21 /usr/local/bin/clang
           echo "LLVM_SYS_211_PREFIX=/usr/lib/llvm-21" >> "$GITHUB_ENV"
           echo "/usr/lib/llvm-21/bin" >> "$GITHUB_PATH"
@@ -51,12 +52,21 @@ jobs:
 
       - name: Install LLVM 21 (Windows)
         if: runner.os == 'Windows'
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: "21.1"
+        run: |
+          # Official upstream installer: deterministic pin, ships
+          # llvm-config.exe + dev libs that llvm-sys needs.
+          curl -sSL -o llvm-installer.exe https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-win64.exe
+          MSYS_NO_PATHCONV=1 ./llvm-installer.exe /S /D=C:\LLVM
+          echo "C:\LLVM\bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_211_PREFIX=C:\LLVM" >> "$GITHUB_ENV"
 
       - name: Workspace tests
         run: cargo test --workspace
+
+      # cargo test compiles bins only as test harnesses under
+      # target/debug/deps — the runnable CLI needs an explicit build.
+      - name: Build CLI
+        run: cargo build
 
       - name: Build every example
         run: |
