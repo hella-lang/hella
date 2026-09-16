@@ -9543,6 +9543,13 @@ pub fn compile_to_object(
     cg.compile_program(program).map_err(|e| {
         format!("{} at {}..{}", e.message, e.span.start, e.span.end)
     })?;
+    // NOTE: no `module.verify()` on Windows: `LLVMVerifyModule`
+    // segfaults (STATUS_ACCESS_VIOLATION) there for ordinary modules
+    // whose function-level checks all pass (upstream Windows LLVM
+    // builds use rpmalloc). Every construct is already verified at its
+    // own lowering site, so this stays as defense in depth everywhere
+    // else before object emission.
+    #[cfg(not(windows))]
     cg.module.verify().map_err(|e| e.to_string())?;
     let machine = target_machine(opt)?;
     if opt == OptLevel::Release {
