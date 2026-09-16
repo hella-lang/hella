@@ -76,6 +76,12 @@ pub struct Codegen<'ctx> {
     /// tracked so `len()`/`is_empty()` lower instead of falling through to
     /// class-method resolution.
     string_vars: HashSet<String>,
+    /// Extern functions declared with a Hella `int` return that lower to a
+    /// true C `int` (i32). Call results are sign-extended to Hella `int`
+    /// (i64) at the call site — zero-extension would destroy the sign of
+    /// e.g. `strcmp` (see `compare`), which only surfaced on libc
+    /// implementations that don't return full-width negatives.
+    extern_int32_rets: HashSet<String>,
     /// Trait names declared in the program (for trait-object lowering).
     trait_names: HashSet<String>,
     /// `{data ptr, type tag}` pair struct type per named type that can
@@ -173,6 +179,7 @@ impl<'ctx> Codegen<'ctx> {
             vec_vars: HashSet::new(),
             map_vars: HashSet::new(),
             string_vars: HashSet::new(),
+            extern_int32_rets: HashSet::new(),
             trait_names: HashSet::new(),
             pair_types: HashMap::new(),
             class_tags: HashMap::new(),
@@ -1337,7 +1344,22 @@ impl<'ctx> Codegen<'ctx> {
                         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default()).into();
                         let fn_ty = self.context.i32_type().fn_type(&[ptr_ty], true);
                         self.module.add_function(name, fn_ty, None);
+                        if matches!(ret_ty, crate::sema::Ty::Int) {
+                            self.extern_int32_rets.insert(name.clone());
+                        }
                         continue;
+                    }
+                    // A Hella `int` return lowers to a true C `int` (i32) so
+                    // negative returns (strcmp, scanf EOF, ...) keep their
+                    // sign; callers sign-extend back to Hella `int` (i64).
+                    // Exempted: libc functions whose real return is
+                    // size_t/long (`strlen`, `fread`, `fwrite`, `ftell`),
+                    // which stay i64 (non-negative values read correctly).
+                    let wide_int_ret = matches!(ret_ty, crate::sema::Ty::Int)
+                        && matches!(name.as_str(), "strlen" | "fread" | "fwrite" | "ftell");
+                    let ret_is_c_int = matches!(ret_ty, crate::sema::Ty::Int) && !wide_int_ret;
+                    if ret_is_c_int {
+                        self.extern_int32_rets.insert(name.clone());
                     }
                     let param_tys: Vec<crate::sema::Ty> = params.iter().filter(|p| !(p.is_variadic && p.name.is_empty())).map(|p| {
                         let base: crate::sema::Ty = (&p.ty).into();
@@ -1348,7 +1370,8 @@ impl<'ctx> Codegen<'ctx> {
                     let param_llvm: Vec<inkwell::types::BasicMetadataTypeEnum> = param_tys.iter().filter_map(|t| self.llvm_ty_for_sema(t).map(|bt| bt.into())).collect();
                     let fn_ty = match ret_ty {
                         crate::sema::Ty::Void => self.context.void_type().fn_type(&param_llvm, is_c_varargs),
-                        crate::sema::Ty::Int => self.context.i64_type().fn_type(&param_llvm, is_c_varargs),
+                        crate::sema::Ty::Int if wide_int_ret => self.context.i64_type().fn_type(&param_llvm, is_c_varargs),
+                        crate::sema::Ty::Int => self.context.i32_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::Bool => self.context.bool_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::Char => self.context.i32_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::String => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, is_c_varargs),
@@ -7659,7 +7682,20 @@ impl<'ctx> Codegen<'ctx> {
                     }
                     let call = self.builder.build_call(f, &arg_vals, "call").unwrap();
                     let vk = call.try_as_basic_value();
-                    if vk.is_basic() { return Ok(vk.basic().unwrap()); } else { return Ok(self.context.i64_type().const_int(0,false).into()); }
+                    if vk.is_basic() {
+                        let v = vk.basic().unwrap();
+                        // Extern C `int` returns lower as i32; Hella `int`
+                        // is i64, so sign-extend (not zero-extend: the sign
+                        // of e.g. strcmp/scanf results must survive).
+                        if self.extern_int32_rets.contains(callee) {
+                            if let BasicValueEnum::IntValue(iv) = v {
+                                if iv.get_type().get_bit_width() == 32 {
+                                    return Ok(self.builder.build_int_s_extend(iv, self.context.i64_type(), "extern.sext").unwrap().into());
+                                }
+                            }
+                        }
+                        return Ok(v);
+                    } else { return Ok(self.context.i64_type().const_int(0,false).into()); }
                 }
                 if let Some((ptr, ty)) = self.lookup_var(callee) {
                     let loaded = self.builder.build_load(ty, ptr, "func.load").unwrap();
