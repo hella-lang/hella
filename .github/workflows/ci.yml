@@ -116,7 +116,14 @@ jobs:
             echo "NO-CDB-AVAILABLE"
             exit 0
           fi
-          TEST_EXE="$(ls -t target/debug/deps/hella_compiler-*.exe 2>/dev/null | head -1)"
+          TEST_EXE=""
+          echo "PWD=$(pwd)"
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          ls 2>&1 | head -8
+          for root in "$GITHUB_WORKSPACE" "." "D:/a/hella/hella"; do
+            cand="$(ls -t "$root"/target/debug/deps/hella_compiler-*.exe 2>/dev/null | head -1)"
+            if [ -x "$cand" ]; then TEST_EXE="$cand"; break; fi
+          done
           if [ ! -x "$TEST_EXE" ]; then
             echo "NO-DIRECT-HIT; searching tree:"
             find target -name 'hella_compiler-*.exe' 2>/dev/null | head -5
