@@ -3,6 +3,7 @@ pub mod codegen;
 pub mod docs;
 pub mod error;
 pub mod lexer;
+pub mod lint;
 pub mod manifest;
 pub mod modules;
 pub mod parse;

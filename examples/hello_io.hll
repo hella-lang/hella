@@ -8,7 +8,8 @@ void main() do
     println("Hello, Hella!")
     print("no newline: ")
     println("continued")
-    printInt(2026)
-    putChar('!')
+    int year = 2026
+    println("{year}")
+    print("!")
     println("")
 end

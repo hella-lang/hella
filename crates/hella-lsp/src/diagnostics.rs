@@ -49,6 +49,20 @@ pub fn diagnostics(source: &str, path: Option<&Path>) -> Vec<Diagnostic> {
     };
     // Resolve imports, then sema.
     if let Some(prog) = parsed {
+        // Lints use only the open document's original AST. Never interpret an
+        // imported item's byte offsets as positions in this document.
+        if lexed.errors.is_empty() {
+            for warning in hella_compiler::lint::check(&prog) {
+                out.push(Diagnostic {
+                    range: span_to_range(source, warning.span),
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    code: Some(NumberOrString::String(warning.code.to_owned())),
+                    source: Some("hella-lsp".to_owned()),
+                    message: warning.message,
+                    ..Diagnostic::default()
+                });
+            }
+        }
         // Only entry points must define `main`.
         let require_main = path.map(is_main_file).unwrap_or(true);
         let expanded = match path {
@@ -125,6 +139,67 @@ mod tests {
 
     fn messages(diags: &[Diagnostic]) -> Vec<&str> {
         diags.iter().map(|d| d.message.as_str()).collect()
+    }
+
+    #[test]
+    fn lint_warning_has_code_severity_and_utf16_range() {
+        let src = "void pair(ref int a, ref int b) do\nend\nvoid main() do\nint x = 0\nstring s = \"😀\"; pair(ref x, ref (x))\nend\n";
+        let diags = diagnostics(src, None);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        let d = &diags[0];
+        assert_eq!(d.severity, Some(DiagnosticSeverity::WARNING));
+        assert_eq!(d.code, Some(NumberOrString::String("H001".into())));
+        assert_eq!(d.source.as_deref(), Some("hella-lsp"));
+        let line = src.lines().nth(4).unwrap();
+        let column = line[..line.rfind("ref (x)").unwrap()].encode_utf16().count() as u32;
+        assert_eq!(d.range, lsp_types::Range::new(
+            lsp_types::Position::new(4, column),
+            lsp_types::Position::new(4, column + 7)));
+        assert!(diagnostics(&src.replace("ref (x)", "ref y").replace("int x = 0", "int x = 0\nint y = 0"), None).is_empty());
+    }
+
+    #[test]
+    fn lint_uses_only_original_document_even_with_imports() {
+        let dir = scratch_project();
+        let util = dir.join("util.hll");
+        let library = "void pair(ref int a, ref int b) do\nend\nvoid exercise() do\nint x = 0\npair(ref x, ref x)\nend\n";
+        std::fs::write(&util, library).unwrap();
+        let main = dir.join("main.hll");
+        let src = "import util\nvoid main() do\nint y = 0\npair(ref y, ref y)\nend\n";
+        std::fs::write(&main, src).unwrap();
+        let diags = diagnostics(src, Some(&main));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Some(DiagnosticSeverity::WARNING));
+        assert_eq!(diags[0].range, lsp_types::Range::new(
+            lsp_types::Position::new(3, 12), lsp_types::Position::new(3, 17)));
+        let clean = "import util\nvoid main() do\nend\n";
+        assert!(diagnostics(clean, Some(&main)).is_empty());
+        let imported_diags = diagnostics(library, Some(&util));
+        assert_eq!(imported_diags.len(), 1, "{imported_diags:?}");
+        assert_eq!(imported_diags[0].code, Some(NumberOrString::String("H001".into())));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ownership_interpolation_error_has_exact_utf16_range() {
+        for newline in ["\n", "\r\n"] {
+            let src = [
+                "struct Pet has", "    string name", "end", "void main() do",
+                "    own Pet a = new Pet(\"x\")", "    delete a",
+                r#"    string s = "\n😀 {  a.name }""#, "end",
+            ].join(newline);
+            let diags = diagnostics(&src, None);
+            assert_eq!(diags.len(), 1, "{diags:?}");
+            let diagnostic = &diags[0];
+            assert_eq!(diagnostic.severity, Some(DiagnosticSeverity::ERROR));
+            assert_eq!(diagnostic.message, "use of moved or deleted value `a`");
+            let line = src.lines().nth(6).unwrap();
+            let column = line[..line.find("a.name").unwrap()].encode_utf16().count() as u32;
+            assert_eq!(diagnostic.range, lsp_types::Range::new(
+                lsp_types::Position::new(6, column),
+                lsp_types::Position::new(6, column + 1),
+            ));
+        }
     }
 
     #[test]

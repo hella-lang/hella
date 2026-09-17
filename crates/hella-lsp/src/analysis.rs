@@ -1290,7 +1290,26 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
         let offset = offset.min(source.len());
         // Import paths need no parse at all — pure line/filesystem context.
         if let Some(ctx) = import_context(source, offset) {
-            if let Some(items) = complete_import(&ctx, doc_path) {
+            if let Some(mut items) = complete_import(&ctx, doc_path) {
+                // Explicitly replace only the final component, not the qualified
+                // path an editor may otherwise treat as its completion word.
+                let prefix = match &ctx {
+                    ImportCtx::Path { prefix, .. } | ImportCtx::Members { prefix, .. } => prefix,
+                };
+                let start = offset - prefix.len();
+                let end = offset + source[offset..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .map(char::len_utf8)
+                    .sum::<usize>();
+                let range = span_to_range(source, Span::new(start, end));
+                for item in &mut items {
+                    item.insert_text = Some(item.label.clone());
+                    item.text_edit = Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
+                        range,
+                        new_text: item.label.clone(),
+                    }));
+                }
                 return items;
             }
         }
@@ -2637,6 +2656,27 @@ mod tests {
         let items = Analysis::complete_with_path("import net::h", Some(&main), 13, false);
         assert_eq!(labels(&items), vec!["http"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn completion_import_replaces_only_final_component() {
+        let dir = scratch_import_project();
+        let main = dir.join("main.hll");
+        for (source, offset) in [("import net::h", 13), ("import net::", 12), ("import net::ht", 13)] {
+            let items = Analysis::complete_with_path(source, Some(&main), offset, false);
+            let item = items.iter().find(|item| item.label == "http").unwrap();
+            assert_eq!(item.insert_text.as_deref(), Some("http"));
+            let Some(lsp_types::CompletionTextEdit::Edit(edit)) = &item.text_edit else {
+                panic!("import completion must specify its replacement range");
+            };
+            assert_eq!(edit.new_text, "http");
+            let start = crate::document::position_to_offset(source, &edit.range.start);
+            let end = crate::document::position_to_offset(source, &edit.range.end);
+            let mut completed = source.to_string();
+            completed.replace_range(start..end, &edit.new_text);
+            assert_eq!(completed, "import net::http");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

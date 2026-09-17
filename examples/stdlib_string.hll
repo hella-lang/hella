@@ -22,6 +22,56 @@ int main() do
     assert equals(sub, "world") is true
     string cl = clone("hi")
     assert equals(cl, "hi") is true
+    assert indexOf("", "") is 0
+    assert indexOf("abc", "abcd") is -1
+    assert indexOf("ababa", "aba") is 0
+    assert indexOfFrom("ababa", "aba", 1) is 2
+    assert indexOfFrom("abc", "", 3) is 3
+    assert indexOfFrom("abc", "", 4) is -1
+    assert indexOfFrom("abc", "a", -9) is 0
+    assert lastIndexOf("ababa", "aba") is 2
+    assert lastIndexOf("abc", "") is 3
+    assert lastIndexOf("", "x") is -1
+    assert lastIndexOf("abc", "x") is -1
+    assert equals(substring("abc", -9, 99), "abc")
+    assert equals(substring("abc", 9, 99), "")
+    assert equals(substring("abc", 0, -1), "")
+    assert equals(substring("abc", 2, 1), "")
+    assert equals(trim(" \t\n\r\x0b\f"), "")
+    assert equals(trim(" \t hello world \n"), "hello world")
+    assert equals(trim(""), "")
+    assert equals(trim("é"), "é")
+    assert equals(trim(" hello "), " hello ")
+    assert indexOf("éx", "x") is 2
+    assert equals(replaceAll("aaaaa", "aa", "b"), "bba")
+    assert equals(replaceAll("abc", "", "x"), "abc")
+    assert equals(replaceAll("abc", "b", ""), "ac")
+    assert equals(replaceAll("aaa", "a", "aa"), "aaaaaa")
+    assert equals(replaceAll("abc", "x", "y"), "abc")
+    assert equals(replaceAll("", "a", "b"), "")
+    int cursor = 0
+    assert equals(splitNext(",a,,", ",", ref cursor), "")
+    assert cursor is 1
+    assert equals(splitNext(",a,,", ",", ref cursor), "a")
+    assert equals(splitNext(",a,,", ",", ref cursor), "")
+    assert cursor is 4
+    assert equals(splitNext(",a,,", ",", ref cursor), "")
+    assert cursor is -1
+    assert equals(splitNext(",a,,", ",", ref cursor), "")
+    cursor = 0
+    assert equals(splitNext("abc", "", ref cursor), "abc")
+    assert cursor is -1
+    cursor = 0
+    assert equals(splitNext("", ",", ref cursor), "")
+    assert cursor is -1
+    cursor = 0
+    assert equals(splitNext("a::b", "::", ref cursor), "a")
+    assert equals(splitNext("a::b", "::", ref cursor), "b")
+    assert cursor is -1
+    cursor = 99
+    assert equals(splitNext("a", ",", ref cursor), "")
+    assert cursor is -1
+
     println("string ok")
     return 0
 end

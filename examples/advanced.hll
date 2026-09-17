@@ -1,7 +1,7 @@
 // advanced.hll — Phase 5: generics, closures, interpolation, operators, FFI, distinct, extensions, etc.
 // Demonstrates all four recent fixes:
 // 1) getters/setters public by default, 2) separate getter/setter, 3) `open` only on class, 4) omitted Type in `has`
-// IO (`println`/`printInt`) comes from the real stdlib — no compiler intrinsics.
+// IO (`print`/`println`) comes from the real stdlib — no compiler intrinsics.
 
 import std::io
 
@@ -112,7 +112,7 @@ int main() do
 
     // float + extern
     double d = sqrt(4.0)
-    printInt(b + y + sum)
+    println("{b + y + sum}")
 
     // use u1/u2 to avoid unused warnings (and show omitted Type worked)
     int aged = u1.age + u2.age // 45, not used in return to keep exit 20 stable

@@ -1,0 +1,60 @@
+// std::num — strict decimal parsing in pure Hella.
+import std::str
+
+/// Parses an entire decimal signed 64-bit int. Optional leading + or -.
+/// No whitespace, separators, radix prefixes or trailing junk accepted.
+/// Returns false and resets value to zero on empty/invalid/overflow input.
+/// Accumulates negatively so the minimum signed value never needs negating.
+bool parseInt(string s, ref int value) do
+    value = 0
+    int size = len(s)
+    if size is 0 do
+        return false
+    end
+    int i = 0
+    bool negative = false
+    if s[0] is '-' do
+        negative = true
+        i = 1
+    end else if s[0] is '+' do
+        i = 1
+    end
+    if i is size do
+        return false
+    end
+    int limit = -9223372036854775807
+    if negative do
+        limit = limit - 1
+    end
+    int result = 0
+    while i < size do
+        char c = s[i]
+        // Char ordering/casts are not available; find the digit by equality.
+        string digits = "0123456789"
+        int digit = 0
+        while digit < 10 do
+            if digits[digit] is c do
+                break
+            end
+            digit = digit + 1
+        end
+        if digit is 10 do
+            return false
+        end
+        if result < limit / 10 do
+            return false
+        end
+        result = result * 10
+        if result < limit + digit do
+            return false
+        end
+        result = result - digit
+        i = i + 1
+    end
+    if negative do
+        value = result
+    end else do
+        value = -result
+    end
+    return true
+end

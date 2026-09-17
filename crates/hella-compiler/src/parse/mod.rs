@@ -4,6 +4,8 @@
 use crate::ast::*;
 use crate::token::{Span, SpannedToken, Token};
 
+mod interpolation;
+
 #[derive(Debug, Clone)]
 pub struct ParseError {
     pub message: String,
@@ -24,6 +26,9 @@ pub struct Parser {
     tokens: Vec<SpannedToken>,
     pos: usize,
     source: String,
+    /// For decoded interpolation fragments, maps local byte boundaries back to
+    /// the original file. Token/AST spans always stay in original-file offsets.
+    source_positions: Option<Vec<usize>>,
 }
 
 impl Parser {
@@ -32,6 +37,7 @@ impl Parser {
             tokens,
             pos: 0,
             source,
+            source_positions: None,
         }
     }
 
@@ -44,7 +50,7 @@ impl Parser {
     fn peek_span(&self) -> Span {
         self.peek()
             .map(|st| st.span)
-            .unwrap_or(Span::new(self.source.len(), self.source.len()))
+            .unwrap_or(Span::new(self.source_end(), self.source_end()))
     }
     fn is_eof(&self) -> bool {
         self.pos >= self.tokens.len()
@@ -75,7 +81,7 @@ impl Parser {
             }),
             None => Err(ParseError {
                 message: format!("{msg}: expected `{expected}`, found EOF"),
-                span: Span::new(self.source.len(), self.source.len()),
+                span: Span::new(self.source_end(), self.source_end()),
             }),
         }
     }
@@ -120,8 +126,22 @@ impl Parser {
         })
     }
 
+    fn source_offset(&self, offset: usize) -> usize {
+        self.source_positions.as_ref().map_or(offset, |positions| positions[offset])
+    }
+
+    fn local_offset(&self, offset: usize) -> usize {
+        self.source_positions.as_ref().map_or(offset, |positions| {
+            positions.partition_point(|&position| position < offset)
+        })
+    }
+
+    fn source_end(&self) -> usize {
+        self.source_offset(self.source.len())
+    }
+
     fn slice(&self, span: Span) -> &str {
-        &self.source[span.start..span.end]
+        &self.source[self.local_offset(span.start)..self.local_offset(span.end)]
     }
 
     fn parse_int_lit(&self, span: Span) -> Result<i64, ParseError> {
@@ -313,7 +333,7 @@ impl Parser {
         }
         Ok(Program {
             items,
-            span: Span::new(start, self.source.len()),
+            span: Span::new(start, self.source_end()),
         })
     }
 
@@ -1494,7 +1514,7 @@ impl Parser {
         let mut ty: Type = {
             let st = self.peek().cloned().ok_or(ParseError {
                 message: "expected type".into(),
-                span: Span::new(self.source.len(), self.source.len()),
+                span: Span::new(self.source_end(), self.source_end()),
             })?;
             match st.token {
                 Token::Int => {
@@ -1636,7 +1656,7 @@ impl Parser {
                 } else {
                     let size_tok = self.peek().cloned().ok_or(ParseError {
                         message: "expected array size after `arr[`".into(),
-                        span: Span::new(self.source.len(), self.source.len()),
+                        span: Span::new(self.source_end(), self.source_end()),
                     })?;
                     match size_tok.token {
                         Token::IntLit | Token::HexInt | Token::BinInt => {
@@ -1886,7 +1906,7 @@ impl Parser {
     fn parse_ident(&mut self) -> Result<(String, Span), ParseError> {
         let st = self.peek().cloned().ok_or(ParseError {
             message: "expected identifier".into(),
-            span: Span::new(self.source.len(), self.source.len()),
+            span: Span::new(self.source_end(), self.source_end()),
         })?;
         if st.token == Token::Ident {
             self.advance();
@@ -3084,7 +3104,7 @@ impl Parser {
         }
         let st = self.peek().cloned().ok_or(ParseError {
             message: "expected expression".into(),
-            span: Span::new(self.source.len(), self.source.len()),
+            span: Span::new(self.source_end(), self.source_end()),
         })?;
         match st.token {
             Token::FloatLit => {
@@ -3128,16 +3148,19 @@ impl Parser {
                 } else {
                     ""
                 };
-                let decoded = Self::unescape_string(inner);
+                let quote_len = if raw.starts_with("\"\"\"") { 3 } else { 1 };
+                let (decoded, positions) = self.decoded_with_positions(
+                    inner, self.local_offset(st.span.start) + quote_len,
+                );
                 // Check for interpolation {expr} per EBNF §4
                 if decoded.contains('{') && decoded.contains('}') {
                     let mut parts: Vec<InterpolatedPart> = Vec::new();
                     let mut literal = String::new();
-                    let mut chars = decoded.chars().peekable();
+                    let mut chars = decoded.char_indices().peekable();
                     let mut in_expr = false;
-                    while let Some(c) = chars.next() {
+                    while let Some((offset, c)) = chars.next() {
                         if !in_expr && c == '{' {
-                            if chars.peek() == Some(&'{') {
+                            if chars.peek().is_some_and(|(_, c)| *c == '{') {
                                 // escaped {{
                                 literal.push('{');
                                 chars.next();
@@ -3150,7 +3173,7 @@ impl Parser {
                             // collect expr until matching }
                             let mut expr_str = String::new();
                             let mut depth = 1;
-                            while let Some(c2) = chars.next() {
+                            while let Some((_, c2)) = chars.next() {
                                 if c2 == '{' { depth += 1; expr_str.push(c2); }
                                 else if c2 == '}' {
                                     depth -= 1;
@@ -3160,8 +3183,9 @@ impl Parser {
                             }
                             let expr_trim = expr_str.trim().to_string();
                             if !expr_trim.is_empty() {
-                                let lex_out = crate::lexer::lex(&expr_trim);
-                                let mut p = Parser::new(lex_out.tokens.clone(), expr_trim.clone());
+                                let start = offset + 1 + expr_str.len() - expr_str.trim_start().len();
+                                let end = start + expr_trim.len();
+                                let mut p = Self::interpolation_parser(expr_trim, positions[start..=end].to_vec());
                                 if let Ok(expr) = p.parse_expr() {
                                     parts.push(InterpolatedPart::Expr(Box::new(expr)));
                                 } else {
@@ -3171,7 +3195,7 @@ impl Parser {
                                     literal.push('}');
                                 }
                             }
-                        } else if !in_expr && c == '}' && chars.peek() == Some(&'}') {
+                        } else if !in_expr && c == '}' && chars.peek().is_some_and(|(_, c)| *c == '}') {
                             literal.push('}');
                             chars.next();
                         } else {
@@ -3447,7 +3471,7 @@ impl Parser {
     fn parse_pattern_primary(&mut self) -> Result<Pattern, ParseError> {
         let st = self.peek().cloned().ok_or(ParseError {
             message: "expected pattern".into(),
-            span: Span::new(self.source.len(), self.source.len()),
+            span: Span::new(self.source_end(), self.source_end()),
         })?;
         match st.token {
             Token::Dot => {
