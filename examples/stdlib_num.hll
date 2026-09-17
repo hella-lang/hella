@@ -1,0 +1,41 @@
+import std::num
+import std::io
+
+void reject(string s) do
+    int value = 123
+    assert parseInt(s, ref value) is false
+    assert value is 0
+end
+
+int main() do
+    int value = 0
+    assert parseInt("0", ref value)
+    assert value is 0
+    assert parseInt("-0", ref value)
+    assert value is 0
+    assert parseInt("+0042", ref value)
+    assert value is 42
+    assert parseInt("-123", ref value)
+    assert value is -123
+    assert parseInt("9223372036854775807", ref value)
+    assert value is 9223372036854775807
+    assert parseInt("-9223372036854775808", ref value)
+    assert value is -9223372036854775807 - 1
+    reject("")
+    reject("+")
+    reject("-")
+    reject(" 1")
+    reject("1 ")
+    reject("1\n")
+    reject("12x")
+    reject("1_000")
+    reject("0x10")
+    reject("++1")
+    reject("+-1")
+    reject("é")
+    reject("9223372036854775808")
+    reject("-9223372036854775809")
+    reject("999999999999999999999999999999")
+    println("num ok")
+    return 0
+end

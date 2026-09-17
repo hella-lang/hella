@@ -1,95 +1,67 @@
-// std::fmt — formatting helpers for Hella (real stdlib: pure Hella + extern FFI).
-// Import via: import std::fmt
-//
-// `sprintf`-backed concrete formatters (C varargs have no Hella-level
-// spread/forwarding syntax, so one function per arity/type-shape),
-// plus pure-Hella interpolation helpers (`join`, `repeat`, `padStart`,
-// `padEnd`). Buffers are 4096-byte `calloc` slabs; longer output is
-// truncated by libc, never overflows.
+// std::fmt — text composition, not C format strings.
+// Use Hella interpolation for values. These helpers do not use interpolation.
 
 import std::str
 import std::vector
-
-extern "c" from "libc" do
-    int sprintf(string buf, string fmt, ...)
-    string calloc(int n, int size)
-end
-
-/// Formats one string via `sprintf` (`fmt` holds one `%s`).
-string formatS(string fmt, string a) do
-    string buf = calloc(1, 4096)
-    sprintf(buf, fmt, a)
-    return buf
-end
-
-/// Formats two strings via `sprintf` (`fmt` holds two `%s`).
-string formatSS(string fmt, string a, string b) do
-    string buf = calloc(1, 4096)
-    sprintf(buf, fmt, a, b)
-    return buf
-end
-
-/// Formats one int via `sprintf` (`fmt` holds one `%d`-style verb).
-string formatD(string fmt, int n) do
-    string buf = calloc(1, 4096)
-    sprintf(buf, fmt, n)
-    return buf
-end
-
-/// Formats two ints via `sprintf`.
-string formatDD(string fmt, int a, int b) do
-    string buf = calloc(1, 4096)
-    sprintf(buf, fmt, a, b)
-    return buf
-end
-
-/// Formats one double via `sprintf` (`fmt` holds one `%f`-style verb).
-string formatF(string fmt, double x) do
-    string buf = calloc(1, 4096)
-    sprintf(buf, fmt, x)
-    return buf
-end
-
-/// Formats an int plus a string via `sprintf`, in that order.
-string formatDS(string fmt, int n, string s) do
-    string buf = calloc(1, 4096)
-    sprintf(buf, fmt, n, s)
-    return buf
-end
 
 /// Joins `parts` with `sep` between elements.
 string join(string sep, string vec parts) do
     return sJoin(parts, sep)
 end
 
-/// Returns `s` repeated `n` times (negative `n` yields `""`).
+/// Repeats s n times; n <= 0 or empty s yields an empty string.
+/// Asserts on allocation failure or output-size overflow.
 string repeat(string s, int n) do
-    string acc = ""
-    int i = 0
-    if n < 0 do
-        n = 0
+    int size = len(s)
+    if n <= 0 or size is 0 do
+        return ""
     end
-    while i < n do
-        acc = "{acc}{s}"
+    assert n <= 9223372036854775806 / size
+    int total = size * n
+    string result = allocateString(total)
+    int i = 0
+    while i < total do
+        result[i] = s[i % size]
         i = i + 1
     end
-    return acc
+    return result
 end
 
-/// Pads `s` on the left with spaces up to `width`.
+/// Left-pads to a byte width with ASCII spaces; never truncates.
 string padStart(string s, int width) do
-    string acc = s
-    while len(acc) < width do
-        acc = " {acc}"
+    int size = len(s)
+    if width <= size do
+        return s
     end
-    return acc
+    string result = allocateString(width)
+    int padding = width - size
+    int i = 0
+    while i < padding do
+        result[i] = ' '
+        i = i + 1
+    end
+    while i < width do
+        result[i] = s[i - padding]
+        i = i + 1
+    end
+    return result
 end
 
-/// Pads `s` on the right with spaces up to `width`.
+/// Right-pads to a byte width with ASCII spaces; never truncates.
 string padEnd(string s, int width) do
-    string acc = s
-    while len(acc) < width do
-        acc = "{acc} "
+    int size = len(s)
+    if width <= size do
+        return s
     end
-    return acc
+    string result = allocateString(width)
+    int i = 0
+    while i < size do
+        result[i] = s[i]
+        i = i + 1
+    end
+    while i < width do
+        result[i] = ' '
+        i = i + 1
+    end
+    return result
 end

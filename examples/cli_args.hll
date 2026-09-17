@@ -4,7 +4,7 @@ import std::io
 
 
 int main(string[] args) do
-    printInt(args.len())
+    println("{args.len()}")
     if args.is_empty() do
         println("no args")
         return 0

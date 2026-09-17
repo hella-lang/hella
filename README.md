@@ -37,6 +37,7 @@ cargo run -p hella -- run -f examples/hello_io.hll
 | `hella run -f <file>` | Build (only if sources changed) and run a single file |
 | `hella check` | Type-check the current project |
 | `hella check -f <file>` | Type-check a single file without generating code |
+| `hella lint [-f <file>]` | Type-check, then report advisory reference warnings in the entry file (`--deny-warnings` for CI); see [linter coverage](references/linter.md) |
 | `hella new <name>` | Scaffold a project (`--lib` for a library instead of a binary) |
 | `hella fmt [paths]` | Format Hella sources in place (`--check` to verify only) |
 | `hella setup` | Install the embedded standard library to `~/.hella/lib` (`--force` to overwrite) |
@@ -109,7 +110,7 @@ cargo run -p hella -- build -f examples/basics.hll && ./examples/basics; echo $?
 | `basics.hll` | Numbers, booleans, arithmetic, `if`/`else`, `while`, functions, recursion |
 | `data_control.hll` | Structs, field defaults, arrays, `match`, strings, `loop`/`for`, `defer` |
 | `abstraction.hll` | Classes, constructors, traits, enums, properties |
-| `hello_io.hll` | `import std::io` and printing (`print`, `println`, `printInt`, `putChar`) |
+| `hello_io.hll` | `import std::io` and printing (`print`, `println`, interpolation) |
 | `cli_args.hll` | Command-line args (`string[] args`, `args.len()`, iteration) |
 | `stdlib_io.hll` | Standard-library I/O over `extern "c"` declarations |
 | `advanced.hll` | Generics, closures, interpolation, operators, `extern`, `distinct` |

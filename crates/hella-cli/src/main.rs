@@ -78,6 +78,8 @@ enum Commands {
     /// Type-check the current project
     #[command(visible_alias = "c")]
     Check(CheckArgs),
+    /// Type-check, then lint the entry source file (advisory ownership checks)
+    Lint(LintArgs),
     /// Run the Hella language server (LSP over stdio)
     Lsp,
     /// Install the embedded standard library to `~/.hella/lib`
@@ -245,6 +247,16 @@ struct FmtArgs {
 }
 
 #[derive(Parser, Debug)]
+struct LintArgs {
+    #[command(flatten)]
+    check: CheckArgs,
+
+    /// Exit unsuccessfully if any lint warnings are found
+    #[arg(long)]
+    deny_warnings: bool,
+}
+
+#[derive(Parser, Debug)]
 struct CheckArgs {
     /// Source file (.hll) to check (default: project `src/main.hll` or `src/lib.hll`; use -f/--file for an explicit file)
     #[arg(short = 'f', long, value_name = "FILE")]
@@ -351,6 +363,7 @@ fn main() -> miette::Result<()> {
         Commands::Build(args) => run_build(args),
         Commands::Run(args) => run_run(args),
         Commands::Check(args) => run_check(args),
+        Commands::Lint(args) => run_lint(args),
         // The language server speaks LSP on stdio and terminates itself with
         // its own exit code after the client sends `exit`.
         Commands::Lsp => std::process::exit(hella_lsp::server::run()),
@@ -1075,6 +1088,36 @@ fn run_check(args: CheckArgs) -> miette::Result<()> {
         force: false,
     };
     let _ = compile(opts)?;
+    Ok(())
+}
+
+fn run_lint(args: LintArgs) -> miette::Result<()> {
+    let entry = resolve_entry(args.check.file.clone())?;
+    // Keep dependency resolution, entry-point policy and semantic errors exactly
+    // as in `check`. Never emit advisory warnings in place of type checking.
+    run_check(args.check)?;
+
+    // Reparse the entry, NOT the import-expanded program: imported items carry
+    // offsets from other files. Linting is deliberately entry-file-only.
+    let source = fs::read_to_string(&entry.path)
+        .map_err(|e| miette::miette!("failed to read {}: {e}", entry.path.display()))?;
+    let lexed = lex(&source);
+    if !lexed.errors.is_empty() {
+        return Err(miette::miette!("source changed during lint; rerun the command"));
+    }
+    let program = hella_compiler::parse::parse(lexed.tokens, source.clone())
+        .map_err(|e| miette::miette!("{}: {}", entry.path.display(), e.message))?;
+    let warnings = hella_compiler::lint::check(&program);
+    for warning in &warnings {
+        let before = &source[..warning.span.start];
+        let line = before.bytes().filter(|b| *b == b'\n').count() + 1;
+        let column = before.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+        eprintln!("{}:{line}:{column}: warning[{}]: {}",
+            entry.path.display(), warning.code, warning.message);
+    }
+    if args.deny_warnings && !warnings.is_empty() {
+        return Err(miette::miette!("{} lint warning(s) (--deny-warnings)", warnings.len()));
+    }
     Ok(())
 }
 

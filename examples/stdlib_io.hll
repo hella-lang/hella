@@ -7,12 +7,14 @@
 //   printf 'Ada\n42\n' | ./stdlib_io
 
 import std::io
+import std::num
 
 int main() do
     print("io:")
     println(" ok")
-    printInt(42)
-    putChar('A')
+    int answer = 42
+    println("{answer}")
+    print("A")
     println("")
     eprint("err:")
     eprintln(" ok")
@@ -21,7 +23,13 @@ int main() do
     print("hello ")
     println(name)
     print("age? ")
-    int age = readInt()
-    printInt(age)
+    int age = 0
+    string input = readLine()
+    if parseInt(input, ref age) do
+        println("{age}")
+    end else do
+        eprintln("invalid age")
+        return 1
+    end
     return 0
 end

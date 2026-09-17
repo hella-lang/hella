@@ -44,16 +44,15 @@ function name in sema or codegen.
 
 ## Stdlib owns (pure Hella under `stdlib/`)
 
-- **`std::io`** (`stdlib/std/io.hll`) — `print`, `println`, `printInt`,
-  `putChar`, `eprint`/`eprintln` (stderr via `write(2, …)` — no `FILE*`
-  global), `readLine` (`calloc` + `scanf` scanset), `readInt`
-  (`scanf` + `out` arg). All thin wrappers over the `extern` block. No compiler
-  intrinsic: sema resolves them as ordinary functions from the import; codegen
-  lowers ordinary calls (including calls into `extern` fns).
+- **`std::io`** (`stdlib/std/io.hll`) — `print`, `println`, `eprint`,
+  `eprintln`, and dynamically growing `readLine`. Numeric input uses
+  `std::num` `parseInt(input, ref value)` with explicit failure/overflow handling.
+  Removed typed print/input and fixed-buffer formatting helpers; see
+  `stdlib/README.md` for migration, APIs and ownership limitations.
 - **`std::types`** (`stdlib/std/types.hll`) — doc-only manifest of the
   implicit environment (`bool string i8…u128 int uint float double`). Declares
   nothing; importing is a no-op.
-- **Future facades** — `std::string` / `std::vec` / `std::map` / `std::math` /
+- **Library modules** — `std::str` / `std::vector` / `std::map` / `std::math` /
   `std::fs` / `std::env`: thin Hella wrappers or `extend` blocks over the
   primitive layouts. The compiler provides the layout + indexing/iteration
   mechanics; the *named method surface* (`len`, `push`, …) is documented and

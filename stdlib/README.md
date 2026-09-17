@@ -4,7 +4,7 @@ Pure Hella sources. See `.opencode/skills/stdlib/SKILL.md` for import semantics 
 `.opencode/skills/stdlib/REAL_STDLIB.md` for the bare-minimum compiler contract, and roadmap.
 
 The compiler knows no user-facing IO names. Every symbol below is an ordinary Hella
-function defined in `stdlib/` on top of `extern "c"` libc declarations. Calling one
+function defined in `stdlib/`, using Hella algorithms and `extern "c"` where needed. Calling one
 without its `import` is a sema error (`undefined function`) by design.
 
 ## Modules
@@ -12,17 +12,12 @@ without its `import` is a sema error (`undefined function`) by design.
 - `std::io` — `stdlib/std/io.hll`
   - `void print(string s)` — no newline (`printf("%s", s)`)
   - `void println(string s)` — with newline (`puts(s)`)
-  - `void printInt(int n)` — decimal with newline (`printf("%ld\n", n)`)
-  - `void putChar(char c)` — single char, no newline (`putchar(c)`)
   - `void eprint(string s)` / `void eprintln(string s)` — stderr, without/with
     newline (`write(2, …)`; no `FILE*` global needed)
-  - `string readLine()` — one stdin line sans newline, 255-byte cap, `""` on EOF
-    (`calloc` + `scanf("%255[^\n]%*c")`)
-  - `int readInt()` — one stdin integer, `0` on EOF (`scanf("%ld%*c", out n)`)
-  - extern linkage (not imported selectively — always carried along):
-    `i32 puts(string s)`, `i32 printf(string fmt, ...)`, `i32 putchar(char c)`,
-    `int write(int fd, string buf, int count)`, `string calloc(int n, int size)`,
-    `int scanf(string fmt, ...)`
+  - `string readLine()` — dynamically growing line reader, strips LF, preserves
+    blank lines; returns the partial line on EOF/error, or `""` if no bytes read.
+    No EOF/error distinction, CR stripping, or embedded-NUL support. Uses bounded
+    one-byte `scanf("%1c")` reads, doubling buffers; intermediate buffers are freed.
 - `std::math` — `stdlib/std/math.hll`
   - `double sqrt(double x)`, `sin`/`cos`/`tan`, `pow`, `floor`/`ceil`/`round`,
     `log`/`exp`, `fabs`, `fmin`/`fmax`, `atan2` via `libm`
@@ -30,8 +25,24 @@ without its `import` is a sema error (`undefined function`) by design.
 - `std::str` — `stdlib/std/str.hll`
   - `int len(string s)`, `bool isEmpty`, `bool equals`/`int compare`,
     `bool contains`/`startsWith`/`endsWith`, `string clone`/`substring`
-  - via `strlen`/`strcmp`/`strncmp`/`strdup`/`calloc`; `contains`/`endsWith`/
-    `substring` are pure Hella loops (no `Range` iteration — while loops)
+  - `indexOf(hay, needle)`, `indexOfFrom(hay, needle, start)`, `lastIndexOf`:
+    byte offsets, `-1` on miss. Empty needle matches start/end. Negative search
+    start clamps to 0; start beyond length returns -1, even for empty needle.
+  - `trim(s)` / `isAsciiSpace(c)` — ASCII space, tab, LF, CR, VT, FF only.
+  - `splitNext(s, sep, ref cursor)` — initialize cursor to 0; call while it is
+    nonnegative. Returns one field, updates cursor, sets -1 after the last field.
+    Preserves leading/adjacent/trailing empty fields. Empty separator returns s
+    once. This streaming API avoids Hella's current 16-element vector limit.
+  - `replaceAll(s, needle, replacement)` — left-to-right non-overlapping matches;
+    empty needle is a no-op (unlike Go), replacement text is never searched.
+  - `allocateString(size)` — low-level zero-filled, NUL-terminated allocation;
+    asserts on invalid size or allocation failure. Used by composition helpers.
+- `std::num` — `stdlib/std/num.hll`
+  - `bool parseInt(string s, ref int value)` — strict whole-string signed decimal
+    parsing for Hella's current 64-bit int. Optional leading `+`/`-`, leading zeros
+    allowed; rejects whitespace, empty/sign-only input, prefixes, separators,
+    trailing junk and overflow. Returns false **and resets value to 0** on failure.
+    Checks before multiply/subtract, including -9223372036854775808; no libc parser.
 - `std::env` — `stdlib/std/env.hll`
   - `string getEnv(string name)` (getenv + "" on miss, `string is null` now allowed), `bool hasEnv`, `void setEnv`/`unsetEnv` (setenv/unsetenv), `string cwd()` (getcwd + calloc)
 - `std::fs` — `stdlib/std/fs.hll`
@@ -41,7 +52,7 @@ without its `import` is a sema error (`undefined function`) by design.
   - int vec: `iLen`/`iIsEmpty`/`iContains`/`iFirst`/`iLast`, `iPush`/`iPop`
     (`ref`), `iSum`/`iIndexOf` (loops)
   - string vec: `sLen`/`sIsEmpty`/`sFirst`/`sLast`, `sPush`/`sPop` (`ref`),
-    `sContains`/`sJoin` (loops over `equals`/interpolation — the
+    `sContains`/`sJoin` (byte comparison/exact-size copying — the
     `contains` method hangs on ptr-element vecs)
   - double vec: `dLen`, `dPush` (`ref`) only (`contains` miscompiles f64,
     `+` has no double overload)
@@ -53,11 +64,11 @@ without its `import` is a sema error (`undefined function`) by design.
   - mutate with direct local calls (`m.remove(k)`); `ref`-param method
     calls do not codegen
 - `std::fmt` — `stdlib/std/fmt.hll`
-  - `formatS`/`formatSS`/`formatD`/`formatDD`/`formatF`/`formatDS` over
-    `sprintf` into 4KB `calloc` slabs (one fn per arity/shape — Hella has
-    no spread/forwarding syntax for C varargs)
-  - `join(sep, parts)` (via `sJoin`), `repeat`, `padStart`/`padEnd`
-    (interpolation loops)
+  - `join(sep, parts)` (via `sJoin`), `repeat(s, n)`, `padStart(s, width)`,
+    `padEnd(s, width)` — checked-size allocations and pure Hella copying loops,
+    no format strings or interpolation buffers. Widths are bytes; padding uses
+    spaces and never truncates. Nonpositive repeat counts yield `""`.
+    Output-size overflow and allocation failure assert rather than wrap/truncate.
 - `std::types` — `stdlib/std/types.hll` (doc-only manifest of the implicit
   environment: `bool string i8…u128 int uint float double`; importing is a no-op)
 
@@ -68,19 +79,99 @@ import std::io
 import std::io::{print, println}
 ```
 
-Selective imports keep the module's `extern` blocks automatically (linkage
-requirements, not selectable symbols).
+Selective imports keep extern blocks, but currently **drop helper dependencies**.
+Use whole-module imports for the higher-level APIs above (`import std::str`, not
+`import std::str::{trim}`). Simple IO selective imports remain usable.
 
-## Build
+## Migration from typed formatting / IO helpers
 
-`./target/debug/hella build examples/stdlib_io.hll` inlines `stdlib/std/io.hll` and links against libc. The input half needs piped stdin:
+Removed `formatS`, `formatSS`, `formatD`, `formatDD`, `formatF`, `formatDS`.
+Their unbounded `sprintf` calls could overflow 4KiB slabs; the old claim that libc
+truncated them was incorrect. Use language interpolation, not C percent verbs:
 
+```hll
+import std::io
+import std::num
+
+void main() do
+    string name = "Ada"
+    int n = 42
+    println("{name}: {n}")  // replaces formatDS / printInt
+    print("!")             // replaces putChar for literal text
+    int value = 0
+    string input = readLine()
+    if parseInt(input, ref value) do
+        println("{value}")
+    end else do
+        eprintln("invalid integer")
+    end
+end
 ```
-printf 'Ada\n42\n' | ./stdlib_io
+
+`printInt`, `putChar`, and `readInt` are removed. Use `print`/`println` and
+`parseInt(readLine(), ref value)` (or explicit temporaries as above). Interpolation
+has no supported precision specifier equivalent to `%.1f`; none is invented here.
+
+**Compiler safety limitation:** interpolation still uses an unchecked 512-byte
+stack buffer plus a 64-byte `%f` temporary (large doubles can overflow that too).
+Its integer formatting uses `%ld`, which is not 64-bit on Windows. Do not interpolate
+unbounded text or large doubles until codegen is fixed. The new composition APIs
+avoid that path and are tested with 10–20KB text. This is not a claim that arbitrary
+Hella interpolation is now safe.
+
+## Representation, ownership and other limits
+
+- Strings are non-null NUL-terminated byte pointers, not Unicode scalar sequences
+  or binary buffers. Search/substrings can split UTF-8 code points; trim is ASCII.
+- Raw strings have **no automatic reclamation**. `clone`, non-reversed `substring`,
+  `trim`, valid `splitNext` fields, `join`/`sJoin`, `readLine`, and allocations from
+  `allocateString` produce heap buffers. `repeat` with positive count and nonempty
+  input allocates; empty cases return literals. Padding that needs no work and
+  replacement with no matches/empty needle return the input pointer. Other empty
+  cases can return literals. Do not blindly `free` every result or mutate literals.
+  Free only buffers known to be newly allocated (via extern `free`) after all aliases
+  are dead. Examples favor clarity and do not reclaim every temporary; long-lived
+  applications need explicit ownership discipline. No safe generic string owner
+  or builder is claimed in this change.
+- New size guards assume the compiler's current 64-bit int ABI. Allocation failures
+  are fatal assertions, not recoverable results. Naive substring search is O(h*n);
+  replacement scans twice; composition copies into one final buffer rather than
+  repeatedly leaking growing interpolation intermediates.
+- Existing vector/map operations retain compiler limitations documented above,
+  including fixed-capacity storage; split does not collect into a vector.
+- `math.abs` does not handle minimum int safely. FS/env wrappers still conflate
+  failures with empty results, ignore some status codes, and `cwd` has a 1024-byte
+  buffer. These are unchanged, not audited safe replacements.
+- Extern ABI lowering is incomplete: `i32` return declarations can become `void`.
+  `readLine` uses the supported Hella `int scanf` declaration, which codegen maps to
+  C i32 and sign-extends. Runtime Windows shims and the other existing FFI wrappers
+  still need cross-platform ABI review. Verified locally on macOS, not Windows.
+
+## Verification
+
+```sh
+cargo test -p hella-compiler --test stdlib
+cargo test --workspace
+cargo build -p hella
+./target/debug/hella build --force -f examples/stdlib_fmt.hll
+./examples/stdlib_fmt
+printf 'Ada\n42\n' | ./target/debug/hella run --force -f examples/stdlib_io.hll
 ```
 
-## Not yet
+`crates/hella-compiler/tests/stdlib.rs` uses the public lexer/parser/import/sema/
+object APIs and a real C linker. It builds/runs all eight stdlib examples in debug
+and release, checks exact output, exercises long/blank/EOF input, and checks fatal
+size-overflow guards. It uses checkout imports and isolated scratch files, no
+installed stdlib or prebuilt CLI; binaries have a ten-second timeout. Requires LLVM
+and `clang` (or `HELLA_LINKER`).
 
-`std::env` argument plumbing (`argCount`/`argAt`), `std::option`/`std::result`
-(generic enum payloads codegen as `i64` only), trait-extension sugar
-(`extend string do … end`).
+## Public API references consulted
+
+- [Go strings](https://pkg.go.dev/strings): byte offsets, empty fields and
+  non-overlapping replacement. Hella deliberately uses ASCII trim and an empty
+  separator/needle no-op policy rather than Go's UTF-8 empty-pattern behavior.
+- [Odin core:strings](https://pkg.odin-lang.org/core/strings/): split iterators,
+  ASCII whitespace, explicit allocation/ownership concerns.
+- [Rust i64 parsing](https://doc.rust-lang.org/std/primitive.i64.html#method.from_str_radix):
+  strict signed parsing and explicit invalid/overflow failure. Hella uses bool +
+  ref output rather than claiming generic Result support.

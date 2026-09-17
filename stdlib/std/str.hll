@@ -32,34 +32,7 @@ end
 /// Returns true when `hay` contains `needle`.
 /// An empty `needle` always matches.
 bool contains(string hay, string needle) do
-    int n = strlen(needle)
-    int h = strlen(hay)
-    int limit = 0
-    int i = 0
-    if n is 0 do
-        return true
-    end
-    if h < n do
-        return false
-    end
-    limit = h - n + 1
-    i = 0
-    while i < limit do
-        bool ok = true
-        int j = 0
-        j = 0
-        while j < n do
-            if hay[i + j] is not needle[j] do
-                ok = false
-            end
-            j = j + 1
-        end
-        if ok do
-            return true
-        end
-        i = i + 1
-    end
-    return false
+    return indexOf(hay, needle) >= 0
 end
 
 /// Returns true when `s` starts with `prefix`.
@@ -121,11 +94,172 @@ string substring(string s, int start, int stop) do
         return ""
     end
     n = stop - start
-    res = calloc(1, n + 1)
+    res = allocateString(n)
     i = 0
     while i < n do
         res[i] = s[start + i]
         i = i + 1
     end
     return res
+end
+
+
+/// Allocates a zero-terminated writable string of size bytes, initially zero.
+/// Low-level helper: asserts on invalid size or allocation failure.
+/// Raw strings are not RAII-owned; see stdlib/README.md before freeing.
+string allocateString(int size) do
+    assert size >= 0
+    assert size <= 9223372036854775806
+    string result = calloc(1, size + 1)
+    assert result is not null
+    return result
+end
+
+/// Finds needle at/after start; returns a byte offset or -1.
+/// Negative start clamps to zero; start > len(hay) fails even for empty needle.
+int indexOfFrom(string hay, string needle, int start) do
+    int h = len(hay)
+    int n = len(needle)
+    if start < 0 do
+        start = 0
+    end
+    if start > h or n > h do
+        return -1
+    end
+    int i = start
+    while i <= h - n do
+        int j = 0
+        while j < n do
+            if hay[i + j] is not needle[j] do
+                break
+            end
+            j = j + 1
+        end
+        if j is n do
+            return i
+        end
+        i = i + 1
+    end
+    return -1
+end
+
+/// First byte offset of needle, or -1; an empty needle matches at zero.
+int indexOf(string hay, string needle) do
+    return indexOfFrom(hay, needle, 0)
+end
+
+/// Last byte offset of needle, or -1; empty needle matches at len(hay).
+int lastIndexOf(string hay, string needle) do
+    int n = len(needle)
+    int i = len(hay) - n
+    while i >= 0 do
+        int j = 0
+        while j < n do
+            if hay[i + j] is not needle[j] do
+                break
+            end
+            j = j + 1
+        end
+        if j is n do
+            return i
+        end
+        i = i - 1
+    end
+    return -1
+end
+
+/// ASCII whitespace only: space, tab, LF, CR, vertical tab and form feed.
+bool isAsciiSpace(char c) do
+    return c is ' ' or c is '\t' or c is '\n' or c is '\r' or c is '\x0b' or c is '\f'
+end
+
+/// Removes ASCII whitespace from both ends (byte-oriented, not Unicode).
+string trim(string s) do
+    int start = 0
+    int stop = len(s)
+    while start < stop do
+        if not isAsciiSpace(s[start]) do
+            break
+        end
+        start = start + 1
+    end
+    while stop > start do
+        if not isAsciiSpace(s[stop - 1]) do
+            break
+        end
+        stop = stop - 1
+    end
+    return substring(s, start, stop)
+end
+
+/// Streaming split: initialize cursor = 0, call until cursor becomes -1.
+/// Preserves empty fields, including the final field. Empty sep yields s once.
+/// No vector capacity limit. Do not change s/sep between calls.
+string splitNext(string s, string sep, ref int cursor) do
+    int size = len(s)
+    if cursor < 0 or cursor > size do
+        cursor = -1
+        return ""
+    end
+    int start = cursor
+    int found = -1
+    if len(sep) > 0 do
+        found = indexOfFrom(s, sep, start)
+    end
+    if found < 0 do
+        cursor = -1
+        return substring(s, start, size)
+    end
+    cursor = found + len(sep)
+    return substring(s, start, found)
+end
+
+/// Replaces left-to-right non-overlapping matches. Empty needle is a no-op.
+/// Exact-size allocation, with checked output-size arithmetic; never recursive.
+string replaceAll(string s, string needle, string replacement) do
+    int size = len(s)
+    int n = len(needle)
+    int r = len(replacement)
+    if n is 0 do
+        return s
+    end
+    int count = 0
+    int pos = indexOf(s, needle)
+    while pos >= 0 do
+        count = count + 1
+        pos = indexOfFrom(s, needle, pos + n)
+    end
+    if count is 0 do
+        return s
+    end
+    int total = size - count * n
+    if r > 0 do
+        assert count <= (9223372036854775806 - total) / r
+    end
+    total = total + count * r
+    string result = allocateString(total)
+    int source = 0
+    int dest = 0
+    pos = indexOf(s, needle)
+    while pos >= 0 do
+        while source < pos do
+            result[dest] = s[source]
+            dest = dest + 1
+            source = source + 1
+        end
+        int j = 0
+        while j < r do
+            result[dest] = replacement[j]
+            dest = dest + 1
+            j = j + 1
+        end
+        source = pos + n
+        pos = indexOfFrom(s, needle, source)
+    end
+    while source < size do
+        result[dest] = s[source]
+        dest = dest + 1
+        source = source + 1
+    end
+    return result
 end

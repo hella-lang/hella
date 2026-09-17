@@ -1,6 +1,6 @@
 // std::io — terminal IO for Hella (real stdlib: pure Hella + extern FFI).
 // Import via: import std::io
-// or selective: import std::io::{print, println, printInt, putChar}
+// or selective: import std::io::{print, println}
 //
 // Contract (REAL_STDLIB.md): the compiler knows only `extern "c"` lowering
 // and internal libc helpers for its own codegen (assert, interpolation).
@@ -9,18 +9,17 @@
 // undefined name — that is the intended boundary, not a bug.
 //
 // Hella `string` is a null-terminated `ptr (i8*)`; `char` is `i32`.
-// ABIs match C exactly. `write` targets fd 2 (stderr) directly so no `FILE*`
-// global is needed (portable across macOS/Linux, unlike `stderr`/`stdin`
-// globals). Input buffers come zeroed from `calloc`, so a short/failed read
-// still yields a valid empty string.
+// `write` targets fd 2 (stderr) directly so no FILE* global is needed.
+// See stdlib/README.md for the current compiler's extern ABI limitations.
+// Input buffers come zeroed from calloc; readLine grows and copies them.
 
 extern "c" from "libc" do
     i32 puts(string s)
     i32 printf(string fmt, ...)
-    i32 putchar(char c)
     int write(int fd, string buf, int count)
     string calloc(int n, int size)
     int scanf(string fmt, ...)
+    void free(string buf)
 end
 
 /// Prints `s` to stdout with no trailing newline.
@@ -31,16 +30,6 @@ end
 /// Prints `s` to stdout with a trailing newline (via libc `puts`).
 void println(string s) do
     puts(s)
-end
-
-/// Prints `n` in decimal with a trailing newline.
-void printInt(int n) do
-    printf("%ld\n", n)
-end
-
-/// Prints a single character `c` with no newline.
-void putChar(char c) do
-    putchar(c)
 end
 
 /// Prints `s` to stderr (fd 2) with no trailing newline.
@@ -54,19 +43,38 @@ void eprintln(string s) do
     eprint("\n")
 end
 
-/// Reads one stdin line, WITHOUT the trailing newline.
-/// Capped at 255 bytes (overlong lines continue on the next call).
-/// EOF yields `""`.
+/// Reads a line without LF, including blank lines and lines longer than 255 bytes.
+/// EOF/error yields the bytes read so far (empty string if none); not distinguishable.
+/// Embedded NUL input is not supported by Hella strings. Caller owns the heap buffer.
 string readLine() do
-    string buf = calloc(1, 256)
-    scanf("%255[^\n]%*c", buf)
+    int capacity = 256
+    int size = 0
+    string buf = calloc(1, capacity)
+    assert buf is not null
+    string byte = calloc(1, 2)
+    assert byte is not null
+    // Only success (1) is accepted; C scanf returns a 32-bit int.
+    // Current extern lowering requires Hella int rather than i32 here.
+    while scanf("%1c", byte) is 1 do
+        if byte[0] is '\n' do
+            break
+        end
+        if size is capacity - 1 do
+            assert capacity <= 4611686018427387903
+            capacity = capacity * 2
+            string grown = calloc(1, capacity)
+            assert grown is not null
+            int i = 0
+            while i < size do
+                grown[i] = buf[i]
+                i = i + 1
+            end
+            free(buf)
+            buf = grown
+        end
+        buf[size] = byte[0]
+        size = size + 1
+    end
+    free(byte)
     return buf
-end
-
-/// Reads one stdin integer (leading whitespace skipped, one trailing
-/// character consumed). EOF yields `0`.
-int readInt() do
-    int n = 0
-    scanf("%ld%*c", out n)
-    return n
 end

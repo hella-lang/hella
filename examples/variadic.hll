@@ -9,7 +9,7 @@ end
 
 int log(string fmt, ...int vda) do
     // vda is `int[]` array of remaining ints
-    printInt(vda[0])
+    println("{vda[0]}")
     return vda[0]
 end
 
@@ -19,9 +19,9 @@ int logStr(string fmt, ...string vda) do
 end
 
 int logGen<T>(string fmt, ...T vda) where T: int do
-    // `printInt(int)` is typed stdlib: a generic `T` does not coerce.
+    // print/println are typed stdlib: a generic `T` does not coerce.
     // C varargs leave extras unchecked, and `T` erases to `i64` — same
-    // layout `printInt` itself prints with `%ld`.
+    // C varargs leave extras unchecked, and `T` erases to `i64`.
     printf("%ld\n", vda[0])
     return 0
 end
@@ -42,7 +42,7 @@ end
 void main() do
     printf("%d %s\n", 42, "hi")
     int x = log("x", 10, 20, 30)
-    printInt(x)
+    println("{x}")
     logStr("s", "a", "b")
     logGen<int>("g", 1, 2, 3)
     logDerived("hi", "a", "b")

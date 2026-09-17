@@ -12,14 +12,14 @@ Guide for building `stdlib` for Hella (EBNF draft 0.1).
 1. **Pure Hella sources** — stdlib is Hella code under `stdlib/` (e.g. `stdlib/std/io.hll`), not hand-written LLVM IR. Runtime `extern "c"` helpers live in `runtime/` only when Hella cannot express an operation.
 2. **Import semantics confirmed — EBNF §32** — `import qualified-name [:: "{" import-list "}"] statement-terminator` is canonical. Qualified path `a::b::c` maps to `stdlib/a/b/c.hll`. No alternate syntax.
 3. **Go with proposal** — phased approach from `references/phases.md` + LLVM mapping (`references/llvm-mapping.md`). Stdlib blocks on Phase 5 capabilities (generics, FFI) without inventing workarounds.
-4. **IO-first minimal** — this iteration ships only a handful of IO functions. No collections / strings / math until compiler stabilizes.
+4. **Respect compiler limits** — concrete collection facades, byte strings, streaming split and bool/ref integer parsing; no invented generic ownership API.
 
 ## Layout
 
 ```
 stdlib/
   std/
-    io.hll        # print println printInt putChar eprint eprintln readLine readInt (pure Hella + extern)
+    io.hll        # print println eprint eprintln readLine (pure Hella + extern)
     types.hll     # doc-only manifest of the implicit environment
   README.md
 runtime/          # optional tiny C/Rust helpers linked via clang (future: when Hella cannot express an operation)
@@ -59,16 +59,19 @@ qualified-name = identifier , { "::" , identifier } ;
 **Shipped (`stdlib/std/io.hll`) — pure Hella, no compiler intrinsics:**
 - `void print(string s)` — no newline, via `extern i32 printf(string fmt, ...)`
 - `void println(string s)` — with newline, via `extern i32 puts(string s)`
-- `void printInt(int n)` — decimal, via `printf("%ld\n", n)`
-- `void putChar(char c)` — single char, via `extern i32 putchar(char c)`
 - `void eprint` / `void eprintln(string s)` — stderr via
   `extern int write(int fd, string buf, int count)` on fd 2 (no `FILE*`
   global, portable macOS/Linux)
-- `string readLine()` — stdin line sans newline via `extern string calloc`
-  + `extern int scanf(string fmt, ...)` (`"%255[^\n]%*c"`, 255-byte cap)
-- `int readInt()` — stdin integer via `scanf("%ld%*c", out n)`
+- `string readLine()` — dynamically growing, bounded one-byte scans; blank lines
+  and EOF are supported. EOF/error still lack a separate status.
+- Numeric input uses `std::num::parseInt` (import `std::num`, then call
+  `parseInt(input, ref value)`) with explicit bool failure and overflow checks.
 
-**Not yet:** file IO, formatting/interpolation helpers, buffering.
+**Current API / migration / caveats:** `stdlib/README.md` is authoritative.
+Typed format and IO helpers have been removed; use interpolation and print/println.
+Interpolation itself still needs compiler safety fixes; library composition uses
+checked-size byte copying instead. All stdlib examples run in the new compiler
+integration test `crates/hella-compiler/tests/stdlib.rs`.
 See `REAL_STDLIB.md` for the boundary rule.
 
 Implementation note: Hella `string` is `ptr (i8*)` null-terminated in

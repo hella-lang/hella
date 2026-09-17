@@ -126,17 +126,43 @@ end
 
 /// Joins string vec `v` with `sep` between elements.
 string sJoin(string vec v, string sep) do
-    string acc = ""
-    int i = 0
     int n = v.len()
+    int total = 0
+    int i = 0
+    int sepSize = len(sep)
     while i < n do
+        int size = len(v[i])
+        assert size <= 9223372036854775806 - total
+        total = total + size
         if i > 0 do
-            acc = "{acc}{sep}"
+            assert sepSize <= 9223372036854775806 - total
+            total = total + sepSize
         end
-        acc = "{acc}{v[i]}"
         i = i + 1
     end
-    return acc
+    string result = allocateString(total)
+    int dest = 0
+    i = 0
+    while i < n do
+        int j = 0
+        if i > 0 do
+            while j < sepSize do
+                result[dest] = sep[j]
+                dest = dest + 1
+                j = j + 1
+            end
+        end
+        string part = v[i]
+        int size = len(part)
+        j = 0
+        while j < size do
+            result[dest] = part[j]
+            dest = dest + 1
+            j = j + 1
+        end
+        i = i + 1
+    end
+    return result
 end
 
 // NOTE: no `dContains` — the compiler's `contains` on double vecs
