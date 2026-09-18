@@ -713,6 +713,8 @@ impl<'ctx> Codegen<'ctx> {
                 crate::sema::Ty::Own(ref inner) => {
                     self.own_pair_type(inner).fn_type(&param_llvm, false)
                 }
+                // `task<T>` (Async-6): opaque runtime handle pointer.
+                crate::sema::Ty::Task(_) => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, false),
                 crate::sema::Ty::Array(_) => self.context.i64_type().array_type(16).fn_type(&param_llvm, false),
                 crate::sema::Ty::FixedArray { elem: ref elem, size: ref size } => {
                     let n = size.unwrap_or(16) as u32;
@@ -1164,6 +1166,8 @@ impl<'ctx> Codegen<'ctx> {
                         crate::sema::Ty::Own(ref inner) => {
                             self.own_pair_type(inner).fn_type(&param_llvm, false)
                         }
+                        // `task<T>` (Async-6): opaque runtime handle pointer.
+                        crate::sema::Ty::Task(_) => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, false),
                         crate::sema::Ty::Enum(ref n) => {
                             let et = self.enum_types.get(n).unwrap();
                             et.fn_type(&param_llvm, false)
@@ -3517,6 +3521,8 @@ impl<'ctx> Codegen<'ctx> {
                 crate::sema::Ty::Own(ref inner) => {
                     self.own_pair_type(inner).fn_type(&param_types, is_c_varargs)
                 }
+                // `task<T>` (Async-6): opaque runtime handle pointer.
+                crate::sema::Ty::Task(_) => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_types, is_c_varargs),
                 crate::sema::Ty::Struct(ref n) => {
                     if let Some(pair) = self.trait_pair_of(n) {
                         pair.fn_type(&param_types, is_c_varargs)
@@ -3672,6 +3678,15 @@ impl<'ctx> Codegen<'ctx> {
         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let fn_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), self.context.i64_type().into()], false);
         self.module.add_function("memcpy", fn_ty, None)
+    }
+    /// `sched_yield()` (Async-6/Async-7): cooperative checkpoint backing
+    /// `yield`. Declared lazily — only async programs reference it, so sync
+    /// binaries never gain the dependency (Async-8). POSIX provides it in
+    /// libc; on Windows the CLI links a small shim (see `hella_rt.c`).
+    fn get_or_declare_sched_yield(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("sched_yield") { return f; }
+        let fn_ty = self.context.i32_type().fn_type(&[], false);
+        self.module.add_function("sched_yield", fn_ty, None)
     }
 
     // NOTE (real stdlib): no `is_stdlib_io_intrinsic` /
@@ -4548,6 +4563,13 @@ impl<'ctx> Codegen<'ctx> {
                     crate::sema::Ty::Own(inner) => {
                         self.own_pair_type(inner.as_ref()).const_zero().into()
                     }
+                    // `task<T>` (Async-6): null handle (never observed: sema
+                    // rejects un-awaited tasks, so this is unreachable).
+                    crate::sema::Ty::Task(_) => self
+                        .context
+                        .ptr_type(inkwell::AddressSpace::default())
+                        .const_null()
+                        .into(),
                     crate::sema::Ty::Array(_) => self
                         .context
                         .i64_type()
@@ -4649,6 +4671,7 @@ impl<'ctx> Codegen<'ctx> {
             crate::sema::Ty::Own(inner) => {
                 Some(self.own_pair_type(inner.as_ref()).const_zero().into())
             }
+            crate::sema::Ty::Task(_) => Some(self.context.ptr_type(inkwell::AddressSpace::default()).const_null().into()),
             crate::sema::Ty::Array(_) => Some(self.context.i64_type().array_type(16).const_zero().into()),
             crate::sema::Ty::FixedArray { elem, size } => {
                 let n = size.unwrap_or(16) as u32;
@@ -6164,6 +6187,13 @@ impl<'ctx> Codegen<'ctx> {
                             .ptr_type(inkwell::AddressSpace::default())
                             .const_null()
                             .into(),
+                        // `task<T>` (Async-6): null handle (sema rejects
+                        // un-initialized task reads via the escape check).
+                        Type::Task(_, _) => self
+                            .context
+                            .ptr_type(inkwell::AddressSpace::default())
+                            .const_null()
+                            .into(),
                         Type::Optional(el, _) => {
                             let inner_zero: BasicValueEnum = match el.as_ref() {
                                 Type::Int(_) => self
@@ -6363,6 +6393,19 @@ impl<'ctx> Codegen<'ctx> {
                 Ok(false)
             }
             Stmt::Block(b) => self.codegen_block(b),
+            // `scope do ... end` (Async-6): at codegen a scope is a plain
+            // block — the join is structural (sema forced every task to be
+            // awaited inside), so no runtime barrier is emitted here.
+            Stmt::Scope(b) => self.codegen_block(b),
+            // `yield` (Async-6): cooperative checkpoint. Thread-backed
+            // tasks yield the OS thread (`sched_yield`); the declaration is
+            // lazy so sync programs never reference it (Async-8).
+            Stmt::Yield(span) => {
+                let f = self.get_or_declare_sched_yield();
+                self.builder.build_call(f, &[], "async.yield").unwrap();
+                let _ = span;
+                Ok(false)
+            }
             Stmt::Return(r) => {
                 self.emit_all_defers()?;
                 // Evaluate the return operand BEFORE destructors run. The
