@@ -3225,6 +3225,13 @@ impl<'ctx> Codegen<'ctx> {
                 .context
                 .ptr_type(inkwell::AddressSpace::default())
                 .into(),
+            // `task<T>` (Async-6): lowered as an opaque handle pointer
+            // (the runtime's `hella_task_t*`). Sema knows `T`; LLVM only
+            // ever passes the handle by pointer.
+            Type::Task(_, _) => self
+                .context
+                .ptr_type(inkwell::AddressSpace::default())
+                .into(),
             Type::Own(inner, _) => {
                 // Every `own` slot is a pair (uniform with trait objects).
                 let lookup = match inner.as_ref() {
@@ -3357,6 +3364,12 @@ impl<'ctx> Codegen<'ctx> {
                 Some(self.map_struct_ty(k, v).into())
             }
             crate::sema::Ty::Pointer(_) => Some(
+                self.context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .into(),
+            ),
+            // `task<T>` (Async-6): opaque runtime handle pointer.
+            crate::sema::Ty::Task(_) => Some(
                 self.context
                     .ptr_type(inkwell::AddressSpace::default())
                     .into(),

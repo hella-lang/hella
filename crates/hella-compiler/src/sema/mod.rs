@@ -4844,6 +4844,7 @@ impl Checker {
             Ty::Pointer(el) => Type::Pointer(Box::new(Self::ty_to_type(el)), sp),
             Ty::Optional(el) => Type::Optional(Box::new(Self::ty_to_type(el)), sp),
             Ty::Own(el) => Type::Own(Box::new(Self::ty_to_type(el)), sp),
+            Ty::Task(el) => Type::Task(Box::new(Self::ty_to_type(el)), sp),
             Ty::Tuple(tys) => Type::Tuple(tys.iter().map(|t| Self::ty_to_type(t)).collect(), sp),
             Ty::Function(ret, args) => Type::FunctionType(Box::new(Self::ty_to_type(ret)), args.iter().map(|a| Self::ty_to_type(a)).collect(), sp),
         }
@@ -5196,7 +5197,7 @@ pub struct CheckOptions {
 fn collect_scope_task_decls(b: &Block, out: &mut Vec<String>) {
     for stmt in &b.stmts {
         if let Stmt::VarDecl(d) = stmt {
-            if matches!(d.ty, Type::Task(_)) {
+            if matches!(d.ty, Type::Task(_, _)) {
                 out.push(d.name.clone());
             }
         }

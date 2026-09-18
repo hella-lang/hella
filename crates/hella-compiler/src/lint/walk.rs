@@ -156,6 +156,8 @@ fn block(b: &Block, v: &mut impl FnMut(&Expr)) {
                 DeferInner::Expr(e) => expr(e, v),
                 DeferInner::Block(b) => block(b, v),
             },
+            Stmt::Scope(b) => block(b, v),
+            Stmt::Yield(_) => {}
             Stmt::Break(_) | Stmt::Continue(_) => {}
         }
     }
@@ -205,6 +207,7 @@ fn expr(e: &Expr, v: &mut impl FnMut(&Expr)) {
         ExprKind::Call { args: a, .. }
         | ExprKind::New { args: a, .. }
         | ExprKind::EnumVariant { args: a, .. } => args(a, v),
+        ExprKind::Await { task, .. } | ExprKind::Spawn { task, .. } => expr(task, v),
         ExprKind::MethodCall {
             object, args: a, ..
         } => {
