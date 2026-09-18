@@ -3500,7 +3500,45 @@ impl<'ctx> Codegen<'ctx> {
             && f.params.len() == 1
             && f.params[0].name == "args"
             && matches!(&f.params[0].ty, Type::Array(el, _) if matches!(el.as_ref(), Type::String(_)));
-        let fn_ty = if f.name == "main" {
+        let fn_ty = if f.name == "main" && f.is_async {
+            // Async-6 root executor: the user body becomes `__hella_async_main`
+            // (sync LLVM signature); the public `main` wrapper spawns it and
+            // joins, translating `void` -> exit 0 (see `codegen_async_main_wrapper`).
+            let body_params: Vec<inkwell::types::BasicMetadataTypeEnum> = f
+                .params
+                .iter()
+                .map(|p| {
+                    let t: crate::sema::Ty = (&p.ty).into();
+                    let rt = self.resolve_ty_for_codegen(&t);
+                    self.llvm_ty_for_sema(&rt).map(|bt| bt.into()).unwrap()
+                })
+                .collect();
+            let body_ty = if ret_sema == crate::sema::Ty::Void {
+                self.context.void_type().fn_type(&body_params, false)
+            } else {
+                let rt = self.llvm_ty_for_sema(&ret_sema).unwrap_or(self.context.i64_type().into());
+                rt.fn_type(&body_params, false)
+            };
+            let body_fn = self.module.add_function("__hella_async_main", body_ty, None);
+            self.funcs.insert(
+                "__hella_async_main".to_string(),
+                (
+                    body_fn,
+                    TyInfo {
+                        ret: ret_sema.clone(),
+                        params: param_semas.clone(),
+                        param_modes: param_modes.clone(),
+                        param_names: f.params.iter().map(|p| p.name.clone()).collect(),
+                        param_is_variadic: f.params.iter().map(|p| p.is_variadic).collect(),
+                        param_defaults: f.params.iter().map(|p| p.default.clone()).collect(),
+                        is_async: false, // the body runs inline inside the root task
+                    },
+                ),
+            );
+            // Wrapper `main`: C ABI, no params.
+            let ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+            self.context.i32_type().fn_type(&[self.context.i32_type().into(), ptr.into()], false)
+        } else if f.name == "main" {
             let ptr = self.context.ptr_type(inkwell::AddressSpace::default());
             self.context.i32_type().fn_type(&[self.context.i32_type().into(), ptr.into()], false)
         } else {
@@ -3777,6 +3815,120 @@ impl<'ctx> Codegen<'ctx> {
             BasicTypeEnum::ScalableVectorType(vt) =>
                 vt.get_size() as u64 * self.llvm_byte_size(vt.get_element_type().into()),
         }
+    }
+
+    /// Root executor for `async main` (Async-6): `main` (C ABI, no visible
+    /// params beyond the standard argc/argv pair) spawns
+    /// `__hella_async_main(args...)` as the root task and joins it,
+    /// returning the exit code (`int` main) or 0 (`void` main).
+    fn codegen_async_main_wrapper(
+        &mut self,
+        body_fn: FunctionValue<'ctx>,
+        f: &Function,
+    ) -> Result<(), CodegenError> {
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i32_ty = self.context.i32_type();
+        let i64_ty = self.context.i64_type();
+        let main_fn = self.funcs.get("main").map(|(fv, _)| *fv).unwrap();
+        let entry = self.context.append_basic_block(main_fn, "entry");
+        self.cur_fn = Some(main_fn);
+        self.cur_is_main = true;
+        self.builder.position_at_end(entry);
+        self.vars.push(HashMap::new());
+        self.own_slots.push(Vec::new());
+        self.scope_dtors.push(Vec::new());
+
+        // Capture argv[0] (mirrors the normal main prologue).
+        {
+            let argc = self.builder.build_int_s_extend(
+                main_fn.get_nth_param(0).unwrap().into_int_value(), i64_ty, "argc64").unwrap();
+            let argv = main_fn.get_nth_param(1).unwrap().into_pointer_value();
+            let has = self.builder.build_int_compare(IntPredicate::SGT, argc, i64_ty.const_zero(), "argv0.has").unwrap();
+            let slot0 = unsafe { self.builder.build_gep(ptr_ty, argv, &[i64_ty.const_zero()], "argv0.slot").unwrap() };
+            let s0 = self.builder.build_load(ptr_ty, slot0, "argv0.str").unwrap();
+            let v0 = self.builder.build_select(has, s0, ptr_ty.const_null().into(), "argv0").unwrap();
+            self.builder.build_store(self.argv0_global(), v0).unwrap();
+        }
+
+        // Build body args: `int main(string[] args) async` fills args from
+        // argv[1..] exactly like the sync form.
+        let body_info = self.funcs.get("__hella_async_main").unwrap().1.clone();
+        let mut body_args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+        if f.params.len() == 1 && f.params[0].name == "args" {
+            // [16 x ptr] from argv[1..]
+            let argc = main_fn.get_nth_param(0).unwrap().into_int_value();
+            let argv = main_fn.get_nth_param(1).unwrap().into_pointer_value();
+            let arr_ty = ptr_ty.array_type(16);
+            let arr_alloca = self.builder.build_alloca(arr_ty, "async.main.args").unwrap();
+            let one = i32_ty.const_int(1, false);
+            let cap = i32_ty.const_int(16, false);
+            for i in 0..16u32 {
+                let i_c = i32_ty.const_int(i as u64 + 1, false); // argv[1..]
+                let in_range = self.builder.build_int_compare(IntPredicate::SLT, i_c, argc, "arg.in").unwrap();
+                let slot = unsafe { self.builder.build_gep(ptr_ty, argv, &[i64_ty.const_int(i as u64 + 1, false)], "arg.slot").unwrap() };
+                let loaded = self.builder.build_load(ptr_ty, slot, "arg.v").unwrap();
+                let sel = self.builder.build_select(in_range, loaded, ptr_ty.const_null().into(), "arg.sel").unwrap();
+                let dst = unsafe { self.builder.build_gep(arr_ty, arr_alloca, &[i64_ty.const_zero(), i64_ty.const_int(i as u64, false)], "arg.dst").unwrap() };
+                self.builder.build_store(dst, sel).unwrap();
+            }
+            body_args.push(self.builder.build_load(arr_ty, arr_alloca, "args.load").unwrap().into());
+        }
+        let _ = body_info;
+
+        // ret_size: 0 for void, else size of the LLVM ret type.
+        let ret_sema: crate::sema::Ty = (&f.ret_ty).into();
+        let ret_sema = self.resolve_ty_for_codegen(&ret_sema);
+        let (ret_size, ret_llvm) = if ret_sema == crate::sema::Ty::Void {
+            (0u64, None)
+        } else {
+            let rt = self.llvm_ty_for_sema(&ret_sema).unwrap_or(i64_ty.into());
+            (self.llvm_byte_size(rt), Some(rt))
+        };
+
+        // task = spawn(entry=__async_entry___hella_async_main, ctx, ret_size)
+        // Reuse the generic spawn-call lowering by faking a call: build the
+        // ctx from body_args. (Simpler than a bespoke path: the generic
+        // path generates the trampoline + heap ctx.)
+        let handle = self.codegen_async_spawn_call(body_fn, &TyInfo {
+            ret: ret_sema.clone(),
+            params: vec![],
+            param_modes: vec![],
+            param_names: vec![],
+            param_is_variadic: vec![],
+            param_defaults: vec![],
+            is_async: true,
+        }, body_args, f.span)?;
+        let handle_ptr = handle.into_pointer_value();
+
+        // join + result
+        let join = self.get_or_declare_task_join();
+        self.builder.build_call(join, &[handle_ptr.into()], "async.main.join").unwrap();
+        let res_fn = self.get_or_declare_task_result();
+        let exit: inkwell::values::IntValue = if let Some(rt) = ret_llvm {
+            let slot = self.builder.build_alloca(rt, "async.main.ret").unwrap();
+            self.builder.build_call(res_fn, &[handle_ptr.into(), slot.into(), i64_ty.const_int(ret_size, false).into()], "async.main.result").unwrap();
+            let v = self.builder.build_load(rt, slot, "async.main.ret.load").unwrap().into_int_value();
+            self.builder.build_int_truncate(v, i32_ty, "exit32").unwrap()
+        } else {
+            let scratch = self.builder.build_alloca(i64_ty, "async.main.scratch").unwrap();
+            self.builder.build_call(res_fn, &[handle_ptr.into(), scratch.into(), i64_ty.const_int(0, false).into()], "async.main.result").unwrap();
+            i32_ty.const_int(0, false)
+        };
+        self.emit_global_dtors();
+        self.builder.build_return(Some(&exit)).unwrap();
+
+        self.own_slots.pop();
+        self.scope_dtors.pop();
+        self.vars.pop();
+        self.cur_fn = None;
+        self.cur_is_main = false;
+        if !main_fn.verify(true) {
+            return Err(CodegenError {
+                message: "async main wrapper failed verification".into(),
+                span: f.span,
+            });
+        }
+        Ok(())
     }
 
     /// Spawn `func(args)` as a task (Async-6). The async callee keeps its
@@ -4584,6 +4736,20 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn codegen_function(&mut self, f: &Function) -> Result<(), CodegenError> {
+        // Async-6: `async main` splits into a body fn (`__hella_async_main`,
+        // normal lowering of the user code) plus a C-ABI `main` wrapper that
+        // spawns the body as the root task and joins it.
+        if f.name == "main" && f.is_async {
+            let body_name = "__hella_async_main";
+            let body_f = self.funcs.get(body_name).map(|(fv, _)| *fv).unwrap();
+            // Codegen the user body into `__hella_async_main` (as an ordinary
+            // sync function).
+            let mut body_copy = f.clone();
+            body_copy.name = body_name.to_string();
+            body_copy.is_async = false;
+            self.codegen_function(&body_copy)?;
+            return self.codegen_async_main_wrapper(body_f, f);
+        }
         let (func, info) =
             self.funcs.get(&f.name).cloned().ok_or(CodegenError {
                 message: format!("undeclared func {}", f.name),
@@ -4605,7 +4771,7 @@ impl<'ctx> Codegen<'ctx> {
         // `__hella_argv0` global for `__hella_progname()` — all main forms
         // declare `(i32 argc, ptr argv)` at LLVM level, so this works with
         // or without a Hella-level `args` parameter.
-        if f.name == "main" {
+        if f.name == "main" && !self.funcs.contains_key("__hella_async_main") {
             let i64_ty = self.context.i64_type();
             let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
             let argc = self.builder.build_int_s_extend(func.get_nth_param(0).unwrap().into_int_value(), i64_ty, "argc64").unwrap();
