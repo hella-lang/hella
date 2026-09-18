@@ -77,13 +77,15 @@ typedef struct hella_task {
     unsigned char result[HELLA_TASK_INLINE];
     void *result_ptr;
     size_t result_size;
-    void *(*entry)(void *);
+    /* worker entry: called as entry(task_handle, arg) so the worker can
+     * store its result without racing the spawner's handle handoff */
+    void *(*entry)(void *, void *);
     void *arg;
 } hella_task_t;
 
 static void *hella_task_trampoline(void *p) {
     hella_task_t *t = (hella_task_t *)p;
-    t->entry(t->arg);
+    t->entry((void *)t, t->arg);
     hella_mutex_lock(&t->mu);
     t->state = 1;
     hella_cond_signal(&t->done_cv);
@@ -91,7 +93,7 @@ static void *hella_task_trampoline(void *p) {
     return NULL;
 }
 
-void *hella_task_spawn(void *(*entry)(void *), void *arg, size_t result_size) {
+void *hella_task_spawn(void *(*entry)(void *, void *), void *arg, size_t result_size) {
     hella_task_t *t = (hella_task_t *)malloc(sizeof(hella_task_t));
     if (!t) abort();
     memset(t, 0, sizeof(*t));
