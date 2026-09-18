@@ -2551,24 +2551,31 @@ impl Checker {
                     });
                 }
                 self.scope_depth += 1;
-                let r = self.check_block(b, ret_ty);
-                self.scope_depth -= 1;
-                // Implicit join: every `task<T>` declared directly in this
-                // scope body must be awaited before `end`. Un-awaited tasks
-                // are errors (they would otherwise run past the scope exit).
-                // (`check_block` pushed/popped its own level; pending marks
-                // live on the outer levels, so drain by name here.)
-                let mut declared: Vec<String> = Vec::new();
-                collect_scope_task_decls(b, &mut declared);
-                for name in declared {
-                    if self.is_task_pending(&name) {
-                        self.errors.push(SemError {
-                            message: format!("task `{name}` escapes its `scope`: `await` it before `end`"),
-                            span: b.span,
-                        });
+                // The scope body gets its own scope level so the implicit
+                // join below can inspect exactly the tasks declared inside
+                // it (an awaited task is removed from `pending_tasks` by
+                // `await`, so what is left at `end` escapes the scope).
+                self.push_scope();
+                let mut always_returns = false;
+                for stmt in &b.stmts {
+                    if self.check_stmt(stmt, ret_ty) {
+                        always_returns = true;
                     }
                 }
-                r
+                let escaped: Vec<String> = self
+                    .pending_tasks
+                    .last()
+                    .map(|s| s.iter().cloned().collect())
+                    .unwrap_or_default();
+                for name in escaped {
+                    self.errors.push(SemError {
+                        message: format!("task `{name}` escapes its `scope`: `await` it before `end`"),
+                        span: b.span,
+                    });
+                }
+                self.pop_scope();
+                self.scope_depth -= 1;
+                always_returns
             }
             // `yield` (Async-1): parks the current task. Only inside async.
             Stmt::Yield(span) => {
@@ -3288,6 +3295,16 @@ impl Checker {
                 // without `import std::io` they are undefined names by design.
                 let sig = self.funcs.get(callee).cloned();
                 if let Some(sig) = sig {
+                    // Async-1/Async-5: only an `async` body may create a
+                    // task. A sync caller would receive a `task<T>` it can
+                    // never await (await is rejected outside async), so this
+                    // is a hard error rather than a silently dead handle.
+                    if sig.is_async && !self.in_async {
+                        self.errors.push(SemError {
+                            message: format!("`{callee}` is `async`: it can only be called (or spawned) from an `async` body"),
+                            span: *callee_span,
+                        });
+                    }
                     if sig.param_is_variadic.iter().any(|&v| v) {
                         self.check_call_with_sig(args, &sig, *callee_span, callee);
                     } else {
