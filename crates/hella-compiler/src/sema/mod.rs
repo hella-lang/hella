@@ -48,6 +48,9 @@ pub enum Ty {
     Optional(Box<Ty>),
     /// Owning heap pointer: `own T`. Moves (never copies); scope-destroyed.
     Own(Box<Ty>),
+    /// Pending computation: `task<T>` (Async-1). A running or completed
+    /// async child; `await` consumes it exactly once and yields `T`.
+    Task(Box<Ty>),
 }
 
 impl Ty {
@@ -182,6 +185,9 @@ impl From<&Type> for Ty {
             Type::Own(el, _) => {
                 Ty::Own(Box::new(Ty::from(el.as_ref())))
             }
+            Type::Task(el, _) => {
+                Ty::Task(Box::new(Ty::from(el.as_ref())))
+            }
         }
     }
 }
@@ -222,6 +228,7 @@ impl std::fmt::Display for Ty {
             Ty::Pointer(el) => write!(f, "{}*", el),
             Ty::Optional(el) => write!(f, "{}?", el),
             Ty::Own(el) => write!(f, "own {}", el),
+            Ty::Task(el) => write!(f, "task<{}>", el),
         }
     }
 }
@@ -236,6 +243,9 @@ struct FuncSig {
     param_defaults: Vec<Option<Expr>>,
     generic_params: Vec<GenericParam>,
     where_clause: Option<WhereClause>,
+    /// `true` for `Ret name(...) async do ... end` (Async-1): calling it
+    /// yields `task<Ret>`; `await` unwraps back to `Ret`.
+    is_async: bool,
     span: Span,
 }
 
@@ -306,6 +316,15 @@ pub struct Checker {
     cur_ret: Option<Ty>,
     cur_class: Option<String>,
     loop_stack: Vec<Option<String>>,
+    /// Async context (Async-1..Async-5): set while checking an `async`
+    /// function body. `await`/`yield` outside it are errors; `spawn` needs
+    /// an enclosing `scope` on top of it.
+    in_async: bool,
+    /// `scope do ... end` nesting depth inside the current async body.
+    scope_depth: usize,
+    /// Tasks declared per scope level, parallel to `scopes`: names bound to
+    /// `task<T>` that have not been awaited yet.
+    pending_tasks: Vec<HashSet<String>>,
     /// Whether a missing `main` is an error. The CLI always requires it;
     /// the LSP only requires it for files named `main` (library modules
     /// next to `main.hll` are checked without an entry point).
@@ -346,6 +365,9 @@ impl Checker {
             cur_ret: None,
             cur_class: None,
             loop_stack: Vec::new(),
+            in_async: false,
+            scope_depth: 0,
+            pending_tasks: Vec::new(),
             require_main: true,
         }
     }
@@ -362,6 +384,7 @@ impl Checker {
         self.scopes.push(HashMap::new());
         self.const_scopes.push(HashSet::new());
         self.poisoned.push(HashSet::new());
+        self.pending_tasks.push(HashSet::new());
     }
     fn pop_scope(&mut self) {
         self.scopes.pop();
@@ -371,6 +394,7 @@ impl Checker {
         // loop bodies already poison precisely. Shadow-locals die with their
         // scope; outer same-named bindings are untouched.
         self.poisoned.pop();
+        self.pending_tasks.pop();
     }
     /// Innermost scope level declaring `name`, if any (mirrors lookup).
     fn scope_index_of(&self, name: &str) -> Option<usize> {
@@ -404,6 +428,17 @@ impl Checker {
         match ty {
             Ty::Own(inner) => (**inner).clone(),
             other => other.clone(),
+        }
+    }
+
+    /// True when any `pending_tasks` level still holds `name` un-awaited.
+    fn is_task_pending(&self, name: &str) -> bool {
+        self.pending_tasks.iter().any(|s| s.contains(name))
+    }
+    /// Mark `name` awaited at every level (single-await consume).
+    fn clear_task_pending(&mut self, name: &str) {
+        for set in self.pending_tasks.iter_mut() {
+            set.remove(name);
         }
     }
 
@@ -532,6 +567,14 @@ impl Checker {
     }
 
     fn declare_var(&mut self, name: &str, ty: Ty, span: Span) -> bool {
+        if matches!(ty, Ty::Task(_)) {
+            // Async-5: `task<T>` bindings are single-await handles. Track
+            // them so `await` consumes exactly once and scope exit can
+            // reject un-awaited (escaping) tasks.
+            if let Some(set) = self.pending_tasks.last_mut() {
+                set.insert(name.to_string());
+            }
+        }
         if let Some(scope) = self.scopes.last_mut() {
             if scope.contains_key(name) {
                 self.errors.push(SemError {
@@ -1216,7 +1259,7 @@ impl Checker {
                             self.check_param_defaults(&m.params, &param_tys);
                             let param_modes: Vec<ParamMode> = m.params.iter().map(|p| p.mode).collect();
                             let ret_ty = self.resolve_type(&m.ret_ty);
-                            methods.insert(m.name.clone(), FuncSig{ret: ret_ty, params: param_tys, param_modes, param_names: m.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: m.params.iter().map(|p| p.is_variadic).collect(), param_defaults: m.params.iter().map(|p| p.default.clone()).collect(), generic_params: m.generic_params.clone(), where_clause: m.where_clause.clone(), span: m.name_span});
+                            methods.insert(m.name.clone(), FuncSig{ret: ret_ty, params: param_tys, param_modes, param_names: m.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: m.params.iter().map(|p| p.is_variadic).collect(), param_defaults: m.params.iter().map(|p| p.default.clone()).collect(), generic_params: m.generic_params.clone(), where_clause: m.where_clause.clone(), is_async: false, span: m.name_span});
                         }
                     }
                     self.traits.insert(t.name.clone(), TraitInfo{name: t.name.clone(), methods, generic_params: t.generic_params.clone(), where_clause: t.where_clause.clone(), span: t.span});
@@ -1348,7 +1391,7 @@ impl Checker {
                             let ret_ty = self.resolve_type(&m.ret_ty);
                             let mut pseen = HashSet::new();
                             for p in &m.params { if !pseen.insert(&p.name) { self.errors.push(SemError{message: format!("duplicate param `{}`", p.name), span: p.name_span}); } }
-                            methods.insert(m.name.clone(), FuncSig{ret: ret_ty, params: param_tys, param_modes, param_names: m.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: m.params.iter().map(|p| p.is_variadic).collect(), param_defaults: m.params.iter().map(|p| p.default.clone()).collect(), generic_params: m.generic_params.clone(), where_clause: m.where_clause.clone(), span: m.name_span});
+                            methods.insert(m.name.clone(), FuncSig{ret: ret_ty, params: param_tys, param_modes, param_names: m.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: m.params.iter().map(|p| p.is_variadic).collect(), param_defaults: m.params.iter().map(|p| p.default.clone()).collect(), generic_params: m.generic_params.clone(), where_clause: m.where_clause.clone(), is_async: false, span: m.name_span});
                             method_vis.insert(m.name.clone(), m.visibility);
                         }
                     }
@@ -1398,7 +1441,7 @@ impl Checker {
                         self.check_param_defaults(&ctor.params, &param_tys);
                         let param_modes: Vec<ParamMode> = ctor.params.iter().map(|p| p.mode).collect();
                         // constructors are void return
-                        ctor_sigs.push((FuncSig{ret: Ty::Void, params: param_tys, param_modes, param_names: ctor.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: ctor.params.iter().map(|p| p.is_variadic).collect(), param_defaults: ctor.params.iter().map(|p| p.default.clone()).collect(), generic_params: Vec::new(), where_clause: None, span: ctor.name_span}, ctor.visibility));
+                        ctor_sigs.push((FuncSig{ret: Ty::Void, params: param_tys, param_modes, param_names: ctor.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: ctor.params.iter().map(|p| p.is_variadic).collect(), param_defaults: ctor.params.iter().map(|p| p.default.clone()).collect(), generic_params: Vec::new(), where_clause: None, is_async: false, span: ctor.name_span}, ctor.visibility));
                     }
                     // Validate destructors: name must match class name
                     for dtor in &c.destructors {
@@ -1526,7 +1569,7 @@ impl Checker {
                         let p_modes: Vec<ParamMode> = op.params.iter().map(|p| p.mode).collect();
                         // For MVP, assume operator returns int (or struct for + if class)
                         let ret = Ty::Int;
-                        op_map.insert(op.op.clone(), FuncSig{ret: ret.clone(), params: p_tys, param_modes: p_modes, param_names: op.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: op.params.iter().map(|p| p.is_variadic).collect(), param_defaults: op.params.iter().map(|p| p.default.clone()).collect(), generic_params: Vec::new(), where_clause: op.where_clause.clone(), span: op.span});
+                        op_map.insert(op.op.clone(), FuncSig{ret: ret.clone(), params: p_tys, param_modes: p_modes, param_names: op.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: op.params.iter().map(|p| p.is_variadic).collect(), param_defaults: op.params.iter().map(|p| p.default.clone()).collect(), generic_params: Vec::new(), where_clause: op.where_clause.clone(), is_async: false, span: op.span});
                     }
                     let mut conv_vec: Vec<(Ty, Ty, Span)> = Vec::new();
                     for conv in &c.conversions {
@@ -1670,7 +1713,7 @@ impl Checker {
                             }).collect();
                             self.check_param_defaults(&f.params, &param_tys);
                             let param_modes: Vec<ParamMode> = f.params.iter().map(|p| p.mode).collect();
-                            let sig = FuncSig{ret: ret_ty, params: param_tys, param_modes, param_names: f.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: f.params.iter().map(|p| p.is_variadic).collect(), param_defaults: f.params.iter().map(|p| p.default.clone()).collect(), generic_params: f.generic_params.clone(), where_clause: f.where_clause.clone(), span: f.name_span};
+                            let sig = FuncSig{ret: ret_ty, params: param_tys, param_modes, param_names: f.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: f.params.iter().map(|p| p.is_variadic).collect(), param_defaults: f.params.iter().map(|p| p.default.clone()).collect(), generic_params: f.generic_params.clone(), where_clause: f.where_clause.clone(), is_async: false, span: f.name_span};
                             pending_ext.push((f.name.clone(), sig, f.visibility));
                         }
                         crate::ast::ExtensionMember::Field(field) => {
@@ -1696,7 +1739,7 @@ impl Checker {
                             }
                             self.check_param_defaults(&op.params, &p_tys);
                             let ret = Ty::Int;
-                            let sig = FuncSig{ret: ret.clone(), params: p_tys, param_modes: op.params.iter().map(|p| p.mode).collect(), param_names: op.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: op.params.iter().map(|p| p.is_variadic).collect(), param_defaults: op.params.iter().map(|p| p.default.clone()).collect(), generic_params: Vec::new(), where_clause: op.where_clause.clone(), span: op.span};
+                            let sig = FuncSig{ret: ret.clone(), params: p_tys, param_modes: op.params.iter().map(|p| p.mode).collect(), param_names: op.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: op.params.iter().map(|p| p.is_variadic).collect(), param_defaults: op.params.iter().map(|p| p.default.clone()).collect(), generic_params: Vec::new(), where_clause: op.where_clause.clone(), is_async: false, span: op.span};
                             pending_ops.push((op.op.clone(), sig, op.visibility));
                         }
                         crate::ast::ExtensionMember::Property(prop) => {
@@ -1918,7 +1961,7 @@ impl Checker {
                                 pt
                             }).collect();
                             let param_modes: Vec<ParamMode> = vec![ParamMode::None; param_tys.len()];
-                            self.funcs.insert(name.clone(), FuncSig{ret, params: param_tys, param_modes, param_names: params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: params.iter().map(|p| p.is_variadic).collect(), param_defaults: params.iter().map(|_| None).collect(), generic_params: Vec::new(), where_clause: None, span: *name_span});
+                            self.funcs.insert(name.clone(), FuncSig{ret, params: param_tys, param_modes, param_names: params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: params.iter().map(|p| p.is_variadic).collect(), param_defaults: params.iter().map(|_| None).collect(), generic_params: Vec::new(), where_clause: None, is_async: false, span: *name_span});
                         }
                         crate::ast::ExternMember::Struct{name, name_span, fields, ..} => {
                             if self.structs.contains_key(name) {
@@ -2105,6 +2148,7 @@ impl Checker {
                             param_defaults: f.params.iter().map(|p| p.default.clone()).collect(),
                             generic_params: f.generic_params.clone(),
                             where_clause: f.where_clause.clone(),
+                            is_async: f.is_async,
                             span: f.name_span,
                         },
                     );
@@ -2168,6 +2212,12 @@ impl Checker {
     fn check_function(&mut self, f: &Function) {
         let ret_ty = self.resolve_type(&f.ret_ty);
         self.cur_ret = Some(ret_ty.clone());
+        // Async-1: `await`/`yield`/`scope` are only legal inside an async
+        // body. Save/restore so sibling functions don't leak the flag.
+        let saved_async = self.in_async;
+        let saved_scope = self.scope_depth;
+        self.in_async = f.is_async;
+        self.scope_depth = 0;
         self.push_scope();
         for (idx, p) in f.params.iter().enumerate() {
             let mut ty = self.resolve_type(&p.ty);
@@ -2196,6 +2246,8 @@ impl Checker {
         }
         self.pop_scope();
         self.cur_ret = None;
+        self.in_async = saved_async;
+        self.scope_depth = saved_scope;
     }
 
     fn check_method(&mut self, class_name: &str, f: &Function) {
@@ -2487,6 +2539,47 @@ impl Checker {
                 false
             }
             Stmt::Block(b) => self.check_block(b, ret_ty),
+            // `scope do ... end` (Async-1/Async-5): structured join point.
+            // Only legal directly inside an async body (nesting allowed);
+            // the scope exits only after every task declared inside it has
+            // been awaited (implicit join below), so tasks cannot escape.
+            Stmt::Scope(b) => {
+                if !self.in_async {
+                    self.errors.push(SemError {
+                        message: "`scope` requires an `async` function body".into(),
+                        span: b.span,
+                    });
+                }
+                self.scope_depth += 1;
+                let r = self.check_block(b, ret_ty);
+                self.scope_depth -= 1;
+                // Implicit join: every `task<T>` declared directly in this
+                // scope body must be awaited before `end`. Un-awaited tasks
+                // are errors (they would otherwise run past the scope exit).
+                // (`check_block` pushed/popped its own level; pending marks
+                // live on the outer levels, so drain by name here.)
+                let mut declared: Vec<String> = Vec::new();
+                collect_scope_task_decls(b, &mut declared);
+                for name in declared {
+                    if self.is_task_pending(&name) {
+                        self.errors.push(SemError {
+                            message: format!("task `{name}` escapes its `scope`: `await` it before `end`"),
+                            span: b.span,
+                        });
+                    }
+                }
+                r
+            }
+            // `yield` (Async-1): parks the current task. Only inside async.
+            Stmt::Yield(span) => {
+                if !self.in_async {
+                    self.errors.push(SemError {
+                        message: "`yield` requires an `async` function body".into(),
+                        span: *span,
+                    });
+                }
+                false
+            }
             Stmt::Return(r) => {
                 let cur = self.cur_ret.clone().unwrap();
                 match (&r.value, &cur) {
@@ -3031,6 +3124,7 @@ impl Checker {
                                 param_defaults: func.param_defaults.clone(),
                                 generic_params: vec![],
                                 where_clause: None,
+                                is_async: func.is_async,
                                 span: func.span,
                             };
                             self.check_call_with_sig(args, &substituted_sig, *callee_span, callee);
@@ -3088,6 +3182,7 @@ impl Checker {
                                         param_defaults: func.param_defaults.clone(),
                                         generic_params: vec![],
                                         where_clause: None,
+                                        is_async: func.is_async,
                                         span: func.span,
                                     };
                                     // Re-validate args against substituted sig (avoid double errors: we already checked args for inference, but need precise diagnostics)
@@ -3256,7 +3351,15 @@ impl Checker {
                             }
                         }
                     }
-                    sig.ret
+                    // Async-1: calling an `async` function does NOT run it
+                    // inline — it spawns the body and yields `task<Ret>`.
+                    // The caller must `await` the handle (inside a `scope`)
+                    // to get the `Ret` value.
+                    if sig.is_async {
+                        Ty::Task(Box::new(sig.ret))
+                    } else {
+                        sig.ret
+                    }
                 } else if let Some(var_ty) = self.lookup_var(callee) {
                     // variable call (closure / function pointer)
                     if let Ty::Function(ret, params) = var_ty {
@@ -4089,6 +4192,75 @@ impl Checker {
                     for a in args { let _ = self.check_call_arg(a); }
                 }
                 Ty::Own(Box::new(inner))
+            }
+            // `await task_expr` (Async-1/Async-5): consumes a `task<T>`
+            // exactly once and yields `T`. Requires an async body; the
+            // scope-exit join guarantees the task completed in a sibling
+            // scope, so codegen can block-join here.
+            ExprKind::Await { task, span } => {
+                if !self.in_async {
+                    self.errors.push(SemError {
+                        message: "`await` requires an `async` function body".into(),
+                        span: *span,
+                    });
+                }
+                let tty = self.check_expr(task);
+                match tty {
+                    Ty::Task(inner) => {
+                        // Single-await: consuming the same handle twice is an
+                        // error. Only `Ident` handles are tracked (complex
+                        // expressions return fresh temporaries each time).
+                        if let ExprKind::Ident(name) = &task.kind {
+                            let lookup = name.rsplit("::").next().unwrap_or(name);
+                            if self.is_task_pending(name) || self.is_task_pending(lookup) {
+                                self.clear_task_pending(name);
+                                self.clear_task_pending(lookup);
+                            } else {
+                                self.errors.push(SemError {
+                                    message: format!("task `{name}` was already awaited (tasks are single-await)"),
+                                    span: *span,
+                                });
+                            }
+                        }
+                        *inner
+                    }
+                    Ty::Any => Ty::Any,
+                    other => {
+                        self.errors.push(SemError {
+                            message: format!("`await` requires a `task<T>` handle, found `{other}`"),
+                            span: *span,
+                        });
+                        Ty::Any
+                    }
+                }
+            }
+            // `spawn f(args)` (Async-1/Async-4): runs an async callee
+            // concurrently, yields `task<Ret>` immediately. Requires an
+            // enclosing `scope` (structured: the scope joins it).
+            ExprKind::Spawn { task, span } => {
+                if !self.in_async {
+                    self.errors.push(SemError {
+                        message: "`spawn` requires an `async` function body".into(),
+                        span: *span,
+                    });
+                } else if self.scope_depth == 0 {
+                    self.errors.push(SemError {
+                        message: "`spawn` requires an enclosing `scope do ... end` (tasks cannot escape)".into(),
+                        span: *span,
+                    });
+                }
+                let tty = self.check_expr(task);
+                match tty {
+                    Ty::Task(inner) => Ty::Task(inner),
+                    Ty::Any => Ty::Task(Box::new(Ty::Any)),
+                    other => {
+                        self.errors.push(SemError {
+                            message: format!("`spawn` requires an `async` call, found `{other}` (only `async` functions can be spawned)"),
+                            span: *span,
+                        });
+                        Ty::Task(Box::new(Ty::Any))
+                    }
+                }
             }
             ExprKind::Tuple(exprs) => {
                 let tys: Vec<Ty> = exprs.iter().map(|e| self.check_expr(e)).collect();
@@ -5016,6 +5188,19 @@ pub struct CheckOptions {
     /// Emit `missing `main` function` when no `main` is declared.
     /// `true` for CLI builds; the LSP sets it only for `main.hll`.
     pub require_main: bool,
+}
+
+/// Names bound to `task<...>` by direct `VarDecl`s in a `scope` body
+/// (Async-1/Async-5 escape check). Only top-level statements of the scope
+/// block count — nested blocks/scopes manage their own join levels.
+fn collect_scope_task_decls(b: &Block, out: &mut Vec<String>) {
+    for stmt in &b.stmts {
+        if let Stmt::VarDecl(d) = stmt {
+            if matches!(d.ty, Type::Task(_)) {
+                out.push(d.name.clone());
+            }
+        }
+    }
 }
 impl Default for CheckOptions {
     fn default() -> Self {
