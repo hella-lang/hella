@@ -53,6 +53,8 @@ static void hella_cond_signal(hella_cond_t *c) { WakeConditionVariable(c); }
 #else
 #include <pthread.h>
 #include <sched.h>
+#include <time.h>
+#include <errno.h>
 typedef pthread_t hella_thread_t;
 typedef pthread_mutex_t hella_mutex_t;
 typedef pthread_cond_t hella_cond_t;
@@ -64,6 +66,12 @@ static void hella_mutex_unlock(hella_mutex_t *m) { pthread_mutex_unlock(m); }
 static void hella_cond_init(hella_cond_t *c) { pthread_cond_init(c, NULL); }
 static void hella_cond_wait(hella_cond_t *c, hella_mutex_t *m) { pthread_cond_wait(c, m); }
 static void hella_cond_signal(hella_cond_t *c) { pthread_cond_signal(c); }
+#endif
+
+#ifdef _WIN32
+#define HELLA_TLS __declspec(thread)
+#else
+#define HELLA_TLS _Thread_local
 #endif
 
 #define HELLA_TASK_INLINE 16
@@ -83,9 +91,15 @@ typedef struct hella_task {
     void *arg;
 } hella_task_t;
 
+/* Task running on THIS thread (TLS), or NULL outside a task. Backs
+ * `hella_task_self()` so a task body can poll its own cancellation. */
+static HELLA_TLS hella_task_t *hella_current_task = NULL;
+
 static void *hella_task_trampoline(void *p) {
     hella_task_t *t = (hella_task_t *)p;
+    hella_current_task = t;
     t->entry((void *)t, t->arg);
+    hella_current_task = NULL;
     hella_mutex_lock(&t->mu);
     t->state = 1;
     hella_cond_signal(&t->done_cv);
@@ -145,6 +159,12 @@ void hella_task_store_spill(void *handle, const void *src, size_t n) {
     memcpy(t->result_ptr, src, n);
 }
 
+/* The task running on this thread (NULL in the main thread / outside a
+ * task). Pair with `hella_task_cancelled` for cooperative cancellation. */
+void *hella_task_self(void) {
+    return (void *)hella_current_task;
+}
+
 void hella_task_cancel(void *handle) {
     hella_task_t *t = (hella_task_t *)handle;
     if (!t) return;
@@ -161,6 +181,26 @@ int hella_task_cancelled(void *handle) {
     c = t->cancelled;
     hella_mutex_unlock(&t->mu);
     return c;
+}
+
+/* Wall-clock sleep, used by `std::async::sleepMs`. Windows has no
+ * POSIX `nanosleep`, so this is the portable entry point; POSIX builds
+ * forward to `nanosleep` and retry on EINTR so the requested delay is
+ * honoured rather than truncated by a signal. */
+void hella_sleep_ms(int ms) {
+    if (ms <= 0) return;
+#ifdef _WIN32
+    Sleep((DWORD)ms);
+#else
+    {
+        struct timespec ts;
+        ts.tv_sec = ms / 1000;
+        ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+        while (nanosleep(&ts, &ts) == -1) {
+            /* EINTR: `ts` holds the remaining time; loop to finish it. */
+        }
+    }
+#endif
 }
 
 void hella_task_yield(void) {

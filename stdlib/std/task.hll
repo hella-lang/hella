@@ -1,0 +1,50 @@
+// std::task — cooperative concurrency helpers for Hella (Async-10).
+// Import via: import std::task
+//
+// Named `task` (not `async`) because `async` is a compiler keyword and
+// cannot appear as an import segment — same reason `std::vector` is not
+// `std::vec` (see stdlib/README.md).
+//
+// These are ordinary Hella/`extern` declarations over the async runtime
+// that the compiler links only when a program actually reaches async code
+// (Async-8). They make the checkpoints and timers that `yield` and task
+// bodies rely on reachable from Hella source.
+//
+// Honest scope: this module gives *cooperative* primitives. `sleepMs`
+// parks the calling task for a wall-clock duration and `yieldNow` hands
+// the OS scheduler a chance to run other tasks. Neither turns a blocking
+// libc call into a non-blocking one, and there is no async I/O backend
+// yet — a synchronous `read`/`write` inside an `async` body still blocks
+// that task's thread to completion.
+
+extern "c" from "hella_async" do
+    void hella_sleep_ms(int ms)
+    void sched_yield()
+    any hella_task_self()
+    int hella_task_cancelled(any handle)
+end
+
+/// Cooperative checkpoint: offers the OS scheduler a chance to run other
+/// ready tasks. Cheap; safe to call in loops that would otherwise hog a
+/// task's thread. Synchronous programs never reference it.
+void yieldNow() do
+    sched_yield()
+end
+
+/// Parks the calling task for `ms` milliseconds (clamped at 0). On POSIX
+/// this is `nanosleep` retried across `EINTR`; on Windows it is `Sleep`.
+void sleepMs(int ms) do
+    hella_sleep_ms(ms)
+end
+
+/// True when the running task has been asked to stop (Async-7
+/// cooperative cancellation). A task body should poll this at natural
+/// checkpoints and return early; nothing preempts it. Outside a task
+/// (e.g. on the main thread) this is always false.
+bool cancelled() do
+    any self = hella_task_self()
+    if self is null do
+        return false
+    end
+    return hella_task_cancelled(self) is not 0
+end
