@@ -1,5 +1,11 @@
 //! Phase 2 codegen — LLVM via `inkwell` 0.10 (llvm21-1).
 //! All locals/params are `alloca` in entry block; structs lowered to llvm.struct with GEP.
+//!
+//! Async (Async-6/Async-7): `async` functions run on worker threads through
+//! the `hella_async` runtime (compiled from `runtime/hella_async.c` only
+//! when the program uses async — see Async-8 in the CLI). A `task<T>` value
+//! is an opaque `hella_task_t*` handle: `spawn`/async-call allocates it,
+//! `await` block-joins it and loads the inline result payload.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
