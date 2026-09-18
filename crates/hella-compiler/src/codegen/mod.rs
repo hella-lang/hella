@@ -86,6 +86,10 @@ pub struct Codegen<'ctx> {
     /// Variables holding maps (`K:V` or `any m = has ... end`). LLVM type is
     /// the map struct `{ [16 x K], [16 x V], i64 len }`.
     map_vars: HashSet<String>,
+    /// Variables holding `task<T>` handles (Async-6). LLVM type is an
+    /// opaque ptr; this map carries the sema `task<T>` for `await` result
+    /// typing.
+    task_vars: HashMap<String, crate::sema::Ty>,
     /// Variables holding strings (`string s = ...`). LLVM type is `ptr`;
     /// tracked so `len()`/`is_empty()` lower instead of falling through to
     /// class-method resolution.
@@ -201,6 +205,7 @@ impl<'ctx> Codegen<'ctx> {
             vec_vars: HashSet::new(),
             map_vars: HashSet::new(),
             string_vars: HashSet::new(),
+            task_vars: HashMap::new(),
             extern_int32_rets: HashSet::new(),
             trait_names: HashSet::new(),
             pair_types: HashMap::new(),
@@ -3695,6 +3700,49 @@ impl<'ctx> Codegen<'ctx> {
         let fn_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), self.context.i64_type().into()], false);
         self.module.add_function("memcpy", fn_ty, None)
     }
+    /// `hella_task_spawn(entry, arg, result_size)` (Async-7): allocate and
+    /// launch a task. `entry` is `void*(task_handle, arg)`. Declared lazily
+    /// so sync programs never reference the runtime (Async-8).
+    fn get_or_declare_task_spawn(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("hella_task_spawn") { return f; }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let entry_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let fn_ty = ptr_ty.fn_type(&[entry_ty.ptr_type(inkwell::AddressSpace::default()).into(), ptr_ty.into(), i64_ty.into()], false);
+        self.module.add_function("hella_task_spawn", fn_ty, None)
+    }
+    /// `hella_task_join(handle)` (Async-7): block until completion, consume
+    /// exactly once. Lazy for the same reason.
+    fn get_or_declare_task_join(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("hella_task_join") { return f; }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = self.context.i32_type().fn_type(&[ptr_ty.into()], false);
+        self.module.add_function("hella_task_join", fn_ty, None)
+    }
+    /// `hella_task_result(handle, dst, n)` (Async-7): copy out the result
+    /// and free the task. Lazy for the same reason.
+    fn get_or_declare_task_result(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("hella_task_result") { return f; }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = self.context.void_type().fn_type(&[ptr_ty.into(), ptr_ty.into(), self.context.i64_type().into()], false);
+        self.module.add_function("hella_task_result", fn_ty, None)
+    }
+    /// `hella_task_store_inline(handle, src, n)` (Async-7): worker-side
+    /// store of a small (<=16B) result into the task. Lazy as above.
+    fn get_or_declare_task_store_inline(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("hella_task_store_inline") { return f; }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = self.context.void_type().fn_type(&[ptr_ty.into(), ptr_ty.into(), self.context.i64_type().into()], false);
+        self.module.add_function("hella_task_store_inline", fn_ty, None)
+    }
+    /// `hella_task_store_spill(handle, src, n)` (Async-7): worker-side
+    /// store of a large result into the task's heap buffer. Lazy as above.
+    fn get_or_declare_task_store_spill(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("hella_task_store_spill") { return f; }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = self.context.void_type().fn_type(&[ptr_ty.into(), ptr_ty.into(), self.context.i64_type().into()], false);
+        self.module.add_function("hella_task_store_spill", fn_ty, None)
+    }
     /// `sched_yield()` (Async-6/Async-7): cooperative checkpoint backing
     /// `yield`. Declared lazily — only async programs reference it, so sync
     /// binaries never gain the dependency (Async-8). POSIX provides it in
@@ -3703,6 +3751,151 @@ impl<'ctx> Codegen<'ctx> {
         if let Some(f) = self.module.get_function("sched_yield") { return f; }
         let fn_ty = self.context.i32_type().fn_type(&[], false);
         self.module.add_function("sched_yield", fn_ty, None)
+    }
+
+    // -- Async lowering (Async-6/Async-7) -----------------------------------
+
+    /// Byte size of an LLVM type for the task result transport. Exact for
+    /// the scalar/struct shapes async functions return (raw-byte copy).
+    fn llvm_byte_size(&self, ty: BasicTypeEnum<'ctx>) -> u64 {
+        match ty {
+            BasicTypeEnum::IntType(it) => ((it.get_bit_width() as u64 + 7) / 8).max(1),
+            BasicTypeEnum::FloatType(ft) => if ft == self.context.f32_type() { 4 } else { 8 },
+            BasicTypeEnum::PointerType(_) => 8,
+            BasicTypeEnum::StructType(st) => {
+                let mut total = 0u64;
+                for i in 0..st.count_fields() {
+                    let fs = self.llvm_byte_size(st.get_field_type_at_index(i).unwrap());
+                    total += fs.max(8);
+                }
+                total
+            }
+            BasicTypeEnum::ArrayType(at) =>
+                at.len() as u64 * self.llvm_byte_size(at.get_element_type().into()),
+            BasicTypeEnum::VectorType(vt) =>
+                vt.get_size() as u64 * self.llvm_byte_size(vt.get_element_type().into()),
+            BasicTypeEnum::ScalableVectorType(vt) =>
+                vt.get_size() as u64 * self.llvm_byte_size(vt.get_element_type().into()),
+        }
+    }
+
+    /// Spawn `func(args)` as a task (Async-6). The async callee keeps its
+    /// SYNC LLVM signature (`params -> Ret`); we box the packed args into a
+    /// per-call heap ctx, generate a static trampoline
+    /// `__async_entry_<callee>` that unpacks, calls the body, stores the
+    /// result into the task (inline <=16B, spill otherwise), frees the ctx,
+    /// and returns null. Then `hella_task_spawn(entry, ctx, ret_size)`
+    /// yields the `task<Ret>` handle.
+    fn codegen_async_spawn_call(
+        &mut self,
+        func: FunctionValue<'ctx>,
+        info: &TyInfo,
+        arg_vals: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>>,
+        span: Span,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        use inkwell::values::BasicMetadataValueEnum as M;
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let callee = func.get_name().to_str().unwrap_or("<async>").to_string();
+
+        // Result transport size (0 for void).
+        let ret_llvm: Option<BasicTypeEnum<'ctx>> = match &info.ret {
+            crate::sema::Ty::Void => None,
+            t => Some(self.llvm_ty_for_sema(t).ok_or(CodegenError {
+                message: format!("async function `{callee}` returns a type with no lowering: {t}"),
+                span,
+            })?),
+        };
+        let ret_size: u64 = ret_llvm.map(|t| self.llvm_byte_size(t)).unwrap_or(0);
+
+        // Context struct: one field per packed arg.
+        let ctx_fields: Vec<BasicTypeEnum<'ctx>> = arg_vals.iter().map(|a| match a {
+            M::IntValue(v) => v.get_type().into(),
+            M::FloatValue(v) => v.get_type().into(),
+            M::PointerValue(v) => v.get_type().into(),
+            M::ArrayValue(v) => v.get_type().into(),
+            M::StructValue(v) => v.get_type().into(),
+            M::VectorValue(v) => v.get_type().into(),
+            M::ScalableVectorValue(v) => v.get_type().into(),
+            M::MetadataValue(_) => i64_ty.into(),
+        }).collect();
+        let ctx_ty = self.context.struct_type(&ctx_fields, false);
+
+        // Heap-allocate + fill the ctx (freed by the trampoline).
+        let malloc = self.get_or_declare_malloc();
+        let ctx_size = self.llvm_byte_size(ctx_ty.into()).max(1);
+        let ctx_ptr = self.builder
+            .build_call(malloc, &[i64_ty.const_int(ctx_size, false).into()], "async.ctx.malloc")
+            .unwrap().try_as_basic_value().basic().unwrap().into_pointer_value();
+        for (i, a) in arg_vals.iter().enumerate() {
+            let val: BasicValueEnum = match a {
+                M::IntValue(v) => (*v).into(),
+                M::FloatValue(v) => (*v).into(),
+                M::PointerValue(v) => (*v).into(),
+                M::ArrayValue(v) => (*v).into(),
+                M::StructValue(v) => (*v).into(),
+                M::VectorValue(v) => (*v).into(),
+                M::ScalableVectorValue(v) => (*v).into(),
+                M::MetadataValue(_) => continue,
+            };
+            let gep = self.builder.build_struct_gep(ctx_ty, ctx_ptr, i as u32, "async.ctx.field").unwrap();
+            self.builder.build_store(gep, val).unwrap();
+        }
+
+        // Generate (or reuse) the static trampoline.
+        let entry_name = format!("__async_entry_{callee}");
+        let entry_fn = if let Some(f) = self.module.get_function(&entry_name) {
+            f
+        } else {
+            let entry_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+            let ef = self.module.add_function(&entry_name, entry_ty, None);
+            let entry_bb = self.context.append_basic_block(ef, "entry");
+            let saved_pos = self.builder.get_insert_block();
+            self.builder.position_at_end(entry_bb);
+            let task_h = ef.get_nth_param(0).unwrap().into_pointer_value();
+            let ctx_in = ef.get_nth_param(1).unwrap().into_pointer_value();
+            let mut call_args: Vec<M> = Vec::with_capacity(ctx_fields.len());
+            for (i, ft) in ctx_fields.iter().enumerate() {
+                let gep = self.builder.build_struct_gep(ctx_ty, ctx_in, i as u32, "async.arg").unwrap();
+                let lv = self.builder.build_load(*ft, gep, "async.arg.load").unwrap();
+                call_args.push(lv.into());
+            }
+            let call = self.builder.build_call(func, &call_args, "async.body").unwrap();
+            if let Some(rt) = ret_llvm {
+                let val = call.try_as_basic_value().basic().ok_or(CodegenError {
+                    message: format!("async body of `{callee}` returned void unexpectedly"),
+                    span,
+                })?;
+                let slot = self.builder.build_alloca(rt, "async.ret.slot").unwrap();
+                self.builder.build_store(slot, val).unwrap();
+                let n = i64_ty.const_int(ret_size, false);
+                let store_fn = if ret_size <= 16 {
+                    self.get_or_declare_task_store_inline()
+                } else {
+                    self.get_or_declare_task_store_spill()
+                };
+                self.builder.build_call(store_fn, &[task_h.into(), slot.into(), n.into()], "async.store").unwrap();
+            }
+            let free = self.get_or_declare_free();
+            self.builder.build_call(free, &[ctx_in.into()], "async.ctx.free").unwrap();
+            self.builder.build_return(Some(&ptr_ty.const_null())).unwrap();
+            if let Some(bb) = saved_pos { self.builder.position_at_end(bb); }
+            if !ef.verify(true) {
+                return Err(CodegenError {
+                    message: format!("async trampoline for `{callee}` failed verification"),
+                    span,
+                });
+            }
+            ef
+        };
+
+        let spawn = self.get_or_declare_task_spawn();
+        let handle = self.builder.build_call(spawn, &[
+            entry_fn.as_global_value().as_pointer_value().into(),
+            ctx_ptr.into(),
+            i64_ty.const_int(ret_size, false).into(),
+        ], "async.spawn").unwrap().try_as_basic_value().basic().unwrap();
+        Ok(handle)
     }
 
     // NOTE (real stdlib): no `is_stdlib_io_intrinsic` /
@@ -5995,6 +6188,10 @@ impl<'ctx> Codegen<'ctx> {
                 if matches!(&d.ty, Type::String(_)) {
                     self.string_vars.insert(d.name.clone());
                 }
+                // Track `task<T>` handles for `await` result typing (Async-6).
+                if let Type::Task(el, _) = &d.ty {
+                    self.task_vars.insert(d.name.clone(), crate::sema::Ty::Task(Box::new((el.as_ref()).into())));
+                }
                 // Track class locals with destructors for RAII scope-exit calls.
                 // `this` is the borrowed receiver, never owned: skip it so a
                 // method/dtor body never destroys its own receiver.
@@ -7912,6 +8109,12 @@ impl<'ctx> Codegen<'ctx> {
                         // Positional prefix, named reorder, default fill.
                         arg_vals.extend(self.pack_call_args(args, &info, 0)?);
                     }
+                    // Async-6: an `async` callee is never invoked inline.
+                    // Spawn its body on a worker thread and return the
+                    // `task<Ret>` handle immediately; `await` joins it.
+                    if info.is_async {
+                        return self.codegen_async_spawn_call(func, &info, arg_vals, expr.span);
+                    }
                     let call = self.builder.build_call(func, &arg_vals, "call").unwrap();
                     let vk = call.try_as_basic_value();
                     if vk.is_basic() { return Ok(vk.basic().unwrap()); } else { return Ok(self.context.i64_type().const_int(0,false).into()); }
@@ -8609,6 +8812,50 @@ impl<'ctx> Codegen<'ctx> {
                 } else { Err(CodegenError{message: "`super` outside class".into(), span: expr.span}) }
             }
             ExprKind::Paren(inner) => self.codegen_expr(inner),
+            // `await t` (Async-6): block-join the task, then copy out the
+            // inline result. `task<T>` values are opaque ptr handles; the
+            // result type comes from `task_vars` (decl-site tracking) or
+            // infer_expr_ty.
+            ExprKind::Await { task, span } => {
+                let handle = self.codegen_expr(task)?;
+                let handle_ptr = handle.into_pointer_value();
+                // join
+                let join = self.get_or_declare_task_join();
+                self.builder.build_call(join, &[handle_ptr.into()], "async.join").unwrap();
+                // result typing
+                let t_ty = self.infer_expr_ty(task).unwrap_or(crate::sema::Ty::Any);
+                match t_ty {
+                    crate::sema::Ty::Task(inner) => match inner.as_ref() {
+                        crate::sema::Ty::Void => {
+                            // task<void>: join, free, yield no value (i64 0
+                            // filler; callers treat `await` as an expr stmt).
+                            let res_fn = self.get_or_declare_task_result();
+                            let scratch = self.builder.build_alloca(self.context.i64_type(), "async.void.scratch").unwrap();
+                            self.builder.build_call(res_fn, &[handle_ptr.into(), scratch.into(), self.context.i64_type().const_int(0, false).into()], "async.result").unwrap();
+                            Ok(self.context.i64_type().const_int(0, false).into())
+                        }
+                        inner_t => {
+                            let rt = self.llvm_ty_for_sema(inner_t).ok_or(CodegenError {
+                                message: format!("`await` result type has no lowering: {inner_t}"),
+                                span: *span,
+                            })?;
+                            let n = self.llvm_byte_size(rt);
+                            let slot = self.builder.build_alloca(rt, "async.ret").unwrap();
+                            let res_fn = self.get_or_declare_task_result();
+                            self.builder.build_call(res_fn, &[handle_ptr.into(), slot.into(), self.context.i64_type().const_int(n, false).into()], "async.result").unwrap();
+                            Ok(self.builder.build_load(rt, slot, "async.result.load").unwrap())
+                        }
+                    },
+                    _ => Err(CodegenError {
+                        message: "`await` requires a `task<T>` handle".into(),
+                        span: *span,
+                    }),
+                }
+            }
+            // `spawn f(args)` (Async-6): identical to an async call — the
+            // Call arm already spawns async callees; `spawn` is the explicit
+            // form for readability inside `scope`.
+            ExprKind::Spawn { task, .. } => self.codegen_expr(task),
             ExprKind::New { ty, args, .. } => {
                 // Heap construction: `new Type(args)` -> `own Type` pair.
                 let inner_name = match ty {
@@ -9492,6 +9739,11 @@ impl<'ctx> Codegen<'ctx> {
                     let key = if self.enum_types.contains_key(name) { name } else { lookup };
                     return Ok(crate::sema::Ty::Enum(key.to_string()));
                 }
+                // `task<T>` (Async-6): handle ptr carrying a typed handle
+                // registered at the `task<T> name = spawn ...` decl site.
+                if let Some(t) = self.task_vars.get(name).or_else(|| self.task_vars.get(lookup)) {
+                    return Ok(t.clone());
+                }
                 if self.struct_types.contains_key(name) || self.struct_types.contains_key(lookup) {
                     let key = if self.struct_types.contains_key(name) { name } else { lookup };
                     return Ok(crate::sema::Ty::Struct(key.to_string()));
@@ -9573,6 +9825,29 @@ impl<'ctx> Codegen<'ctx> {
                 Ok(crate::sema::Ty::Map { key: Box::new(k), value: Box::new(v) })
             }
             ExprKind::Paren(inner) => self.infer_expr_ty(inner),
+            ExprKind::Call { callee, .. } => {
+                // Async-6: calls to known functions return the declared
+                // type (async callees yield `task<Ret>`).
+                if let Some((_, info)) = self.funcs.get(callee.as_str()) {
+                    if info.is_async {
+                        return Ok(crate::sema::Ty::Task(Box::new(info.ret.clone())));
+                    }
+                    return Ok(info.ret.clone());
+                }
+                Err(CodegenError{message: format!("cannot infer type of call `{callee}`"), span: expr.span})
+            }
+            ExprKind::Await { task, .. } => {
+                match self.infer_expr_ty(task)? {
+                    crate::sema::Ty::Task(inner) => Ok(*inner),
+                    _ => Err(CodegenError{message: "`await` on non-task".into(), span: expr.span}),
+                }
+            }
+            ExprKind::Spawn { task, .. } => {
+                match self.infer_expr_ty(task)? {
+                    t @ crate::sema::Ty::Task(_) => Ok(t),
+                    _ => Err(CodegenError{message: "`spawn` on non-async call".into(), span: expr.span}),
+                }
+            }
             _ => Err(CodegenError{message: "cannot infer type of this expr for struct GEP".into(), span: expr.span}),
         }
     }
