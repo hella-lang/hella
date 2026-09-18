@@ -6,6 +6,17 @@ pub(super) fn program(p: &Program, visit: &mut impl FnMut(&Expr)) {
         item(i, visit);
     }
 }
+
+/// Crate-visible: visit every expression in a single function body (used by
+/// the async reachability analysis, Async-8).
+pub(crate) fn function_exprs(f: &Function, v: &mut impl FnMut(&Expr)) {
+    function(f, v);
+}
+
+/// Crate-visible: visit every expression in a block (Async-8 roots).
+pub(crate) fn block_exprs(b: &Block, v: &mut impl FnMut(&Expr)) {
+    block(b, v);
+}
 fn params(ps: &[Param], v: &mut impl FnMut(&Expr)) {
     for p in ps {
         if let Some(e) = &p.default {

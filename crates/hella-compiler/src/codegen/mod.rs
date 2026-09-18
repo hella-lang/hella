@@ -262,6 +262,14 @@ impl<'ctx> Codegen<'ctx> {
         &mut self,
         prog: &Program,
     ) -> Result<(), CodegenError> {
+        // Async-8: compute which declarations the C runtime can actually
+        // reach. Async functions outside that set are never emitted, so a
+        // program that merely *declares* (or imports) async code does not
+        // reference the async runtime and must not link it.
+        let reach = crate::async_req::analyze(prog);
+        let skip_fn = |f: &Function| -> bool {
+            f.is_async && f.name != "main" && !reach.reachable.contains(&f.name)
+        };
         for item in &prog.items {
             let it: &Item = match item {
                 Item::Attributed{attrs: _, item} => item.as_ref(),
@@ -286,7 +294,10 @@ impl<'ctx> Codegen<'ctx> {
                 Item::Attributed{attrs: _, item} => item.as_ref(),
                 other => other,
             };
-            if let Item::Function(f) = it { self.declare_function(f)?; }
+            if let Item::Function(f) = it {
+                if skip_fn(f) { continue; }
+                self.declare_function(f)?;
+            }
         }
         // Dynamic-type tags for trait objects (needs all classes declared).
         self.assign_class_tags();
@@ -296,7 +307,10 @@ impl<'ctx> Codegen<'ctx> {
                 other => other,
             };
             match it {
-                Item::Function(f) => self.codegen_function(f)?,
+                Item::Function(f) => {
+                    if skip_fn(f) { continue; }
+                    self.codegen_function(f)?
+                }
                 Item::Class(c) => {
                     for m in &c.methods { self.codegen_class_method(c, m)?; }
                     for (idx, ctor) in c.constructors.iter().enumerate() { self.codegen_constructor(c, ctor, idx)?; }
