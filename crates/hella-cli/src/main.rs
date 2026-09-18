@@ -23,6 +23,11 @@ mod pkg;
 // under `_WIN32`. Compiled and linked on Windows; nothing to do elsewhere.
 #[cfg(windows)]
 const HELLA_RT_C: &str = include_str!("../../../runtime/hella_rt.c");
+// Structured-concurrency runtime (`runtime/hella_async.c`, Async-7).
+// Compiled and linked ONLY when the program actually reaches async code
+// (Async-8/Async-9): a synchronous program must not gain scheduler
+// symbols or async runtime dependencies.
+const HELLA_ASYNC_C: &str = include_str!("../../../runtime/hella_async.c");
 
 /// Hella brand green #00A693 as an ANSI truecolor style.
 fn brand_style() -> Style {
@@ -1439,12 +1444,18 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         }
     }
 
+    // ── Async runtime requirement (Async-8/Async-9) ──────────────────
+    // Reachability-based: importing/declaring unused async code does not
+    // pull the runtime in. Decided before the freshness check because the
+    // runtime set is part of what identifies the binary.
+    let needs_async = hella_compiler::async_req::uses_async_runtime(&program);
+
     // ── Freshness ────────────────────────────────────────────────────
     // Skip codegen+link when the binary is newer than every source file
     // (entry + resolved imports) and the build stamp still matches this
     // profile and toolchain version. `run` relies on this: its binary
     // persists between invocations and only rebuilds on change.
-    if !opts.force && is_fresh(&exe_path, &source_files, opts.release) {
+    if !opts.force && is_fresh(&exe_path, &source_files, opts.release, needs_async) {
         pb.finish_with_message("Finished");
         status(
             &pb,
@@ -1527,6 +1538,39 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         }
         link.arg(&rt_obj);
     }
+    // Async-9: compile + link the structured-concurrency runtime only when
+    // the program reaches async code. `-pthread` is required on Linux (and
+    // harmless on macOS, where pthread lives in libc); Windows needs no
+    // extra library (Win32 threads come from kernel32).
+    if needs_async {
+        let a_src = obj_path.with_file_name("hella_async_gen.c");
+        let a_obj = obj_path.with_file_name("hella_async_gen.o");
+        if let Err(e) = fs::write(&a_src, HELLA_ASYNC_C) {
+            pb.abandon();
+            return Err(miette::miette!("failed to write {}: {e}", a_src.display()));
+        }
+        extra_paths.push(a_src.clone());
+        extra_paths.push(a_obj.clone());
+        let mut cc = Command::new(&linker);
+        cc.arg("-c").arg(&a_src).arg("-o").arg(&a_obj);
+        if !cfg!(windows) {
+            cc.arg("-pthread");
+        }
+        let cc_status = cc.status().map_err(|e| {
+            pb.abandon();
+            miette::miette!("failed to invoke {linker} for the async runtime: {e}")
+        })?;
+        if !cc_status.success() {
+            pb.abandon();
+            return Err(miette::miette!(
+                "compiling the async runtime failed with {linker}"
+            ));
+        }
+        link.arg(&a_obj);
+        if !cfg!(windows) {
+            link.arg("-pthread");
+        }
+    }
     link.arg(&obj_path).arg("-o").arg(&exe_path);
     // Linux does not fold libm into libc: `-lm` is required wherever
     // `std::math` (or any `from "libm"` extern) may appear. The system
@@ -1569,7 +1613,7 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // Record what produced this binary so a later invocation can prove
     // freshness without recompiling (profile + toolchain version; sources
     // are compared by mtime against the binary itself).
-    write_build_stamp(&exe_path, opts.release);
+    write_build_stamp(&exe_path, opts.release, needs_async);
 
     pb.finish_with_message("Finished");
     status(
@@ -1627,28 +1671,32 @@ fn stamp_path(exe: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
-fn stamp_contents(release: bool) -> String {
+fn stamp_contents(release: bool, needs_async: bool) -> String {
     format!(
-        "profile={}\ntoolchain=hella {}\n",
+        "profile={}\ntoolchain=hella {}\nasync={}\n",
         if release { "release" } else { "debug" },
         env!("CARGO_PKG_VERSION"),
+        // Async-9: the linked runtime set is part of what produced the
+        // binary, so a sync<->async transition must rebuild even when no
+        // source mtime changed.
+        if needs_async { "runtime" } else { "none" },
     )
 }
 
-fn write_build_stamp(exe: &Path, release: bool) {
-    let _ = fs::write(stamp_path(exe), stamp_contents(release));
+fn write_build_stamp(exe: &Path, release: bool, needs_async: bool) {
+    let _ = fs::write(stamp_path(exe), stamp_contents(release, needs_async));
 }
 
 /// True when `exe` exists, is newer than every source file, and its stamp
 /// matches this profile + toolchain version. Anything else (missing binary
 /// or stamp, profile/version switch, touched source) means rebuild.
-fn is_fresh(exe: &Path, sources: &[PathBuf], release: bool) -> bool {
+fn is_fresh(exe: &Path, sources: &[PathBuf], release: bool, needs_async: bool) -> bool {
     let exe_mtime = match fs::metadata(exe).and_then(|m| m.modified()) {
         Ok(t) => t,
         Err(_) => return false,
     };
     match fs::read_to_string(stamp_path(exe)) {
-        Ok(contents) if contents == stamp_contents(release) => {}
+        Ok(contents) if contents == stamp_contents(release, needs_async) => {}
         _ => return false,
     }
     sources.iter().all(|s| {

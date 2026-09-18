@@ -9834,6 +9834,12 @@ impl<'ctx> Codegen<'ctx> {
         match &expr.kind {
             ExprKind::Ident(name) => {
                 let lookup = name.rsplit("::").next().unwrap_or(name);
+                // `task<T>` (Async-6): handles lower to an opaque ptr, so
+                // the decl-site registration must win over the generic
+                // pointer decode below.
+                if let Some(t) = self.task_vars.get(name).or_else(|| self.task_vars.get(lookup)) {
+                    return Ok(t.clone());
+                }
                 // Vectors lower as anonymous structs; report the vec type
                 // instead of attempting struct-name resolution (which would
                 // fail to find them in `struct_types`).
@@ -9918,11 +9924,6 @@ impl<'ctx> Codegen<'ctx> {
                 if self.enum_types.contains_key(name) || self.enum_types.contains_key(lookup) {
                     let key = if self.enum_types.contains_key(name) { name } else { lookup };
                     return Ok(crate::sema::Ty::Enum(key.to_string()));
-                }
-                // `task<T>` (Async-6): handle ptr carrying a typed handle
-                // registered at the `task<T> name = spawn ...` decl site.
-                if let Some(t) = self.task_vars.get(name).or_else(|| self.task_vars.get(lookup)) {
-                    return Ok(t.clone());
                 }
                 if self.struct_types.contains_key(name) || self.struct_types.contains_key(lookup) {
                     let key = if self.struct_types.contains_key(name) { name } else { lookup };
