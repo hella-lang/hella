@@ -2327,6 +2327,8 @@ fn stmt_span(st: &Stmt) -> Span {
         Stmt::Continue(d) => d.span,
         Stmt::Defer(d) => d.span,
         Stmt::Delete(d) => d.span,
+        Stmt::Scope(b) => b.span,
+        Stmt::Yield(s) => *s,
     }
 }
 

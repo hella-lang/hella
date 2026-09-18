@@ -784,6 +784,8 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
                 ast::DeferInner::Block(b) => self.collect_block(b, scope),
             },
             Stmt::Delete(d) => self.collect_expr(&d.target),
+            Stmt::Scope(b) => self.collect_block(b, scope),
+            Stmt::Yield(_) => {}
         }
     }
 
@@ -808,6 +810,7 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
             ExprKind::Paren(e)
             | ExprKind::Unary { expr: e, .. }
             | ExprKind::Postfix { expr: e, .. } => self.collect_expr(e),
+            ExprKind::Await { task, .. } | ExprKind::Spawn { task, .. } => self.collect_expr(task),
             ExprKind::Tuple(es) | ExprKind::ArrayLit(es) => {
                 for e in es {
                     self.collect_expr(e);
