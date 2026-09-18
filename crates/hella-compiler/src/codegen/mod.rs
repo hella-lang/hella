@@ -157,6 +157,12 @@ struct TyInfo {
     /// Default value per parameter (`None` = required); leading entry is
     /// always `None` for the implicit `this`. Filled at call sites.
     param_defaults: Vec<Option<crate::ast::Expr>>,
+    /// `true` for `async` functions (Async-6): the declared LLVM function
+    /// keeps the SYNC signature (params -> Ret) and runs the body inline;
+    /// every call site spawns it on a worker thread instead and gets a
+    /// `task<Ret>` handle back. Stored so call codegen can distinguish
+    /// "call directly" (sync) from "spawn" (async).
+    is_async: bool,
 }
 
 impl<'ctx> Codegen<'ctx> {
@@ -778,7 +784,7 @@ impl<'ctx> Codegen<'ctx> {
             full_variadic.extend(m.params.iter().map(|p| p.is_variadic));
             let mut full_defaults = vec![None];
             full_defaults.extend(m.params.iter().map(|p| p.default.clone()));
-            let tyinfo = TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults};
+            let tyinfo = TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults, is_async: false};
             methods.insert(m.name.clone(), (func, tyinfo));
         }
         self.class_methods.insert(c.name.clone(), methods);
@@ -845,7 +851,7 @@ impl<'ctx> Codegen<'ctx> {
             full_variadic.extend(op.params.iter().map(|p| p.is_variadic));
             let mut full_defaults = vec![None];
             full_defaults.extend(op.params.iter().map(|p| p.default.clone()));
-            ops.insert(op.op.clone(), (func, TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults}));
+            ops.insert(op.op.clone(), (func, TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults, is_async: false}));
         }
         if !ops.is_empty() { self.class_operators.insert(c.name.clone(), ops); }
         // Inherit parent methods for extends (static dispatch)
@@ -908,7 +914,7 @@ impl<'ctx> Codegen<'ctx> {
             full_variadic.extend(ctor.params.iter().map(|p| p.is_variadic));
             let mut full_defaults = vec![None];
             full_defaults.extend(ctor.params.iter().map(|p| p.default.clone()));
-            ctors.push((func, TyInfo{ret: crate::sema::Ty::Void, params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults}));
+            ctors.push((func, TyInfo{ret: crate::sema::Ty::Void, params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults, is_async: false}));
         }
         if !ctors.is_empty() { self.class_constructors.insert(c.name.clone(), ctors); }
         // Declare destructors: `void (ptr this)`, mangled `Class__dtor`
@@ -918,7 +924,7 @@ impl<'ctx> Codegen<'ctx> {
             let fn_ty = self.context.void_type().fn_type(&[this_ty], false);
             let mangled = format!("{}__dtor{}", c.name, if c.destructors.len()>1 { format!("{}", idx)} else {"".to_string()});
             let func = self.module.add_function(&mangled, fn_ty, None);
-            dtors.push((func, TyInfo{ret: crate::sema::Ty::Void, params: vec![crate::sema::Ty::Struct(c.name.clone())], param_modes: vec![ParamMode::None], param_names: vec!["this".to_string()], param_is_variadic: vec![false], param_defaults: vec![None]}));
+            dtors.push((func, TyInfo{ret: crate::sema::Ty::Void, params: vec![crate::sema::Ty::Struct(c.name.clone())], param_modes: vec![ParamMode::None], param_names: vec!["this".to_string()], param_is_variadic: vec![false], param_defaults: vec![None], is_async: false}));
         }
         if !dtors.is_empty() { self.class_destructors.insert(c.name.clone(), dtors); }
         // Declare properties: getter/setter — allow separate declarations that merge
@@ -943,7 +949,7 @@ impl<'ctx> Codegen<'ctx> {
                     self.module.add_function(&mangled, fn_ty, None)
                 };
                 let mut params = vec![crate::sema::Ty::Struct(c.name.clone())];
-                pg = Some((func, TyInfo{ret: prop_ty.clone(), params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new()}));
+                pg = Some((func, TyInfo{ret: prop_ty.clone(), params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new(), is_async: false}));
             }
             if let Some((ref param,_)) = prop.setter {
                 let setter_ty_raw: crate::sema::Ty = (&param.ty).into();
@@ -958,7 +964,7 @@ impl<'ctx> Codegen<'ctx> {
                     self.module.add_function(&mangled, fn_ty, None)
                 };
                 let mut params = vec![crate::sema::Ty::Struct(c.name.clone()), setter_ty.clone()];
-                ps = Some((func, TyInfo{ret: crate::sema::Ty::Void, params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new()}));
+                ps = Some((func, TyInfo{ret: crate::sema::Ty::Void, params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new(), is_async: false}));
             }
             if let Some(existing) = props.get(&prop.name).cloned() {
                 let mut merged_getter = existing.getter;
@@ -1229,7 +1235,7 @@ impl<'ctx> Codegen<'ctx> {
                     full_variadic.extend(f.params.iter().map(|p| p.is_variadic));
             let mut full_defaults = vec![None];
             full_defaults.extend(f.params.iter().map(|p| p.default.clone()));
-                    entry.insert(f.name.clone(), (func, TyInfo{ret: ret_ty, params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults}));
+                    entry.insert(f.name.clone(), (func, TyInfo{ret: ret_ty, params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults, is_async: false}));
                 }
                 crate::ast::ExtensionMember::Operator(op) => {
                     let ret_ty = crate::sema::Ty::Int;
@@ -1293,7 +1299,7 @@ impl<'ctx> Codegen<'ctx> {
             let mut full_defaults = vec![None];
             full_defaults.extend(op.params.iter().map(|p| p.default.clone()));
                     let entry = self.class_operators.entry(target.clone()).or_insert_with(HashMap::new);
-                    entry.insert(op.op.clone(), (func, TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults}));
+                    entry.insert(op.op.clone(), (func, TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults, is_async: false}));
                 }
                 crate::ast::ExtensionMember::Property(prop) => {
                     let prop_ty_raw: crate::sema::Ty = prop.ty.as_ref().map(|t| t.into()).or_else(|| prop.setter.as_ref().map(|(p,_)| (&p.ty).into())).unwrap_or(crate::sema::Ty::Int);
@@ -1314,7 +1320,7 @@ impl<'ctx> Codegen<'ctx> {
                             self.module.add_function(&mangled, fn_ty, None)
                         };
                         let mut params = vec![crate::sema::Ty::Struct(target.clone())];
-                        pg = Some((func, TyInfo{ret: prop_ty.clone(), params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new()}));
+                        pg = Some((func, TyInfo{ret: prop_ty.clone(), params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new(), is_async: false}));
                     }
                     if let Some((ref param,_)) = prop.setter {
                         let setter_ty_raw: crate::sema::Ty = (&param.ty).into();
@@ -1329,7 +1335,7 @@ impl<'ctx> Codegen<'ctx> {
                             self.module.add_function(&mangled, fn_ty, None)
                         };
                         let mut params = vec![crate::sema::Ty::Struct(target.clone()), setter_ty.clone()];
-                        ps = Some((func, TyInfo{ret: crate::sema::Ty::Void, params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new()}));
+                        ps = Some((func, TyInfo{ret: crate::sema::Ty::Void, params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new(), is_async: false}));
                     }
                     let entry = self.class_properties.entry(target.clone()).or_insert_with(HashMap::new);
                     if let Some(existing) = entry.get(&prop.name).cloned() {
@@ -3605,6 +3611,9 @@ impl<'ctx> Codegen<'ctx> {
         };
 
         let func = self.module.add_function(&f.name, fn_ty, None);
+        // Async-6: declare keeps the SYNC signature; the async-ness rides
+        // along in TyInfo so call sites know to spawn instead of call.
+        let is_async_fn = f.is_async;
         self.funcs.insert(
             f.name.clone(),
             (
@@ -3616,6 +3625,7 @@ impl<'ctx> Codegen<'ctx> {
                     param_names: f.params.iter().map(|p| p.name.clone()).collect(),
                     param_is_variadic: f.params.iter().map(|p| p.is_variadic).collect(),
                     param_defaults: f.params.iter().map(|p| p.default.clone()).collect(),
+                    is_async: is_async_fn,
                 },
             ),
         );
