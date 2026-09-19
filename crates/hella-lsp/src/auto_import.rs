@@ -107,15 +107,23 @@ pub fn import_path_for(base: &Path, file: &Path) -> Option<String> {
 }
 
 /// Collect `.hll` files under `bases` (deduped, bounded). Returns
-/// `(base, file)` pairs so the import path can be derived.
+/// `(base, file)` pairs so the import path can be derived: `base` is
+/// always the originating search base, never an intermediate directory
+/// (so `stdlib/std/io.hll` under base `stdlib` yields `std::io`,
+/// not `io`).
 pub fn collect_hll_files(bases: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
     const BUDGET: usize = 20_000;
     const FILE_CAP: usize = 500;
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     let mut visited: usize = 0;
-    let mut stack: Vec<PathBuf> = bases.to_vec();
-    while let Some(dir) = stack.pop() {
+    let mut stack: Vec<(PathBuf, PathBuf)> =
+        bases.iter().map(|b| (b.clone(), b.clone())).collect();
+    // Pop order is LIFO, so seed the stack reversed: the first base in
+    // `bases` is traversed first, and the file-level dedup below keeps
+    // the earliest base's import path for files visible under several.
+    stack.reverse();
+    while let Some((base, dir)) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
             Err(_) => continue,
@@ -138,10 +146,10 @@ pub fn collect_hll_files(bases: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
                 if name == "target" || name == "out" || name == "node_modules" {
                     continue;
                 }
-                stack.push(path);
+                stack.push((base.clone(), path));
             } else if ft.is_file() && path.extension().is_some_and(|e| e == "hll") {
                 if seen.insert(path.clone()) {
-                    out.push((dir.clone(), path));
+                    out.push((base.clone(), path));
                 } else {
                     // Same file reachable via two bases — keep first base's path.
                 }
@@ -306,6 +314,31 @@ mod tests {
         let imp = root.join("main.hll");
         let got = find_import_for_symbol("helper", Some(&imp), &[root.clone()]);
         assert_eq!(got.as_deref(), Some("utils"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn nested_provider_keeps_full_path() {
+        // `stdlib/std/io.hll` under base `stdlib` must offer `std::io`,
+        // not the truncated `io` (and likewise for deeper nesting).
+        let root = tmp_root("nested");
+        let std = root.join("stdlib");
+        std::fs::create_dir_all(std.join("std").join("terminal")).unwrap();
+        std::fs::write(std.join("std").join("io.hll"), "void println(string s) do\nend\n").unwrap();
+        std::fs::write(
+            std.join("std").join("terminal").join("ansi.hll"),
+            "const string BOLD = \"x\"\n",
+        )
+        .unwrap();
+        let imp = root.join("main.hll");
+        std::fs::write(&imp, "void main() do\nend\n").unwrap();
+        let got = find_import_for_symbol("println", Some(&imp), &[std.clone()]);
+        assert_eq!(got.as_deref(), Some("std::io"));
+        let got = find_import_for_symbol("BOLD", Some(&imp), &[std.clone()]);
+        assert_eq!(got.as_deref(), Some("std::terminal::ansi"));
+        let existing = HashSet::new();
+        let got = candidates_with_prefix("print", Some(&imp), &[std.clone()], &existing);
+        assert!(got.iter().any(|(n, i)| n == "println" && i == "std::io"), "got {got:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
