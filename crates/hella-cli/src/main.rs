@@ -18,9 +18,9 @@ include!(concat!(env!("OUT_DIR"), "/stdlib_embedded.rs"));
 
 mod pkg;
 
-// Platform shim (`runtime/hella_rt.c`): POSIX names missing from the MSVC C
-// runtime (`write`, `setenv`, `unsetenv`, `access`, `strdup`), defined only
-// under `_WIN32`. Compiled and linked on Windows; nothing to do elsewhere.
+// Platform shim (`runtime/hella_rt.c`): `setenv`/`unsetenv` are missing from
+// the MSVC C runtime, defined only under `_WIN32`. Compiled and linked on
+// Windows; nothing to do elsewhere.
 #[cfg(windows)]
 const HELLA_RT_C: &str = include_str!("../../../runtime/hella_rt.c");
 
@@ -1488,9 +1488,9 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         e
     })?;
     let mut link = Command::new(&linker);
-    // Windows: the MSVC C runtime lacks a few POSIX names the stdlib
-    // declares (`write`, `setenv`, `unsetenv`, `access`, `strdup`), so
-    // compile the embedded `runtime/hella_rt.c` shim and link it along.
+    // Windows: the MSVC C runtime lacks the POSIX `setenv`/`unsetenv` names the
+    // `std::env` module declares, so compile the embedded
+    // `runtime/hella_rt.c` shim and link it along.
     // The shim is a no-op TU everywhere else and is skipped there.
     #[cfg_attr(not(windows), allow(unused_mut))]
     let mut extra_paths: Vec<PathBuf> = Vec::new();
@@ -1528,6 +1528,21 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         link.arg(&rt_obj);
     }
     link.arg(&obj_path).arg("-o").arg(&exe_path);
+    // Windows: `scanf`/`printf`-family names in the UCRT headers are inline
+    // wrappers that forward to `__stdio_common_*`; a Hella object referencing
+    // the plain `scanf`/`sprintf` symbols (e.g. via `std::io`'s `readLine` or
+    // string interpolation) needs `legacy_stdio_definitions.lib` to resolve
+    // them. The MSVC library directory is not on clang's default search
+    // path, so resolve the absolute path from any `link.exe` on `PATH`
+    // (no child process): walk up from its `VC/.../bin/Host<arch>/<arch>/link.exe`
+    // location to `VC/.../lib/<arch>/legacy_stdio_definitions.lib`.
+    // Absolute path, so no `-L`/`LIB` environment dependency. Passing it
+    // unconditionally is harmless: the linker drops it when no such
+    // reference exists, and POSIX links never take this branch.
+    #[cfg(windows)]
+    if let Some(legacy) = windows_legacy_stdio_lib() {
+        link.arg(&legacy);
+    }
     // Linux does not fold libm into libc: `-lm` is required wherever
     // `std::math` (or any `from "libm"` extern) may appear. The system
     // linker drops it when unused (`--as-needed`), so passing it
@@ -1606,6 +1621,78 @@ fn find_linker() -> miette::Result<String> {
         "no C linker found (tried `clang`, `cc`) — {}",
         link_hint()
     ))
+}
+
+/// Absolute path to MSVC's `legacy_stdio_definitions.lib` for the Windows
+/// link, or `None` when it cannot be located (the link then proceeds
+/// without it, as before).
+///
+/// clang targeting Windows delegates to an MSVC `link.exe` whose directory
+/// layout is `.../VC/Tools/MSVC/<ver>/bin/...`; walking up from a `link.exe`
+/// found on `PATH` to `.../lib/<arch>/` finds the matching library without
+/// relying on `LIB` being set or spawning `clang -v`/`vswhere` (both proved
+/// crash-prone on some Windows setups). Falls back to the well-known
+/// default install roots before giving up.
+#[cfg(windows)]
+fn windows_legacy_stdio_lib() -> Option<PathBuf> {
+    const ARCH: &str = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else if cfg!(target_arch = "x86") {
+        "x86"
+    } else {
+        "x64"
+    };
+    let candidate = |lib_dir: &Path| {
+        let p = lib_dir.join("legacy_stdio_definitions.lib");
+        p.is_file().then_some(p)
+    };
+    // 1. Derive from any `link.exe` visible on `PATH` (the same backend
+    // clang invokes). Pure path math, no child processes.
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let link = dir.join("link.exe");
+            if !link.is_file() {
+                continue;
+            }
+            // `.../VC/Tools/MSVC/<ver>/bin/Host<arch>/<arch>/link.exe`
+            // → up 4 levels → `.../VC/Tools/MSVC/<ver>/`, then `lib/<arch>/`.
+            if let Some(msvc) = link
+                .parent()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.parent())
+                .and_then(|p| p.parent())
+            {
+                if let Some(hit) = candidate(&msvc.join("lib").join(ARCH)) {
+                    return Some(hit);
+                }
+            }
+        }
+    }
+    // 2. Well-known roots (VS 2022 then 2019, both editions + BuildTools).
+    for prefix in [
+        "C:/Program Files/Microsoft Visual Studio/2022",
+        "C:/Program Files (x86)/Microsoft Visual Studio/2022",
+        "C:/Program Files/Microsoft Visual Studio/2019",
+        "C:/Program Files (x86)/Microsoft Visual Studio/2019",
+    ] {
+        for edition in ["Enterprise", "Professional", "Community", "BuildTools"] {
+            let lib_root = Path::new(prefix)
+                .join(edition)
+                .join("VC")
+                .join("Tools")
+                .join("MSVC");
+            let mut vers: Vec<PathBuf> = std::fs::read_dir(&lib_root)
+                .map(|rd| rd.flatten().map(|e| e.path()).collect())
+                .unwrap_or_default();
+            vers.sort();
+            for ver in vers.iter().rev() {
+                if let Some(hit) = candidate(&ver.join("lib").join(ARCH)) {
+                    return Some(hit);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Platform-appropriate hint for installing a C linker.
