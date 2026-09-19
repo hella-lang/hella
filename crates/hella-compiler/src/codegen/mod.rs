@@ -9551,13 +9551,88 @@ pub fn compile_to_object(
     // else before object emission.
     #[cfg(not(windows))]
     cg.module.verify().map_err(|e| e.to_string())?;
-    let machine = target_machine(opt)?;
-    if opt == OptLevel::Release {
-        cg.optimize_for_release(&machine)?;
+    // OS-conditional object emission (see `target_machine` below):
+    // POSIX keeps the fast in-process `write_to_file` path untouched.
+    // Windows routes through `clang -c` on dumped IR instead — the
+    // in-process COFF emitter (`LLVMTargetMachineEmitToFile`) crashes
+    // nondeterministically there (STATUS_ACCESS_VIOLATION /
+    // STATUS_STACK_BUFFER_OVERRUN, different survivors per run) for the
+    // same modules that verify and emit IR fine, matching the two
+    // earlier rpmalloc heap-crossing workarounds (`get_module_ir`,
+    // `module.verify`). `opt` is honored via the `clang -O` flag.
+    #[cfg(not(windows))]
+    {
+        let machine = target_machine(opt)?;
+        if opt == OptLevel::Release {
+            cg.optimize_for_release(&machine)?;
+        }
+        machine
+            .write_to_file(&cg.module, inkwell::targets::FileType::Object, obj_path)
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
-    machine
-        .write_to_file(&cg.module, inkwell::targets::FileType::Object, obj_path)
+    #[cfg(windows)]
+    {
+        windows_compile_ir_to_object(&cg, obj_path, opt)
+    }
+}
+
+/// Windows-only object emission: dump IR via the crash-safe
+/// `print_to_file` round-trip (`get_module_ir`, never `print_to_string`)
+/// and assemble it out-of-process with the same C driver used for the
+/// final link (`$HELLA_LINKER`, else `clang`/`cc`). Keeps IR building
+/// in-process (proven fine by the green unit tests and `--emit-llvm`);
+/// only the crashing in-process COFF emitter is bypassed. Not used on
+/// POSIX — see `compile_to_object`.
+#[cfg(windows)]
+fn windows_compile_ir_to_object(
+    cg: &Codegen<'_>,
+    obj_path: &Path,
+    opt: OptLevel,
+) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let ll_path = std::env::temp_dir().join(format!(
+        "hella-obj-{}-{}.ll",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed),
+    ));
+    cg.module
+        .print_to_file(&ll_path)
         .map_err(|e| e.to_string())?;
+    let linker = std::env::var("HELLA_LINKER")
+        .ok()
+        .filter(|l| !l.trim().is_empty())
+        .or_else(|| {
+            ["clang", "cc"]
+                .into_iter()
+                .find(|c| {
+                    std::process::Command::new(c)
+                        .arg("--version")
+                        .output()
+                        .is_ok()
+                })
+                .map(str::to_string)
+        })
+        .ok_or_else(|| {
+            "no C compiler found (tried `clang`, `cc`) — install LLVM (https://releases.llvm.org/download.html) or set HELLA_LINKER".to_string()
+        })?;
+    let opt_flag = match opt {
+        OptLevel::Debug => "-O0",
+        OptLevel::Release => "-O3",
+    };
+    let status = std::process::Command::new(&linker)
+        .arg("-c")
+        .arg(opt_flag)
+        .arg(&ll_path)
+        .arg("-o")
+        .arg(obj_path)
+        .status()
+        .map_err(|e| format!("failed to invoke {linker} for object emission: {e}"))?;
+    let _ = std::fs::remove_file(&ll_path);
+    if !status.success() {
+        return Err(format!("object emission failed with {linker}"));
+    }
     Ok(())
 }
 

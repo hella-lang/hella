@@ -2,28 +2,28 @@
  *
  * The Hella stdlib modules declare a POSIX-flavored libc
  * surface via `extern "c"`. Most of it exists verbatim on Linux, macOS,
- * and Windows (ucrt), but a handful of symbols are missing from the
+ * and Windows (ucrt), but `setenv`/`unsetenv` are missing from the
  * MSVC C runtime, which only provides underscore-prefixed variants:
- *   write    -> _write     (io.h, fd-based; used for stderr output)
  *   setenv   -> _putenv_s  (stdlib.h)
  *   unsetenv -> _putenv    ("NAME=" unsets; stdlib.h)
- *   access   -> _access    (io.h, F_OK probing)
- *   strdup   -> _strdup    (string.h)
+ *
+ * `write`, `access`, and `strdup` are NOT shimmed here even though old
+ * revisions of this file defined them: the UCRT headers declare the
+ * undecorated names whenever `_CRT_INTERNAL_NONSTDC_NAMES` is enabled
+ * (the default for clang targeting Windows), so local definitions clash
+ * with `corecrt_io.h`/`string.h` (`conflicting types for 'write'`) and
+ * break every `hella build` on Windows. Codegen already declares those
+ * three as ordinary externs and the linker resolves them from the UCRT.
  *
  * On POSIX systems this translation unit compiles to nothing (the libc
- * provides all five names), so the CLI only compiles and links it on
+ * provides both names), so the CLI only compiles and links it on
  * Windows. Call shapes mirror POSIX exactly (`int` args/returns), which
  * matches how Hella lowers `int` at the ABI boundary for small values.
  */
 #ifdef _WIN32
 
-#include <io.h>
 #include <stdlib.h>
 #include <string.h>
-
-int write(int fd, const void *buf, int count) {
-    return _write(fd, buf, (unsigned int)count);
-}
 
 int setenv(const char *name, const char *value, int overwrite) {
     (void)overwrite;
@@ -44,14 +44,6 @@ int unsetenv(const char *name) {
     rc = _putenv(Assignment);
     free(Assignment);
     return rc;
-}
-
-int access(const char *path, int mode) {
-    return _access(path, mode);
-}
-
-char *strdup(const char *s) {
-    return _strdup(s);
 }
 
 #endif /* _WIN32 */
