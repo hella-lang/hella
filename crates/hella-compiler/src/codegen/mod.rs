@@ -7710,7 +7710,18 @@ impl<'ctx> Codegen<'ctx> {
                     BinOp::BitOr => self.builder.build_or(l.into_int_value(), r.into_int_value(), "bitor").unwrap().into(),
                     BinOp::BitXor => self.builder.build_xor(l.into_int_value(), r.into_int_value(), "bitxor").unwrap().into(),
                     BinOp::Shl => self.builder.build_left_shift(l.into_int_value(), r.into_int_value(), "shl").unwrap().into(),
-                    BinOp::Shr => self.builder.build_right_shift(l.into_int_value(), r.into_int_value(), false, "shr").unwrap().into(),
+                    // `>>` is LOGICAL (zero-fill) for unsigned operands:
+                    // `u64`/`uN` (stdlib types skill) are unsigned, and a
+                    // sign-propagating shift would corrupt random/PRNG code
+                    // whose values legitimately have the high bit set.
+                    // Signed int-like types keep the arithmetic shift.
+                    BinOp::Shr => {
+                        let logical = matches!(
+                            self.infer_expr_ty(lhs),
+                            Ok(crate::sema::Ty::SizedInt { signed: false, .. }) | Ok(crate::sema::Ty::UInt)
+                        );
+                        self.builder.build_right_shift(l.into_int_value(), r.into_int_value(), logical, "shr").unwrap().into()
+                    }
                     BinOp::NullCoalesce => {
                         // `a ?? b`: `a` is an Optional `{value, present}`
                         // struct (or legacy int/pointer zero-check).
