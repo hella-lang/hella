@@ -20,6 +20,24 @@
 | `T?` | Optional: `{ T, i1 }` or nullable pointer |
 | `T*` | `ptr` (opaque pointers) |
 | `T[]`| Fat pointer `{ ptr, i64 }` + runtime bounds checks optional |
+| `own T` | `{ ptr data, i64 tag }` owning pair (moves, scope-destroyed) |
+| `task<T>` (Async-6) | opaque `hella_task_t*` runtime handle; result <=16B inline in the task, larger spills to a heap buffer |
+
+## Async Lowering (Async-6/Async-7)
+
+- `Ret name(...) async do … end` keeps the SYNC LLVM signature
+  (`params → Ret`); `TyInfo.is_async` marks it so call sites spawn.
+- `task<T>` = opaque `hella_task_t*` (`ptr`). `task<void>` joins to no value.
+- Call to an async fn (or `spawn`) → heap ctx `{arg0, …}` +
+  static trampoline `__async_entry_<callee>` (unpacks, calls the body,
+  stores the result inline/spilled, frees the ctx) →
+  `hella_task_spawn(entry, ctx, ret_size)` returns the handle.
+- `await h` → `hella_task_join(h)` + `hella_task_result(h, slot, n)` + load.
+- `async main` → user body becomes `__hella_async_main`; the C-ABI `main`
+  wrapper spawns it as the root task, joins, translates `int` → exit code.
+- `yield` → `sched_yield()`; conditional linking is decided by
+  `async_req::analyze` (call-graph reachability from `main`/`init`/globals),
+  not keyword scans or dead stripping.
 
 ## Variables & Parameters
 

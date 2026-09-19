@@ -71,6 +71,22 @@ without its `import` is a sema error (`undefined function`) by design.
     Output-size overflow and allocation failure assert rather than wrap/truncate.
 - `std::types` — `stdlib/std/types.hll` (doc-only manifest of the implicit
   environment: `bool string i8…u128 int uint float double`; importing is a no-op)
+- `std::task` — `stdlib/std/task.hll` (named `task` because `async` is a
+  compiler keyword and cannot be an import segment, same as `vector` vs `vec`;
+  Async-10)
+  - `void yieldNow()` — cooperative checkpoint (`sched_yield`); offers the
+    OS scheduler a chance to run other ready tasks. Only referenced by
+    programs that reach async code (the runtime is otherwise not linked).
+  - `void sleepMs(int ms)` — park the calling task for `ms` milliseconds
+    (clamped at 0): POSIX `nanosleep` retried across `EINTR`, Windows `Sleep`.
+    Wall-clock parking, not a cooperative wait.
+  - `bool cancelled()` — true when the running task was asked to stop
+    (cooperative cancellation; tasks poll at checkpoints, nothing preempts).
+    Always false outside a task. There is no API yet to request cancellation
+    from Hella code (`hella_task_cancel` exists in the runtime but is not
+    exposed until scope cancellation semantics settle).
+  - Honest scope: these are cooperative primitives. `sleepMs` parks one
+    task; nothing here turns blocking libc I/O into non-blocking I/O.
 
 Import examples:
 

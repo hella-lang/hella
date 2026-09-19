@@ -74,10 +74,24 @@ Always advance one phase at a time. Each phase must produce runnable code (JIT o
 - Extensions (`extend Type do … end`)
 - `float`/`double` literals and `any`/`function` types
 
+## Phase 6 — Structured Concurrency (Async) - DONE
+
+- `Ret name(...) async do … end` — async bodies run as thread-backed tasks
+  (`runtime/hella_async.c`: pthreads on POSIX, Win32 threads on Windows)
+- `task<T>` handles; calling an async function spawns it; `await` joins and
+  unwraps exactly once
+- `spawn` for explicit concurrency, `scope do … end` for structured joins
+  (tasks cannot escape; sema enforces the implicit join)
+- `yield` cooperative checkpoints; `async main` root executor wrapper
+- Conditional runtime inclusion (Async-8): reachability analysis decides
+  whether the runtime is compiled and linked; sync binaries gain nothing
+- `import std::task` — `yieldNow()`, `sleepMs()`, `cancelled()`
+- Deferred: async I/O, worker-thread migration, channels/select, async
+  closures, detached tasks
+
 ## Out of Scope for Early Phases
 
-- Full borrow/ownership system
-- Async
+- Full borrow/ownership system (shipped as `own` heap ownership)
 - Macros
 - Incremental compilation
 - Custom LLVM passes beyond standard optimization levels
