@@ -586,6 +586,9 @@ impl<'a> Formatter<'a> {
             .map(|arg| match arg {
                 AttributeArg::Expr(e) => self.fmt_expr_compact(e),
                 AttributeArg::Named(n, _, v) => format!("{}: {}", n, self.fmt_expr_compact(v)),
+                // `@cfg(os = "macos")`: keep the author's `=` spelling so
+                // formatting is round-trip idempotent.
+                AttributeArg::Assign(n, _, v) => format!("{} = {}", n, self.fmt_expr_compact(v)),
             })
             .collect();
         format!("@{}({})", a.name, args.join(", "))

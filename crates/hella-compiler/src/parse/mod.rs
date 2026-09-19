@@ -968,6 +968,7 @@ impl Parser {
         while self.peek_token() == Some(&Token::At) {
             let start = self.advance().unwrap().span.start;
             let (name, name_span) = self.parse_ident()?;
+            let is_cfg = name == "cfg";
             let mut args = Vec::new();
             if self.consume_if(Token::LParen) {
                 if self.peek_token() != Some(&Token::RParen) {
@@ -987,10 +988,38 @@ impl Parser {
                             }
                         } else { false };
                         if !is_named {
-                            let e = self.parse_expr()?;
-                            args.push(AttributeArg::Expr(e));
+                            // `name = value` (cfg-style: `os = "macos"`).
+                            // The value parses at unary level so `=` never
+                            // cascades into an assignment expression and
+                            // `or` stays a *separator* between conditions
+                            // rather than an operand operator.
+                            let save_eq = self.pos;
+                            let named_eq = if self.peek_token() == Some(&Token::Ident) {
+                                let (n, s) = self.parse_ident().unwrap();
+                                if self.consume_if(Token::Eq) {
+                                    match self.parse_unary() {
+                                        Ok(v) => {
+                                            args.push(AttributeArg::Assign(n, s, v));
+                                            true
+                                        }
+                                        Err(e) => return Err(e),
+                                    }
+                                } else {
+                                    self.pos = save_eq;
+                                    false
+                                }
+                            } else { false };
+                            if !named_eq {
+                                let e = self.parse_expr()?;
+                                args.push(AttributeArg::Expr(e));
+                            }
                         }
-                        if !self.consume_if(Token::Comma) { break; }
+                        // `,` separates attribute arguments; in `@cfg` a
+                        // bare `or` separates altative conditions with the
+                        // same meaning (any true condition keeps the item).
+                        if self.consume_if(Token::Comma) { continue; }
+                        if is_cfg && self.consume_if(Token::Or) { continue; }
+                        break;
                     }
                 }
                 self.expect(Token::RParen, "expected `)` after attribute args")?;

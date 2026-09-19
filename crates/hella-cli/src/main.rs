@@ -1307,7 +1307,12 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // ── Import expansion ─────────────────────────────────────────────
     pb.set_message("Resolving imports");
     let t_import = Instant::now();
-    let expanded = hella_compiler::modules::expand_imports(program, file);
+    // `@cfg(debug)` is true only for a debug *link* profile. `check` (no
+    // link at all) deliberately treats it as false so type analysis never
+    // depends on which profile would have been built.
+    let cfg_debug = !opts.release && !opts.check_only;
+    let expanded =
+        hella_compiler::modules::expand_imports_with_cfg(program, file, cfg_debug);
     if let Some(first) = expanded.errors.into_iter().next() {
         let diag = hella_compiler::error::SingleDiagnostic::new(
             filename.clone(),

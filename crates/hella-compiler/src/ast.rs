@@ -28,7 +28,12 @@ pub struct Attribute {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttributeArg {
     Expr(Expr),
+    /// `name: value` (colon form, EBNF `attribute-argument`).
     Named(String, Span, Expr),
+    /// `name = value` (equals form). Used by `@cfg(os = "macos")`; kept
+    /// distinct from [`AttributeArg::Named`] so the formatter can round-trip
+    /// the exact spelling the author wrote.
+    Assign(String, Span, Expr),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
