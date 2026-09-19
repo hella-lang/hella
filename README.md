@@ -96,6 +96,10 @@ A few things that make Hella Hella:
 - **Classes** with `this`, `initialize` constructors, `open`/`override`/`sealed`, traits + `implements`, and `get`/`set` properties.
 - **Generics with `where` bounds**, `distinct`/`typedef` types, `extend` blocks, closures, string interpolation (`"hi {name}"`), and `extern "c"` for calling C.
 - **`defer`** runs when its scope exits, on every path.
+- **`@cfg(...)`** compiles items conditionally: `@cfg(os = "macos")`,
+  `@cfg(target = "aarch64-apple-darwin")`, `@cfg(debug)` / `@cfg(debug = false)`,
+  joined with `or` (or `,`); stacking attributes means AND. The condition is
+  resolved during import expansion, so absent items never reach sema or codegen.
 
 ## Examples
 
@@ -119,6 +123,7 @@ cargo run -p hella -- build -f examples/basics.hll && ./examples/basics; echo $?
 | `own_heap.hll` | Heap ownership (`own`, `new`, `delete`, moves, trait upcasts) |
 | `trait_objects.hll` | Trait objects and dynamic dispatch |
 | `async_basic.hll` | Structured concurrency: `async` functions, `task<T>`, `spawn`, `await`, `scope do ... end`, `yield` |
+| `cfg_platform.hll` | Conditional compilation: `@cfg(os = "...")`, `@cfg(debug)` |
 | `types_ints.hll` / `types_arr.hll` / `types_vec.hll` / `types_map.hll` / `types_methods.hll` | Integer widths, fixed arrays (incl. slicing), vectors, maps, methods |
 
 The exit code of each example is its answer; `basics` exits with `230`, `abstraction` with `233`, and so on.
