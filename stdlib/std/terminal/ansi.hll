@@ -1,0 +1,285 @@
+/// Reset all attributes.
+const string RESET = "[0m"
+
+/// Bold text.
+const string BOLD = "[1m"
+
+/// Dim text.
+const string DIM = "[2m"
+
+/// Italic text.
+const string ITALIC = "[3m"
+
+/// Underlined text.
+const string UNDERLINE = "[4m"
+
+/// Slow blinking text.
+const string BLINK = "[5m"
+
+/// Reverse foreground and background colors.
+const string REVERSE = "[7m"
+
+/// Hidden text.
+const string HIDDEN = "[8m"
+
+/// Strikethrough text.
+const string STRIKETHROUGH = "[9m"
+
+/// Remove bold formatting.
+const string NO_BOLD = "[22m"
+
+/// Remove italic formatting.
+const string NO_ITALIC = "[23m"
+
+/// Remove underline formatting.
+const string NO_UNDERLINE = "[24m"
+
+/// Remove blinking formatting.
+const string NO_BLINK = "[25m"
+
+/// Remove reverse formatting.
+const string NO_REVERSE = "[27m"
+
+/// Remove hidden formatting.
+const string NO_HIDDEN = "[28m"
+
+/// Remove strikethrough formatting.
+const string NO_STRIKETHROUGH = "[29m"
+
+//
+// Standard foreground colors
+//
+const string BLACK = "[30m"
+
+const string RED = "[31m"
+
+const string GREEN = "[32m"
+
+const string YELLOW = "[33m"
+
+const string BLUE = "[34m"
+
+const string MAGENTA = "[35m"
+
+const string CYAN = "[36m"
+
+const string WHITE = "[37m"
+
+//
+// Bright foreground colors
+//
+const string BRIGHT_BLACK = "[90m"
+
+const string BRIGHT_RED = "[91m"
+
+const string BRIGHT_GREEN = "[92m"
+
+const string BRIGHT_YELLOW = "[93m"
+
+const string BRIGHT_BLUE = "[94m"
+
+const string BRIGHT_MAGENTA = "[95m"
+
+const string BRIGHT_CYAN = "[96m"
+
+const string BRIGHT_WHITE = "[97m"
+
+//
+// Standard background colors
+//
+const string BG_BLACK = "[40m"
+
+const string BG_RED = "[41m"
+
+const string BG_GREEN = "[42m"
+
+const string BG_YELLOW = "[43m"
+
+const string BG_BLUE = "[44m"
+
+const string BG_MAGENTA = "[45m"
+
+const string BG_CYAN = "[46m"
+
+const string BG_WHITE = "[47m"
+
+//
+// Bright background colors
+//
+const string BG_BRIGHT_BLACK = "[100m"
+
+const string BG_BRIGHT_RED = "[101m"
+
+const string BG_BRIGHT_GREEN = "[102m"
+
+const string BG_BRIGHT_YELLOW = "[103m"
+
+const string BG_BRIGHT_BLUE = "[104m"
+
+const string BG_BRIGHT_MAGENTA = "[105m"
+
+const string BG_BRIGHT_CYAN = "[106m"
+
+const string BG_BRIGHT_WHITE = "[107m"
+
+//
+// Additional text styles (SGR)
+//
+/// Rapidly blinking text. Not widely supported.
+const string BLINK_RAPID = "[6m"
+
+/// Select the primary font.
+const string FONT_PRIMARY = "[10m"
+
+/// Select an alternative font.
+const string FONT_ALT1 = "[11m"
+
+/// Select an alternative font.
+const string FONT_ALT2 = "[12m"
+
+/// Select an alternative font.
+const string FONT_ALT3 = "[13m"
+
+/// Select an alternative font.
+const string FONT_ALT4 = "[14m"
+
+/// Select an alternative font.
+const string FONT_ALT5 = "[15m"
+
+/// Select an alternative font.
+const string FONT_ALT6 = "[16m"
+
+/// Select an alternative font.
+const string FONT_ALT7 = "[17m"
+
+/// Select an alternative font.
+const string FONT_ALT8 = "[18m"
+
+/// Select an alternative font.
+const string FONT_ALT9 = "[19m"
+
+/// Select Fraktur (Blackletter) font. Rarely supported.
+const string FONT_FRAKTUR = "[20m"
+
+/// Double underline. Sometimes interpreted as "disable bold."
+const string UNDERLINE_DOUBLE = "[21m"
+
+/// Remove dim formatting.
+const string NO_DIM = "[22m"
+
+/// Enable proportional spacing.
+const string PROPORTIONAL_SPACING = "[26m"
+
+/// Reset foreground color to the default.
+const string FG_DEFAULT = "[39m"
+
+/// Reset background color to the default.
+const string BG_DEFAULT = "[49m"
+
+/// Disable proportional spacing.
+const string NO_PROPORTIONAL_SPACING = "[50m"
+
+/// Frame the text.
+const string FRAMED = "[51m"
+
+/// Encircle the text.
+const string ENCIRCLED = "[52m"
+
+/// Overline the text.
+const string OVERLINED = "[53m"
+
+/// Remove frame and encircle formatting.
+const string NO_FRAME_ENCIRCLE = "[54m"
+
+/// Remove overline formatting.
+const string NO_OVERLINE = "[55m"
+
+//
+// Control characters
+//
+/// Bell (audible beep).
+const string BELL = ""
+
+/// Backspace.
+const string BACKSPACE = ""
+
+/// Escape.
+const string ESC = ""
+
+/// Control Sequence Introducer.
+const string CSI = "["
+
+/// Operating System Command.
+const string OSC = "]"
+
+/// String Terminator.
+const string ST = "\\"
+
+//
+// Cursor movement & editing (CSI)
+//
+/// Move the cursor up one line.
+const string CURSOR_UP = "[A"
+
+/// Move the cursor down one line.
+const string CURSOR_DOWN = "[B"
+
+/// Move the cursor forward one column.
+const string CURSOR_FORWARD = "[C"
+
+/// Move the cursor back one column.
+const string CURSOR_BACK = "[D"
+
+/// Move the cursor to the home position (top-left).
+const string CURSOR_HOME = "[H"
+
+/// Erase from the cursor to the end of the display.
+const string ERASE_DISPLAY = "[J"
+
+/// Erase the entire display.
+const string ERASE_DISPLAY_ALL = "[2J"
+
+/// Erase from the cursor to the end of the line.
+const string ERASE_LINE = "[K"
+
+/// Scroll the display up one line.
+const string SCROLL_UP = "[S"
+
+/// Scroll the display down one line.
+const string SCROLL_DOWN = "[T"
+
+//
+// Private CSI / DEC sequences
+//
+/// Save the current cursor position.
+const string SAVE_CURSOR = "[s"
+
+/// Restore a saved cursor position.
+const string RESTORE_CURSOR = "[u"
+
+/// Enable auto-wrap mode.
+const string AUTO_WRAP_ON = "[?7h"
+
+/// Disable auto-wrap mode.
+const string AUTO_WRAP_OFF = "[?7l"
+
+/// Show the text cursor.
+const string SHOW_CURSOR = "[?25h"
+
+/// Hide the text cursor.
+const string HIDE_CURSOR = "[?25l"
+
+/// Enter the alternate screen buffer.
+const string ENTER_ALTERNATE_SCREEN = "[?1049h"
+
+/// Exit the alternate screen buffer.
+const string EXIT_ALTERNATE_SCREEN = "[?1049l"
+
+//
+// Fp escape sequences (DEC)
+//
+/// DEC: save the current cursor position.
+const string DEC_SAVE_CURSOR = "7"
+
+/// DEC: restore a saved cursor position.
+const string DEC_RESTORE_CURSOR = "8"
