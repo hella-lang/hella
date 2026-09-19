@@ -1,6 +1,11 @@
 (* ================================================================ *)
 (* Hella Language Specification                                      *)
-(* Draft 0.2 — updated for Phase 5 fixes: accessors public by       *)
+(* Draft 0.2 — Phase 5 fixes (accessors public by                    *)
+(* default, separate get/set merging, `open` class-only, omitted     *)
+(* `Type` in `has` literals, T-17 `|`/`or` chains + tuple patterns,  *)
+(* types skill `arr`/`vec`/map forms) plus the async extension       *)
+(* (Async-1..Async-13): `async` functions, `task<T>`, `await`,       *)
+(* `spawn`, `scope do ... end`, `yield`.                             *)
 (* default, separate get/set merging, `open` class-only, omitted    *)
 (* `Type` in `has` literals, T-17: `|`/`or` alternative chains +    *)
 (* tuple-pattern `(a,b)` in `match`, types skill: `arr`/`vec` type     *)
@@ -46,6 +51,8 @@ keyword =
     | "any"
     | "arr"
     | "assert"
+    | "async"
+    | "await"
     | "bool"
     | "break"
     | "class"
@@ -87,7 +94,9 @@ keyword =
     | "public"
     | "ref"
     | "return"
+    | "scope"
     | "sealed"
+    | "spawn"
     | "static"
     | "string"
     | "struct"
@@ -98,7 +107,8 @@ keyword =
     | "void"
     | "vec"
     | "while"
-    | "where" ;
+    | "where"
+    | "yield" ;
 
 
 (* ---------------------------------------------------------------- *)
@@ -268,6 +278,7 @@ primary-type =
     | vector-type
     | map-type
     | own-type
+    | task-type
     | parenthesized-type ;
 
 
@@ -342,6 +353,14 @@ own-type =
    passing, `null` never flows into it, `delete` is early destroy + poison,
    scope exit destroys remaining live `own` slots. `own` never nests inside
    other types in phase 1 and `own` fields/globals are rejected. *)
+
+(* `task<T>` (Async-1) is a pending computation handle: the value returned
+   by calling an `async` function, or by `spawn`. Single-await — `await`
+   consumes it exactly once and yields `T`; `task<void>` awaits to no
+   value. `task` is not a user-declarable generic type: only the one-type-
+   argument form is valid, everything else is a sema error. *)
+task-type =
+    "task" , "<" , type , ">" ;
 
 type-modifier =
       "?"
@@ -489,7 +508,18 @@ multiplicative-operator =
 
 unary-expression =
       unary-operator , unary-expression
+    | await-expression
     | postfix-expression ;
+
+(* Async-1: prefix `await`/`spawn` bind at the unary level (like `not`), so
+   `await a + b` needs parentheses. Only legal inside an `async` body;
+   `spawn` additionally requires an enclosing `scope`. Both require an
+   `async`-call-shaped operand. *)
+await-expression =
+    "await" , unary-expression ;
+
+spawn-expression =
+    "spawn" , unary-expression ;
 
 unary-operator =
       "++"
@@ -898,6 +928,18 @@ delete-statement =
     "delete" , expression , statement-terminator ;
 
 
+(* Async-1/Async-5 (section 19a): structured-concurrency scope. Tasks
+   declared inside must be awaited before `end`; the scope joins them. *)
+async-scope-statement =
+    "scope" , block ;
+
+
+(* Async-1: cooperative checkpoint inside an `async` body. Synchronous
+   programs never reference it. *)
+yield-statement =
+    "yield" [ statement-terminator ] ;
+
+
 
 (* ---------------------------------------------------------------- *)
 (* 20. Assertions                                                    *)
@@ -925,12 +967,23 @@ function-declaration =
     [ generic-parameters ] ,
     "(" , [ parameter-list ] , ")" ,
     [ where-clause ] ,
+    [ "async" ] ,
     function-body ;
 
 
 function-body =
       block
     | "initialize" , statement-terminator ;
+
+
+(* Async-1..Async-5 semantics (see section 13 notes): `async` sits between
+   the signature and `do` and stays there in the formatter. An `async`
+   body runs as its own task; calling it from an async body spawns it and
+   yields `task<Ret>`. `await` consumes the handle exactly once inside the
+   enclosing `scope`, and the scope exits only after every task declared
+   inside it was awaited (implicit join). `await`/`spawn`/`yield`/`scope`
+   are errors outside an `async` body; `spawn` additionally requires an
+   enclosing `scope`; `async main` runs as the root task. *)
 
 
 parameter-list =
@@ -1277,12 +1330,50 @@ attribute-arguments =
 
 attribute-argument =
       expression
-    | identifier , ":" , expression ;
+    | identifier , ":" , expression
+    | identifier , "=" , expression ;
 
 
 attributed-declaration =
     { attribute } ,
     top-level-declaration ;
+
+
+(* ---------------------------------------------------------------- *)
+(* 34a. Conditional Compilation (`@cfg`)                              *)
+(* ---------------------------------------------------------------- *)
+
+(* `@cfg(...)` keeps its item only when the condition holds. Evaluation  *)
+(* happens during import expansion, BEFORE semantic analysis, so an      *)
+(* absent item is invisible to sema, codegen, and every AST visitor —    *)
+(* mutually exclusive declarations of the same name never collide.       *)
+(*                                                                       *)
+(* Conditions (v1):                                                      *)
+(*   os = "<name>"      host OS: macos | linux | windows                 *)
+(*   target = "<triple>" exact host triple (aarch64-apple-darwin, …)     *)
+(*   debug              true only for a debug link profile               *)
+(*   debug = false      true only for release / check / LSP              *)
+(*   unix | windows     shorthand for the host OS family                 *)
+(*                                                                       *)
+(* `or` (or `,`) joins conditions: any true condition keeps the item.    *)
+(* Stacking attributes is conjunctive: every `@cfg` must hold. There is   *)
+(* no `and` / `not` in v1 — stack for AND, enumerate for NOT. Unknown     *)
+(* conditions evaluate false (forward compatible: an unrecognized gate    *)
+(* drops its item rather than guessing).                                  *)
+
+cfg-condition =
+      identifier
+    | identifier , "=" , ( string-literal | "true" | "false" ) ;
+
+cfg-arguments =
+    cfg-condition ,
+    { ( "," | "or" ) , cfg-condition } ;
+
+(* `@cfg` is evaluated for `build`/`run`/`install`; `check`, `lint`, and  *)
+(* the language server evaluate with `debug = false` so analysis never    *)
+(* depends on the link profile. The canonical formatter rewrites `or` as  *)
+(* a comma (both mean "any of"); it never rewrites the author's `=` into  *)
+(* `:` or vice versa.                                                    *)
 
 
 (* ---------------------------------------------------------------- *)

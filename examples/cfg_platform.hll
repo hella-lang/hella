@@ -1,0 +1,38 @@
+import std::io
+
+
+// cfg_platform.hll — conditional compilation (`@cfg`, EBNF §34a).
+//
+// The item that survives is chosen during import expansion, before sema,
+// so the two `platform_name` definitions never collide. Build in debug and
+// in release to see the profile-dependent line change.
+@cfg(os = "macos")
+string platform_name() do
+    return "macos"
+end
+
+@cfg(os = "linux")
+string platform_name() do
+    return "linux"
+end
+
+@cfg(os = "windows")
+string platform_name() do
+    return "windows"
+end
+
+// `debug` is true only for a debug link profile; `check`/LSP treat it as
+// false so analysis never depends on the profile.
+@cfg(debug)
+string build_kind() do
+    return "debug"
+end
+
+@cfg(debug = false)
+string build_kind() do
+    return "release"
+end
+
+void main() do
+    println("{platform_name()} {build_kind()}")
+end

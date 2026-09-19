@@ -6,6 +6,17 @@ pub(super) fn program(p: &Program, visit: &mut impl FnMut(&Expr)) {
         item(i, visit);
     }
 }
+
+/// Crate-visible: visit every expression in a single function body (used by
+/// the async reachability analysis, Async-8).
+pub(crate) fn function_exprs(f: &Function, v: &mut impl FnMut(&Expr)) {
+    function(f, v);
+}
+
+/// Crate-visible: visit every expression in a block (Async-8 roots).
+pub(crate) fn block_exprs(b: &Block, v: &mut impl FnMut(&Expr)) {
+    block(b, v);
+}
 fn params(ps: &[Param], v: &mut impl FnMut(&Expr)) {
     for p in ps {
         if let Some(e) = &p.default {
@@ -156,6 +167,8 @@ fn block(b: &Block, v: &mut impl FnMut(&Expr)) {
                 DeferInner::Expr(e) => expr(e, v),
                 DeferInner::Block(b) => block(b, v),
             },
+            Stmt::Scope(b) => block(b, v),
+            Stmt::Yield(_) => {}
             Stmt::Break(_) | Stmt::Continue(_) => {}
         }
     }
@@ -205,6 +218,7 @@ fn expr(e: &Expr, v: &mut impl FnMut(&Expr)) {
         ExprKind::Call { args: a, .. }
         | ExprKind::New { args: a, .. }
         | ExprKind::EnumVariant { args: a, .. } => args(a, v),
+        ExprKind::Await { task, .. } | ExprKind::Spawn { task, .. } => expr(task, v),
         ExprKind::MethodCall {
             object, args: a, ..
         } => {

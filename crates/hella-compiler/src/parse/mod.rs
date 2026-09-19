@@ -886,7 +886,7 @@ impl Parser {
                 self.expect(Token::RParen, "expected `)` after params")?;
                 let body = self.parse_block()?;
                 let span = Span::new(ret_ty.span().start, body.span.end);
-                methods.push(Function{ret_ty, name: mname, name_span: mspan, params, body, visibility: vis, is_static, is_sealed: m_sealed, is_override, is_open: m_open, generic_params: Vec::new(), where_clause: None, span});
+                methods.push(Function{ret_ty, name: mname, name_span: mspan, params, body, visibility: vis, is_static, is_sealed: m_sealed, is_override, is_open: m_open, is_async: false, async_span: None, generic_params: Vec::new(), where_clause: None, span});
             } else {
                 // field
                 // handle const field? EBNF class-member includes constant-declaration: const [type] ident = expr terminator
@@ -968,6 +968,7 @@ impl Parser {
         while self.peek_token() == Some(&Token::At) {
             let start = self.advance().unwrap().span.start;
             let (name, name_span) = self.parse_ident()?;
+            let is_cfg = name == "cfg";
             let mut args = Vec::new();
             if self.consume_if(Token::LParen) {
                 if self.peek_token() != Some(&Token::RParen) {
@@ -987,10 +988,38 @@ impl Parser {
                             }
                         } else { false };
                         if !is_named {
-                            let e = self.parse_expr()?;
-                            args.push(AttributeArg::Expr(e));
+                            // `name = value` (cfg-style: `os = "macos"`).
+                            // The value parses at unary level so `=` never
+                            // cascades into an assignment expression and
+                            // `or` stays a *separator* between conditions
+                            // rather than an operand operator.
+                            let save_eq = self.pos;
+                            let named_eq = if self.peek_token() == Some(&Token::Ident) {
+                                let (n, s) = self.parse_ident().unwrap();
+                                if self.consume_if(Token::Eq) {
+                                    match self.parse_unary() {
+                                        Ok(v) => {
+                                            args.push(AttributeArg::Assign(n, s, v));
+                                            true
+                                        }
+                                        Err(e) => return Err(e),
+                                    }
+                                } else {
+                                    self.pos = save_eq;
+                                    false
+                                }
+                            } else { false };
+                            if !named_eq {
+                                let e = self.parse_expr()?;
+                                args.push(AttributeArg::Expr(e));
+                            }
                         }
-                        if !self.consume_if(Token::Comma) { break; }
+                        // `,` separates attribute arguments; in `@cfg` a
+                        // bare `or` separates altative conditions with the
+                        // same meaning (any true condition keeps the item).
+                        if self.consume_if(Token::Comma) { continue; }
+                        if is_cfg && self.consume_if(Token::Or) { continue; }
+                        break;
                     }
                 }
                 self.expect(Token::RParen, "expected `)` after attribute args")?;
@@ -1620,25 +1649,40 @@ impl Parser {
                 }
             }
         };
-        // Handle generic-type: Named<type,...>
+        // Handle generic-type: Named<type,...> — including `task<T>`
+        // (Async-1: `task<T>` is a pending computation handle).
         if self.peek_token() == Some(&Token::Lt) {
             // Try parse generic args - only if ty is Named
             if let Type::Named(n, s) = ty.clone() {
+                let save = self.pos;
                 self.advance(); // <
                 let mut args = Vec::new();
+                let mut ok = true;
                 if self.peek_token() != Some(&Token::Gt) {
                     loop {
-                        if let Ok(arg) = self.parse_type() {
-                            args.push(arg);
-                        } else { break; }
+                        match self.parse_type() {
+                            Ok(arg) => args.push(arg),
+                            Err(_) => { ok = false; break; }
+                        }
                         if !self.consume_if(Token::Comma) { break; }
                     }
                 }
-                if self.consume_if(Token::Gt) {
+                if ok && self.consume_if(Token::Gt) {
                     let span = Span::new(s.start, self.tokens[self.pos-1].span.end);
-                    ty = Type::Generic(n, args, span);
+                    if n == "task" {
+                        if args.len() != 1 {
+                            return Err(ParseError {
+                                message: format!("`task` takes exactly one type argument, found {}", args.len()),
+                                span,
+                            });
+                        }
+                        ty = Type::Task(Box::new(args.into_iter().next().unwrap()), span);
+                    } else {
+                        ty = Type::Generic(n, args, span);
+                    }
                 } else {
                     // rollback not needed for now
+                    self.pos = save;
                 }
             }
         }
@@ -1954,6 +1998,16 @@ impl Parser {
         }
         self.expect(Token::RParen, "closing `)`")?;
         let where_clause = self.parse_where_clause_opt();
+        // `Ret name(params) [where ...] async do ... end` (Async-1): the
+        // optional `async` marker sits between the signature and the body.
+        // Methods parse their own body below; async methods are added in
+        // Async-2 with sema/codegen support.
+        let is_async = self.consume_if(Token::Async);
+        let async_span = if is_async {
+            Some(self.tokens[self.pos - 1].span)
+        } else {
+            None
+        };
         // function body: block (do ... end) - `initialize` is constructor-only, not free fns
         let body = self.parse_block()?;
         let span = Span::new(start_span.start, body.span.end);
@@ -1968,6 +2022,8 @@ impl Parser {
             is_sealed,
             is_override,
             is_open,
+            is_async,
+            async_span,
             generic_params,
             where_clause,
             span,
@@ -2081,6 +2137,19 @@ impl Parser {
             Some(Token::Const) => {
                 let c = self.parse_const_decl()?;
                 Ok(Stmt::Const(c))
+            }
+            Some(Token::Scope) => {
+                // `scope do ... end` (Async-1): structured-concurrency scope.
+                self.advance(); // scope
+                let b = self.parse_block()?;
+                Ok(Stmt::Scope(b))
+            }
+            Some(Token::Yield) => {
+                // `yield` with optional terminator (Async-1).
+                let start = self.advance().unwrap().span.start;
+                let end = self.tokens.get(self.pos).map(|t| t.span.end).unwrap_or(start);
+                let _ = self.consume_newlines();
+                Ok(Stmt::Yield(Span::new(start, end)))
             }
             Some(Token::Public) | Some(Token::Private) => {
                 // Could be `public const` or `private const` or typed var decl with visibility
@@ -3007,6 +3076,28 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
+        // `await task_expr` (Async-1): prefix wait on a `task<T>` handle.
+        // Binds at unary level (same as `not`/`-`): parses one unary operand
+        // so `await t` works but `await a + b` needs parens.
+        if self.peek_token() == Some(&Token::Await) {
+            let start = self.advance().unwrap().span.start;
+            let task = self.parse_unary()?;
+            let span = Span::new(start, task.span.end);
+            return Ok(Expr {
+                kind: ExprKind::Await { task: Box::new(task), span },
+                span,
+            });
+        }
+        // `spawn callee(args)` / `spawn expr` (Async-1): concurrent child.
+        if self.peek_token() == Some(&Token::Spawn) {
+            let start = self.advance().unwrap().span.start;
+            let task = self.parse_unary()?;
+            let span = Span::new(start, task.span.end);
+            return Ok(Expr {
+                kind: ExprKind::Spawn { task: Box::new(task), span },
+                span,
+            });
+        }
         // closure: | [params] | => expr | block
         if self.peek_token() == Some(&Token::Pipe) {
             let start = self.peek_span().start;

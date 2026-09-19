@@ -91,6 +91,16 @@ pub enum Token {
     Vec,
     #[token("assert")]
     Assert,
+    #[token("async")]
+    Async,
+    #[token("await")]
+    Await,
+    #[token("spawn")]
+    Spawn,
+    #[token("scope")]
+    Scope,
+    #[token("yield")]
+    Yield,
     #[token("bool")]
     Bool,
     #[token("break")]
@@ -364,6 +374,11 @@ impl std::fmt::Display for Token {
             Self::Arr => "arr",
             Self::Vec => "vec",
             Self::Assert => "assert",
+            Self::Async => "async",
+            Self::Await => "await",
+            Self::Spawn => "spawn",
+            Self::Scope => "scope",
+            Self::Yield => "yield",
             Self::Bool => "bool",
             Self::Break => "break",
             Self::Class => "class",

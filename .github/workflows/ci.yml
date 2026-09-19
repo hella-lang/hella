@@ -201,6 +201,43 @@ jobs:
           { [ "${rc[0]}" -eq 0 ] && [ "${rc[1]}" -eq 0 ]; } || fail=1
           exit $fail
 
+      - name: Run async example (structured concurrency + conditional runtime)
+        # Async-13: exercises the thread-backed runtime end to end. The CLI
+        # compiles and links `runtime/hella_async.c` only because this
+        # program actually reaches async code (Async-8/9).
+        run: |
+          fail=0
+          set +e
+          ./target/debug/hella build -f examples/async_basic.hll --force
+          [ $? -eq 0 ] || exit 1
+          ./examples/async_basic | grep -q "a=190 b=45"
+          rc=(${PIPESTATUS[@]})
+          echo "async bin_rc=${rc[0]} grep_rc=${rc[1]}"
+          { [ "${rc[0]}" -eq 0 ] && [ "${rc[1]}" -eq 0 ]; } || fail=1
+          # Synchronous programs must gain no async runtime dependency.
+          if nm -u ./examples/basics 2>/dev/null | grep -qE "hella_task|pthread_create"; then
+            echo "sync binary unexpectedly references the async runtime"
+            fail=1
+          fi
+          exit $fail
+
+      - name: Run cfg example (conditional compilation, both profiles)
+        # `@cfg(debug)` must follow the link profile: debug prints "debug",
+        # release prints "release", and both keep the host OS variant.
+        run: |
+          fail=0
+          ./target/debug/hella build -f examples/cfg_platform.hll --force || exit 1
+          ./examples/cfg_platform | grep -q " debug"
+          rc=(${PIPESTATUS[@]})
+          echo "cfg debug bin_rc=${rc[0]} grep_rc=${rc[1]}"
+          { [ "${rc[0]}" -eq 0 ] && [ "${rc[1]}" -eq 0 ]; } || fail=1
+          ./target/debug/hella build -f examples/cfg_platform.hll --force --release || exit 1
+          ./examples/cfg_platform | grep -q " release"
+          rc=(${PIPESTATUS[@]})
+          echo "cfg release bin_rc=${rc[0]} grep_rc=${rc[1]}"
+          { [ "${rc[0]}" -eq 0 ] && [ "${rc[1]}" -eq 0 ]; } || fail=1
+          exit $fail
+
       - name: Setup smoke test (installed stdlib outside the checkout)
         run: |
           ./target/debug/hella setup --force

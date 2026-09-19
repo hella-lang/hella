@@ -586,6 +586,9 @@ impl<'a> Formatter<'a> {
             .map(|arg| match arg {
                 AttributeArg::Expr(e) => self.fmt_expr_compact(e),
                 AttributeArg::Named(n, _, v) => format!("{}: {}", n, self.fmt_expr_compact(v)),
+                // `@cfg(os = "macos")`: keep the author's `=` spelling so
+                // formatting is round-trip idempotent.
+                AttributeArg::Assign(n, _, v) => format!("{} = {}", n, self.fmt_expr_compact(v)),
             })
             .collect();
         format!("@{}({})", a.name, args.join(", "))
@@ -649,6 +652,7 @@ impl<'a> Formatter<'a> {
             }
             Type::Pointer(el, _) => format!("{}*", self.fmt_type(el)),
             Type::Optional(el, _) => format!("{}?", self.fmt_type(el)),
+            Type::Task(el, _) => format!("task<{}>", self.fmt_type(el)),
         }
     }
 
@@ -759,7 +763,8 @@ impl<'a> Formatter<'a> {
             h = h.replacen(&format!("{}(", f.name), &format!("{}{}(", f.name, generics), 1);
         }
         let where_s = self.fmt_where_clause(&f.where_clause);
-        let compact = format!("{}{}{}){} do", h, params.join(", "), "", where_s);
+        let async_s = if f.is_async { " async" } else { "" };
+        let compact = format!("{}{}{}){} do", h, params.join(", "), "", format!("{}{}", where_s, async_s));
         // The skill's wrapped declaration example wraps generic params AND params.
         if fits(self.indent, &compact, self.opts.max_width) {
             let mut s = compact;
@@ -792,7 +797,7 @@ impl<'a> Formatter<'a> {
             }
             s.push('\n');
         }
-        s.push_str(&format!("{}){} do\n", self.pad_for(0), where_s));
+        s.push_str(&format!("{}){} do\n", self.pad_for(0), format!("{}{}", where_s, async_s)));
         s.push_str(&self.fmt_block_inner(&f.body, 1));
         s.push_str(&format!("{}end", self.pad_for(0)));
         s
@@ -1749,6 +1754,10 @@ impl<'a> Formatter<'a> {
                 DeferInner::Block(b) => format!("defer do\n{}end", self.fmt_block_contents(b)),
             },
             Stmt::Delete(d) => format!("delete {}", self.fmt_expr_wrapped(&d.target, 0)),
+            // `async` preserved immediately before `do` (Async-11): the
+            // formatter must never move it onto its own line.
+            Stmt::Scope(b) => format!("scope do\n{}end", self.fmt_block_contents(b)),
+            Stmt::Yield(_) => "yield".into(),
         }
     }
 
@@ -1885,6 +1894,8 @@ impl<'a> Formatter<'a> {
                 let ac: Vec<String> = args.iter().map(|a| self.fmt_call_arg(a)).collect();
                 format!("new {}({})", self.fmt_type(ty), ac.join(", "))
             }
+            ExprKind::Await { task, .. } => format!("await {}", self.fmt_expr_compact(task)),
+            ExprKind::Spawn { task, .. } => format!("spawn {}", self.fmt_expr_compact(task)),
             ExprKind::MemberAccess { object, field, .. } => {
                 format!("{}.{}", self.fmt_expr_compact(object), field)
             }
@@ -2038,6 +2049,12 @@ impl<'a> Formatter<'a> {
             ExprKind::MapLit { ty, entries } => self.fmt_map_wrapped(ty, entries, e.span, false),
             ExprKind::StructLit { ty, fields } => self.fmt_struct_lit_wrapped(ty, fields, e.span, false),
             ExprKind::Match(m) => self.fmt_match_wrapped(m),
+            ExprKind::Await { task, .. } => {
+                format!("await {}", self.fmt_expr_wrapped(task, extra))
+            }
+            ExprKind::Spawn { task, .. } => {
+                format!("spawn {}", self.fmt_expr_wrapped(task, extra))
+            },
             ExprKind::Closure { params, body, .. } => match body.as_ref() {
                 ClosureBody::Block(b) => {
                     let ps: Vec<String> = params.iter().map(|p| self.fmt_param(p)).collect();
@@ -2313,6 +2330,8 @@ fn stmt_span(st: &Stmt) -> Span {
         Stmt::Continue(d) => d.span,
         Stmt::Defer(d) => d.span,
         Stmt::Delete(d) => d.span,
+        Stmt::Scope(b) => b.span,
+        Stmt::Yield(s) => *s,
     }
 }
 

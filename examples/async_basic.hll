@@ -1,0 +1,35 @@
+import std::io
+import std::task
+
+
+// Async-12 example: structured concurrency in Hella.
+// Prints `a=190 b=45 scope done` — the two workers finish concurrently.
+// An `async` function runs on its own task; calling it from an async body
+// spawns it and returns a `task<int>` handle immediately.
+int worker(int n) async do
+    int s = 0
+    int i = 0
+    while i < n do
+        s = s + i
+        yieldNow()
+        i = i + 1
+    end
+    return s
+end
+
+void main() async do
+    scope do
+        // Two tasks run concurrently.
+        task<int> a = worker(10)
+        task<int> b = worker(20)
+
+        // Await order is free — each join waits for its own task.
+        int rb = await a
+        int ra = await b
+
+        println("a={ra} b={rb}")
+    end
+
+    // The scope exited only after both tasks were awaited.
+    println("scope done")
+end

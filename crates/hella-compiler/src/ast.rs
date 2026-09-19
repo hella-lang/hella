@@ -28,7 +28,12 @@ pub struct Attribute {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttributeArg {
     Expr(Expr),
+    /// `name: value` (colon form, EBNF `attribute-argument`).
     Named(String, Span, Expr),
+    /// `name = value` (equals form). Used by `@cfg(os = "macos")`; kept
+    /// distinct from [`AttributeArg::Named`] so the formatter can round-trip
+    /// the exact spelling the author wrote.
+    Assign(String, Span, Expr),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +73,11 @@ pub struct Function {
     pub is_sealed: bool,
     pub is_override: bool,
     pub is_open: bool,
+    /// `Ret name(...) async do ... end` — runs on its own thread; callers
+    /// get a `task<Ret>` back and must `await` it inside a `scope` (Async-1).
+    /// Sync functions keep `is_async == false`.
+    pub is_async: bool,
+    pub async_span: Option<Span>,
     pub generic_params: Vec<GenericParam>,
     pub where_clause: Option<WhereClause>,
     pub span: Span,
@@ -143,6 +153,11 @@ pub enum Type {
     Optional(Box<Type>, Span), // T? (Phase 2 future)
     /// Owning heap pointer: `own T` (moves, scope-destroyed, never null).
     Own(Box<Type>, Span),
+    /// Pending computation: `task<T>` — the return handle of an `async`
+    /// function call or a `spawn` expression (Async-1). Single-await,
+    /// scope-bound; `T` is the `await` result type (`task<void>` awaits
+    /// to no value).
+    Task(Box<Type>, Span),
 }
 
 impl Type {
@@ -166,7 +181,8 @@ impl Type {
             | Type::Map { span: s, .. }
             | Type::Pointer(_, s)
             | Type::Optional(_, s)
-            | Type::Own(_, s) => *s,
+            | Type::Own(_, s)
+            | Type::Task(_, s) => *s,
         }
     }
     pub fn name(&self) -> String {
@@ -193,6 +209,7 @@ impl Type {
             Type::Pointer(el, _) => format!("{}*", el.name()),
             Type::Optional(el, _) => format!("{}?", el.name()),
             Type::Own(el, _) => format!("own {}", el.name()),
+            Type::Task(el, _) => format!("task<{}>", el.name()),
         }
     }
     pub fn is_void(&self) -> bool {
@@ -432,6 +449,13 @@ pub enum Stmt {
     Continue(ContinueStmt),
     Defer(DeferStmt),
     Delete(DeleteStmt),
+    /// Structured-concurrency scope: `scope do ... end` (Async-1). Child
+    /// tasks created inside must be awaited before the scope exits
+    /// (implicit `join`); awaiting outside the scope is an error.
+    Scope(Block),
+    /// Cooperative yield: `yield` (optional terminator) — parks the current
+    /// task and lets ready siblings run (Async-1/Async-5).
+    Yield(Span),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -706,6 +730,16 @@ pub enum ExprKind {
         args: Vec<CallArg>,
         span: Span,
     },
+    /// Blocking wait: `await task_expr` (Async-1). Joins the child task,
+    /// parks the current task until the child completes, then yields the
+    /// child's return value. Errors when used outside an `async` function
+    /// body or when the task already completed / lives in another scope.
+    Await { task: Box<Expr>, span: Span },
+    /// Concurrent child: `spawn callee(args)` or `spawn block-expr`
+    /// (Async-1/Async-4). Runs the async callee on its own worker thread,
+    /// returns `task<T>` immediately. Must appear inside a `scope` in an
+    /// `async` function (or `async main`); the enclosing scope joins it.
+    Spawn { task: Box<Expr>, span: Span },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

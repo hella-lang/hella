@@ -1,5 +1,11 @@
 //! Phase 2 codegen — LLVM via `inkwell` 0.10 (llvm21-1).
 //! All locals/params are `alloca` in entry block; structs lowered to llvm.struct with GEP.
+//!
+//! Async (Async-6/Async-7): `async` functions run on worker threads through
+//! the `hella_async` runtime (compiled from `runtime/hella_async.c` only
+//! when the program uses async — see Async-8 in the CLI). A `task<T>` value
+//! is an opaque `hella_task_t*` handle: `spawn`/async-call allocates it,
+//! `await` block-joins it and loads the inline result payload.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -80,6 +86,10 @@ pub struct Codegen<'ctx> {
     /// Variables holding maps (`K:V` or `any m = has ... end`). LLVM type is
     /// the map struct `{ [16 x K], [16 x V], i64 len }`.
     map_vars: HashSet<String>,
+    /// Variables holding `task<T>` handles (Async-6). LLVM type is an
+    /// opaque ptr; this map carries the sema `task<T>` for `await` result
+    /// typing.
+    task_vars: HashMap<String, crate::sema::Ty>,
     /// Variables holding strings (`string s = ...`). LLVM type is `ptr`;
     /// tracked so `len()`/`is_empty()` lower instead of falling through to
     /// class-method resolution.
@@ -151,6 +161,12 @@ struct TyInfo {
     /// Default value per parameter (`None` = required); leading entry is
     /// always `None` for the implicit `this`. Filled at call sites.
     param_defaults: Vec<Option<crate::ast::Expr>>,
+    /// `true` for `async` functions (Async-6): the declared LLVM function
+    /// keeps the SYNC signature (params -> Ret) and runs the body inline;
+    /// every call site spawns it on a worker thread instead and gets a
+    /// `task<Ret>` handle back. Stored so call codegen can distinguish
+    /// "call directly" (sync) from "spawn" (async).
+    is_async: bool,
 }
 
 impl<'ctx> Codegen<'ctx> {
@@ -189,6 +205,7 @@ impl<'ctx> Codegen<'ctx> {
             vec_vars: HashSet::new(),
             map_vars: HashSet::new(),
             string_vars: HashSet::new(),
+            task_vars: HashMap::new(),
             extern_int32_rets: HashSet::new(),
             trait_names: HashSet::new(),
             pair_types: HashMap::new(),
@@ -245,6 +262,14 @@ impl<'ctx> Codegen<'ctx> {
         &mut self,
         prog: &Program,
     ) -> Result<(), CodegenError> {
+        // Async-8: compute which declarations the C runtime can actually
+        // reach. Async functions outside that set are never emitted, so a
+        // program that merely *declares* (or imports) async code does not
+        // reference the async runtime and must not link it.
+        let reach = crate::async_req::analyze(prog);
+        let skip_fn = |f: &Function| -> bool {
+            f.is_async && f.name != "main" && !reach.reachable.contains(&f.name)
+        };
         for item in &prog.items {
             let it: &Item = match item {
                 Item::Attributed{attrs: _, item} => item.as_ref(),
@@ -269,7 +294,10 @@ impl<'ctx> Codegen<'ctx> {
                 Item::Attributed{attrs: _, item} => item.as_ref(),
                 other => other,
             };
-            if let Item::Function(f) = it { self.declare_function(f)?; }
+            if let Item::Function(f) = it {
+                if skip_fn(f) { continue; }
+                self.declare_function(f)?;
+            }
         }
         // Dynamic-type tags for trait objects (needs all classes declared).
         self.assign_class_tags();
@@ -279,7 +307,10 @@ impl<'ctx> Codegen<'ctx> {
                 other => other,
             };
             match it {
-                Item::Function(f) => self.codegen_function(f)?,
+                Item::Function(f) => {
+                    if skip_fn(f) { continue; }
+                    self.codegen_function(f)?
+                }
                 Item::Class(c) => {
                     for m in &c.methods { self.codegen_class_method(c, m)?; }
                     for (idx, ctor) in c.constructors.iter().enumerate() { self.codegen_constructor(c, ctor, idx)?; }
@@ -713,6 +744,8 @@ impl<'ctx> Codegen<'ctx> {
                 crate::sema::Ty::Own(ref inner) => {
                     self.own_pair_type(inner).fn_type(&param_llvm, false)
                 }
+                // `task<T>` (Async-6): opaque runtime handle pointer.
+                crate::sema::Ty::Task(_) => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, false),
                 crate::sema::Ty::Array(_) => self.context.i64_type().array_type(16).fn_type(&param_llvm, false),
                 crate::sema::Ty::FixedArray { elem: ref elem, size: ref size } => {
                     let n = size.unwrap_or(16) as u32;
@@ -770,7 +803,7 @@ impl<'ctx> Codegen<'ctx> {
             full_variadic.extend(m.params.iter().map(|p| p.is_variadic));
             let mut full_defaults = vec![None];
             full_defaults.extend(m.params.iter().map(|p| p.default.clone()));
-            let tyinfo = TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults};
+            let tyinfo = TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults, is_async: false};
             methods.insert(m.name.clone(), (func, tyinfo));
         }
         self.class_methods.insert(c.name.clone(), methods);
@@ -837,7 +870,7 @@ impl<'ctx> Codegen<'ctx> {
             full_variadic.extend(op.params.iter().map(|p| p.is_variadic));
             let mut full_defaults = vec![None];
             full_defaults.extend(op.params.iter().map(|p| p.default.clone()));
-            ops.insert(op.op.clone(), (func, TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults}));
+            ops.insert(op.op.clone(), (func, TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults, is_async: false}));
         }
         if !ops.is_empty() { self.class_operators.insert(c.name.clone(), ops); }
         // Inherit parent methods for extends (static dispatch)
@@ -900,7 +933,7 @@ impl<'ctx> Codegen<'ctx> {
             full_variadic.extend(ctor.params.iter().map(|p| p.is_variadic));
             let mut full_defaults = vec![None];
             full_defaults.extend(ctor.params.iter().map(|p| p.default.clone()));
-            ctors.push((func, TyInfo{ret: crate::sema::Ty::Void, params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults}));
+            ctors.push((func, TyInfo{ret: crate::sema::Ty::Void, params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults, is_async: false}));
         }
         if !ctors.is_empty() { self.class_constructors.insert(c.name.clone(), ctors); }
         // Declare destructors: `void (ptr this)`, mangled `Class__dtor`
@@ -910,7 +943,7 @@ impl<'ctx> Codegen<'ctx> {
             let fn_ty = self.context.void_type().fn_type(&[this_ty], false);
             let mangled = format!("{}__dtor{}", c.name, if c.destructors.len()>1 { format!("{}", idx)} else {"".to_string()});
             let func = self.module.add_function(&mangled, fn_ty, None);
-            dtors.push((func, TyInfo{ret: crate::sema::Ty::Void, params: vec![crate::sema::Ty::Struct(c.name.clone())], param_modes: vec![ParamMode::None], param_names: vec!["this".to_string()], param_is_variadic: vec![false], param_defaults: vec![None]}));
+            dtors.push((func, TyInfo{ret: crate::sema::Ty::Void, params: vec![crate::sema::Ty::Struct(c.name.clone())], param_modes: vec![ParamMode::None], param_names: vec!["this".to_string()], param_is_variadic: vec![false], param_defaults: vec![None], is_async: false}));
         }
         if !dtors.is_empty() { self.class_destructors.insert(c.name.clone(), dtors); }
         // Declare properties: getter/setter — allow separate declarations that merge
@@ -935,7 +968,7 @@ impl<'ctx> Codegen<'ctx> {
                     self.module.add_function(&mangled, fn_ty, None)
                 };
                 let mut params = vec![crate::sema::Ty::Struct(c.name.clone())];
-                pg = Some((func, TyInfo{ret: prop_ty.clone(), params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new()}));
+                pg = Some((func, TyInfo{ret: prop_ty.clone(), params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new(), is_async: false}));
             }
             if let Some((ref param,_)) = prop.setter {
                 let setter_ty_raw: crate::sema::Ty = (&param.ty).into();
@@ -950,7 +983,7 @@ impl<'ctx> Codegen<'ctx> {
                     self.module.add_function(&mangled, fn_ty, None)
                 };
                 let mut params = vec![crate::sema::Ty::Struct(c.name.clone()), setter_ty.clone()];
-                ps = Some((func, TyInfo{ret: crate::sema::Ty::Void, params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new()}));
+                ps = Some((func, TyInfo{ret: crate::sema::Ty::Void, params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new(), is_async: false}));
             }
             if let Some(existing) = props.get(&prop.name).cloned() {
                 let mut merged_getter = existing.getter;
@@ -1164,6 +1197,8 @@ impl<'ctx> Codegen<'ctx> {
                         crate::sema::Ty::Own(ref inner) => {
                             self.own_pair_type(inner).fn_type(&param_llvm, false)
                         }
+                        // `task<T>` (Async-6): opaque runtime handle pointer.
+                        crate::sema::Ty::Task(_) => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, false),
                         crate::sema::Ty::Enum(ref n) => {
                             let et = self.enum_types.get(n).unwrap();
                             et.fn_type(&param_llvm, false)
@@ -1219,7 +1254,7 @@ impl<'ctx> Codegen<'ctx> {
                     full_variadic.extend(f.params.iter().map(|p| p.is_variadic));
             let mut full_defaults = vec![None];
             full_defaults.extend(f.params.iter().map(|p| p.default.clone()));
-                    entry.insert(f.name.clone(), (func, TyInfo{ret: ret_ty, params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults}));
+                    entry.insert(f.name.clone(), (func, TyInfo{ret: ret_ty, params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults, is_async: false}));
                 }
                 crate::ast::ExtensionMember::Operator(op) => {
                     let ret_ty = crate::sema::Ty::Int;
@@ -1283,7 +1318,7 @@ impl<'ctx> Codegen<'ctx> {
             let mut full_defaults = vec![None];
             full_defaults.extend(op.params.iter().map(|p| p.default.clone()));
                     let entry = self.class_operators.entry(target.clone()).or_insert_with(HashMap::new);
-                    entry.insert(op.op.clone(), (func, TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults}));
+                    entry.insert(op.op.clone(), (func, TyInfo{ret: ret_ty.clone(), params: param_semas.clone(), param_modes: full_modes, param_names: full_names, param_is_variadic: full_variadic, param_defaults: full_defaults, is_async: false}));
                 }
                 crate::ast::ExtensionMember::Property(prop) => {
                     let prop_ty_raw: crate::sema::Ty = prop.ty.as_ref().map(|t| t.into()).or_else(|| prop.setter.as_ref().map(|(p,_)| (&p.ty).into())).unwrap_or(crate::sema::Ty::Int);
@@ -1304,7 +1339,7 @@ impl<'ctx> Codegen<'ctx> {
                             self.module.add_function(&mangled, fn_ty, None)
                         };
                         let mut params = vec![crate::sema::Ty::Struct(target.clone())];
-                        pg = Some((func, TyInfo{ret: prop_ty.clone(), params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new()}));
+                        pg = Some((func, TyInfo{ret: prop_ty.clone(), params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new(), is_async: false}));
                     }
                     if let Some((ref param,_)) = prop.setter {
                         let setter_ty_raw: crate::sema::Ty = (&param.ty).into();
@@ -1319,7 +1354,7 @@ impl<'ctx> Codegen<'ctx> {
                             self.module.add_function(&mangled, fn_ty, None)
                         };
                         let mut params = vec![crate::sema::Ty::Struct(target.clone()), setter_ty.clone()];
-                        ps = Some((func, TyInfo{ret: crate::sema::Ty::Void, params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new()}));
+                        ps = Some((func, TyInfo{ret: crate::sema::Ty::Void, params: params.clone(), param_modes: vec![ParamMode::None; params.len()], param_names: Vec::new(), param_is_variadic: Vec::new(), param_defaults: Vec::new(), is_async: false}));
                     }
                     let entry = self.class_properties.entry(target.clone()).or_insert_with(HashMap::new);
                     if let Some(existing) = entry.get(&prop.name).cloned() {
@@ -3225,6 +3260,13 @@ impl<'ctx> Codegen<'ctx> {
                 .context
                 .ptr_type(inkwell::AddressSpace::default())
                 .into(),
+            // `task<T>` (Async-6): lowered as an opaque handle pointer
+            // (the runtime's `hella_task_t*`). Sema knows `T`; LLVM only
+            // ever passes the handle by pointer.
+            Type::Task(_, _) => self
+                .context
+                .ptr_type(inkwell::AddressSpace::default())
+                .into(),
             Type::Own(inner, _) => {
                 // Every `own` slot is a pair (uniform with trait objects).
                 let lookup = match inner.as_ref() {
@@ -3361,6 +3403,12 @@ impl<'ctx> Codegen<'ctx> {
                     .ptr_type(inkwell::AddressSpace::default())
                     .into(),
             ),
+            // `task<T>` (Async-6): opaque runtime handle pointer.
+            crate::sema::Ty::Task(_) => Some(
+                self.context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .into(),
+            ),
             crate::sema::Ty::Optional(el) => {
                 let inner = self.llvm_ty_for_sema(el).unwrap();
                 Some(
@@ -3466,7 +3514,45 @@ impl<'ctx> Codegen<'ctx> {
             && f.params.len() == 1
             && f.params[0].name == "args"
             && matches!(&f.params[0].ty, Type::Array(el, _) if matches!(el.as_ref(), Type::String(_)));
-        let fn_ty = if f.name == "main" {
+        let fn_ty = if f.name == "main" && f.is_async {
+            // Async-6 root executor: the user body becomes `__hella_async_main`
+            // (sync LLVM signature); the public `main` wrapper spawns it and
+            // joins, translating `void` -> exit 0 (see `codegen_async_main_wrapper`).
+            let body_params: Vec<inkwell::types::BasicMetadataTypeEnum> = f
+                .params
+                .iter()
+                .map(|p| {
+                    let t: crate::sema::Ty = (&p.ty).into();
+                    let rt = self.resolve_ty_for_codegen(&t);
+                    self.llvm_ty_for_sema(&rt).map(|bt| bt.into()).unwrap()
+                })
+                .collect();
+            let body_ty = if ret_sema == crate::sema::Ty::Void {
+                self.context.void_type().fn_type(&body_params, false)
+            } else {
+                let rt = self.llvm_ty_for_sema(&ret_sema).unwrap_or(self.context.i64_type().into());
+                rt.fn_type(&body_params, false)
+            };
+            let body_fn = self.module.add_function("__hella_async_main", body_ty, None);
+            self.funcs.insert(
+                "__hella_async_main".to_string(),
+                (
+                    body_fn,
+                    TyInfo {
+                        ret: ret_sema.clone(),
+                        params: param_semas.clone(),
+                        param_modes: param_modes.clone(),
+                        param_names: f.params.iter().map(|p| p.name.clone()).collect(),
+                        param_is_variadic: f.params.iter().map(|p| p.is_variadic).collect(),
+                        param_defaults: f.params.iter().map(|p| p.default.clone()).collect(),
+                        is_async: false, // the body runs inline inside the root task
+                    },
+                ),
+            );
+            // Wrapper `main`: C ABI, no params.
+            let ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+            self.context.i32_type().fn_type(&[self.context.i32_type().into(), ptr.into()], false)
+        } else if f.name == "main" {
             let ptr = self.context.ptr_type(inkwell::AddressSpace::default());
             self.context.i32_type().fn_type(&[self.context.i32_type().into(), ptr.into()], false)
         } else {
@@ -3504,6 +3590,8 @@ impl<'ctx> Codegen<'ctx> {
                 crate::sema::Ty::Own(ref inner) => {
                     self.own_pair_type(inner).fn_type(&param_types, is_c_varargs)
                 }
+                // `task<T>` (Async-6): opaque runtime handle pointer.
+                crate::sema::Ty::Task(_) => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_types, is_c_varargs),
                 crate::sema::Ty::Struct(ref n) => {
                     if let Some(pair) = self.trait_pair_of(n) {
                         pair.fn_type(&param_types, is_c_varargs)
@@ -3580,6 +3668,9 @@ impl<'ctx> Codegen<'ctx> {
         };
 
         let func = self.module.add_function(&f.name, fn_ty, None);
+        // Async-6: declare keeps the SYNC signature; the async-ness rides
+        // along in TyInfo so call sites know to spawn instead of call.
+        let is_async_fn = f.is_async;
         self.funcs.insert(
             f.name.clone(),
             (
@@ -3591,6 +3682,7 @@ impl<'ctx> Codegen<'ctx> {
                     param_names: f.params.iter().map(|p| p.name.clone()).collect(),
                     param_is_variadic: f.params.iter().map(|p| p.is_variadic).collect(),
                     param_defaults: f.params.iter().map(|p| p.default.clone()).collect(),
+                    is_async: is_async_fn,
                 },
             ),
         );
@@ -3659,6 +3751,317 @@ impl<'ctx> Codegen<'ctx> {
         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let fn_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), self.context.i64_type().into()], false);
         self.module.add_function("memcpy", fn_ty, None)
+    }
+    /// `hella_task_spawn(entry, arg, result_size)` (Async-7): allocate and
+    /// launch a task. `entry` is `void*(task_handle, arg)`. Declared lazily
+    /// so sync programs never reference the runtime (Async-8).
+    fn get_or_declare_task_spawn(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("hella_task_spawn") { return f; }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let entry_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let fn_ty = ptr_ty.fn_type(&[entry_ty.ptr_type(inkwell::AddressSpace::default()).into(), ptr_ty.into(), i64_ty.into()], false);
+        self.module.add_function("hella_task_spawn", fn_ty, None)
+    }
+    /// `hella_task_join(handle)` (Async-7): block until completion, consume
+    /// exactly once. Lazy for the same reason.
+    fn get_or_declare_task_join(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("hella_task_join") { return f; }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = self.context.i32_type().fn_type(&[ptr_ty.into()], false);
+        self.module.add_function("hella_task_join", fn_ty, None)
+    }
+    /// `hella_task_result(handle, dst, n)` (Async-7): copy out the result
+    /// and free the task. Lazy for the same reason.
+    fn get_or_declare_task_result(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("hella_task_result") { return f; }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = self.context.void_type().fn_type(&[ptr_ty.into(), ptr_ty.into(), self.context.i64_type().into()], false);
+        self.module.add_function("hella_task_result", fn_ty, None)
+    }
+    /// `hella_task_store_inline(handle, src, n)` (Async-7): worker-side
+    /// store of a small (<=16B) result into the task. Lazy as above.
+    fn get_or_declare_task_store_inline(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("hella_task_store_inline") { return f; }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = self.context.void_type().fn_type(&[ptr_ty.into(), ptr_ty.into(), self.context.i64_type().into()], false);
+        self.module.add_function("hella_task_store_inline", fn_ty, None)
+    }
+    /// `hella_task_store_spill(handle, src, n)` (Async-7): worker-side
+    /// store of a large result into the task's heap buffer. Lazy as above.
+    fn get_or_declare_task_store_spill(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("hella_task_store_spill") { return f; }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = self.context.void_type().fn_type(&[ptr_ty.into(), ptr_ty.into(), self.context.i64_type().into()], false);
+        self.module.add_function("hella_task_store_spill", fn_ty, None)
+    }
+    /// `sched_yield()` (Async-6/Async-7): cooperative checkpoint backing
+    /// `yield`. Declared lazily — only async programs reference it, so sync
+    /// binaries never gain the dependency (Async-8). POSIX provides it in
+    /// libc; on Windows the CLI links a small shim (see `hella_rt.c`).
+    fn get_or_declare_sched_yield(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("sched_yield") { return f; }
+        let fn_ty = self.context.i32_type().fn_type(&[], false);
+        self.module.add_function("sched_yield", fn_ty, None)
+    }
+
+    // -- Async lowering (Async-6/Async-7) -----------------------------------
+
+    /// Byte size of an LLVM type for the task result transport. Exact for
+    /// the scalar/struct shapes async functions return (raw-byte copy).
+    fn llvm_byte_size(&self, ty: BasicTypeEnum<'ctx>) -> u64 {
+        match ty {
+            BasicTypeEnum::IntType(it) => ((it.get_bit_width() as u64 + 7) / 8).max(1),
+            BasicTypeEnum::FloatType(ft) => if ft == self.context.f32_type() { 4 } else { 8 },
+            BasicTypeEnum::PointerType(_) => 8,
+            BasicTypeEnum::StructType(st) => {
+                let mut total = 0u64;
+                for i in 0..st.count_fields() {
+                    let fs = self.llvm_byte_size(st.get_field_type_at_index(i).unwrap());
+                    total += fs.max(8);
+                }
+                total
+            }
+            BasicTypeEnum::ArrayType(at) =>
+                at.len() as u64 * self.llvm_byte_size(at.get_element_type().into()),
+            BasicTypeEnum::VectorType(vt) =>
+                vt.get_size() as u64 * self.llvm_byte_size(vt.get_element_type().into()),
+            BasicTypeEnum::ScalableVectorType(vt) =>
+                vt.get_size() as u64 * self.llvm_byte_size(vt.get_element_type().into()),
+        }
+    }
+
+    /// Root executor for `async main` (Async-6): `main` (C ABI, no visible
+    /// params beyond the standard argc/argv pair) spawns
+    /// `__hella_async_main(args...)` as the root task and joins it,
+    /// returning the exit code (`int` main) or 0 (`void` main).
+    fn codegen_async_main_wrapper(
+        &mut self,
+        body_fn: FunctionValue<'ctx>,
+        f: &Function,
+    ) -> Result<(), CodegenError> {
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i32_ty = self.context.i32_type();
+        let i64_ty = self.context.i64_type();
+        let main_fn = self.funcs.get("main").map(|(fv, _)| *fv).unwrap();
+        let entry = self.context.append_basic_block(main_fn, "entry");
+        self.cur_fn = Some(main_fn);
+        self.cur_is_main = true;
+        self.builder.position_at_end(entry);
+        self.vars.push(HashMap::new());
+        self.own_slots.push(Vec::new());
+        self.scope_dtors.push(Vec::new());
+
+        // Capture argv[0] (mirrors the normal main prologue).
+        {
+            let argc = self.builder.build_int_s_extend(
+                main_fn.get_nth_param(0).unwrap().into_int_value(), i64_ty, "argc64").unwrap();
+            let argv = main_fn.get_nth_param(1).unwrap().into_pointer_value();
+            let has = self.builder.build_int_compare(IntPredicate::SGT, argc, i64_ty.const_zero(), "argv0.has").unwrap();
+            let slot0 = unsafe { self.builder.build_gep(ptr_ty, argv, &[i64_ty.const_zero()], "argv0.slot").unwrap() };
+            let s0 = self.builder.build_load(ptr_ty, slot0, "argv0.str").unwrap();
+            let v0 = self.builder.build_select(has, s0, ptr_ty.const_null().into(), "argv0").unwrap();
+            self.builder.build_store(self.argv0_global(), v0).unwrap();
+        }
+
+        // Build body args: `int main(string[] args) async` fills args from
+        // argv[1..] exactly like the sync form.
+        let body_info = self.funcs.get("__hella_async_main").unwrap().1.clone();
+        let mut body_args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+        if f.params.len() == 1 && f.params[0].name == "args" {
+            // [16 x ptr] from argv[1..]
+            let argc = main_fn.get_nth_param(0).unwrap().into_int_value();
+            let argv = main_fn.get_nth_param(1).unwrap().into_pointer_value();
+            let arr_ty = ptr_ty.array_type(16);
+            let arr_alloca = self.builder.build_alloca(arr_ty, "async.main.args").unwrap();
+            let one = i32_ty.const_int(1, false);
+            let cap = i32_ty.const_int(16, false);
+            for i in 0..16u32 {
+                let i_c = i32_ty.const_int(i as u64 + 1, false); // argv[1..]
+                let in_range = self.builder.build_int_compare(IntPredicate::SLT, i_c, argc, "arg.in").unwrap();
+                let slot = unsafe { self.builder.build_gep(ptr_ty, argv, &[i64_ty.const_int(i as u64 + 1, false)], "arg.slot").unwrap() };
+                let loaded = self.builder.build_load(ptr_ty, slot, "arg.v").unwrap();
+                let sel = self.builder.build_select(in_range, loaded, ptr_ty.const_null().into(), "arg.sel").unwrap();
+                let dst = unsafe { self.builder.build_gep(arr_ty, arr_alloca, &[i64_ty.const_zero(), i64_ty.const_int(i as u64, false)], "arg.dst").unwrap() };
+                self.builder.build_store(dst, sel).unwrap();
+            }
+            body_args.push(self.builder.build_load(arr_ty, arr_alloca, "args.load").unwrap().into());
+        }
+        let _ = body_info;
+
+        // ret_size: 0 for void, else size of the LLVM ret type.
+        let ret_sema: crate::sema::Ty = (&f.ret_ty).into();
+        let ret_sema = self.resolve_ty_for_codegen(&ret_sema);
+        let (ret_size, ret_llvm) = if ret_sema == crate::sema::Ty::Void {
+            (0u64, None)
+        } else {
+            let rt = self.llvm_ty_for_sema(&ret_sema).unwrap_or(i64_ty.into());
+            (self.llvm_byte_size(rt), Some(rt))
+        };
+
+        // task = spawn(entry=__async_entry___hella_async_main, ctx, ret_size)
+        // Reuse the generic spawn-call lowering by faking a call: build the
+        // ctx from body_args. (Simpler than a bespoke path: the generic
+        // path generates the trampoline + heap ctx.)
+        let handle = self.codegen_async_spawn_call(body_fn, &TyInfo {
+            ret: ret_sema.clone(),
+            params: vec![],
+            param_modes: vec![],
+            param_names: vec![],
+            param_is_variadic: vec![],
+            param_defaults: vec![],
+            is_async: true,
+        }, body_args, f.span)?;
+        let handle_ptr = handle.into_pointer_value();
+
+        // join + result
+        let join = self.get_or_declare_task_join();
+        self.builder.build_call(join, &[handle_ptr.into()], "async.main.join").unwrap();
+        let res_fn = self.get_or_declare_task_result();
+        let exit: inkwell::values::IntValue = if let Some(rt) = ret_llvm {
+            let slot = self.builder.build_alloca(rt, "async.main.ret").unwrap();
+            self.builder.build_call(res_fn, &[handle_ptr.into(), slot.into(), i64_ty.const_int(ret_size, false).into()], "async.main.result").unwrap();
+            let v = self.builder.build_load(rt, slot, "async.main.ret.load").unwrap().into_int_value();
+            self.builder.build_int_truncate(v, i32_ty, "exit32").unwrap()
+        } else {
+            let scratch = self.builder.build_alloca(i64_ty, "async.main.scratch").unwrap();
+            self.builder.build_call(res_fn, &[handle_ptr.into(), scratch.into(), i64_ty.const_int(0, false).into()], "async.main.result").unwrap();
+            i32_ty.const_int(0, false)
+        };
+        self.emit_global_dtors();
+        self.builder.build_return(Some(&exit)).unwrap();
+
+        self.own_slots.pop();
+        self.scope_dtors.pop();
+        self.vars.pop();
+        self.cur_fn = None;
+        self.cur_is_main = false;
+        if !main_fn.verify(true) {
+            return Err(CodegenError {
+                message: "async main wrapper failed verification".into(),
+                span: f.span,
+            });
+        }
+        Ok(())
+    }
+
+    /// Spawn `func(args)` as a task (Async-6). The async callee keeps its
+    /// SYNC LLVM signature (`params -> Ret`); we box the packed args into a
+    /// per-call heap ctx, generate a static trampoline
+    /// `__async_entry_<callee>` that unpacks, calls the body, stores the
+    /// result into the task (inline <=16B, spill otherwise), frees the ctx,
+    /// and returns null. Then `hella_task_spawn(entry, ctx, ret_size)`
+    /// yields the `task<Ret>` handle.
+    fn codegen_async_spawn_call(
+        &mut self,
+        func: FunctionValue<'ctx>,
+        info: &TyInfo,
+        arg_vals: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>>,
+        span: Span,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        use inkwell::values::BasicMetadataValueEnum as M;
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let callee = func.get_name().to_str().unwrap_or("<async>").to_string();
+
+        // Result transport size (0 for void).
+        let ret_llvm: Option<BasicTypeEnum<'ctx>> = match &info.ret {
+            crate::sema::Ty::Void => None,
+            t => Some(self.llvm_ty_for_sema(t).ok_or(CodegenError {
+                message: format!("async function `{callee}` returns a type with no lowering: {t}"),
+                span,
+            })?),
+        };
+        let ret_size: u64 = ret_llvm.map(|t| self.llvm_byte_size(t)).unwrap_or(0);
+
+        // Context struct: one field per packed arg.
+        let ctx_fields: Vec<BasicTypeEnum<'ctx>> = arg_vals.iter().map(|a| match a {
+            M::IntValue(v) => v.get_type().into(),
+            M::FloatValue(v) => v.get_type().into(),
+            M::PointerValue(v) => v.get_type().into(),
+            M::ArrayValue(v) => v.get_type().into(),
+            M::StructValue(v) => v.get_type().into(),
+            M::VectorValue(v) => v.get_type().into(),
+            M::ScalableVectorValue(v) => v.get_type().into(),
+            M::MetadataValue(_) => i64_ty.into(),
+        }).collect();
+        let ctx_ty = self.context.struct_type(&ctx_fields, false);
+
+        // Heap-allocate + fill the ctx (freed by the trampoline).
+        let malloc = self.get_or_declare_malloc();
+        let ctx_size = self.llvm_byte_size(ctx_ty.into()).max(1);
+        let ctx_ptr = self.builder
+            .build_call(malloc, &[i64_ty.const_int(ctx_size, false).into()], "async.ctx.malloc")
+            .unwrap().try_as_basic_value().basic().unwrap().into_pointer_value();
+        for (i, a) in arg_vals.iter().enumerate() {
+            let val: BasicValueEnum = match a {
+                M::IntValue(v) => (*v).into(),
+                M::FloatValue(v) => (*v).into(),
+                M::PointerValue(v) => (*v).into(),
+                M::ArrayValue(v) => (*v).into(),
+                M::StructValue(v) => (*v).into(),
+                M::VectorValue(v) => (*v).into(),
+                M::ScalableVectorValue(v) => (*v).into(),
+                M::MetadataValue(_) => continue,
+            };
+            let gep = self.builder.build_struct_gep(ctx_ty, ctx_ptr, i as u32, "async.ctx.field").unwrap();
+            self.builder.build_store(gep, val).unwrap();
+        }
+
+        // Generate (or reuse) the static trampoline.
+        let entry_name = format!("__async_entry_{callee}");
+        let entry_fn = if let Some(f) = self.module.get_function(&entry_name) {
+            f
+        } else {
+            let entry_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+            let ef = self.module.add_function(&entry_name, entry_ty, None);
+            let entry_bb = self.context.append_basic_block(ef, "entry");
+            let saved_pos = self.builder.get_insert_block();
+            self.builder.position_at_end(entry_bb);
+            let task_h = ef.get_nth_param(0).unwrap().into_pointer_value();
+            let ctx_in = ef.get_nth_param(1).unwrap().into_pointer_value();
+            let mut call_args: Vec<M> = Vec::with_capacity(ctx_fields.len());
+            for (i, ft) in ctx_fields.iter().enumerate() {
+                let gep = self.builder.build_struct_gep(ctx_ty, ctx_in, i as u32, "async.arg").unwrap();
+                let lv = self.builder.build_load(*ft, gep, "async.arg.load").unwrap();
+                call_args.push(lv.into());
+            }
+            let call = self.builder.build_call(func, &call_args, "async.body").unwrap();
+            if let Some(rt) = ret_llvm {
+                let val = call.try_as_basic_value().basic().ok_or(CodegenError {
+                    message: format!("async body of `{callee}` returned void unexpectedly"),
+                    span,
+                })?;
+                let slot = self.builder.build_alloca(rt, "async.ret.slot").unwrap();
+                self.builder.build_store(slot, val).unwrap();
+                let n = i64_ty.const_int(ret_size, false);
+                let store_fn = if ret_size <= 16 {
+                    self.get_or_declare_task_store_inline()
+                } else {
+                    self.get_or_declare_task_store_spill()
+                };
+                self.builder.build_call(store_fn, &[task_h.into(), slot.into(), n.into()], "async.store").unwrap();
+            }
+            let free = self.get_or_declare_free();
+            self.builder.build_call(free, &[ctx_in.into()], "async.ctx.free").unwrap();
+            self.builder.build_return(Some(&ptr_ty.const_null())).unwrap();
+            if let Some(bb) = saved_pos { self.builder.position_at_end(bb); }
+            if !ef.verify(true) {
+                return Err(CodegenError {
+                    message: format!("async trampoline for `{callee}` failed verification"),
+                    span,
+                });
+            }
+            ef
+        };
+
+        let spawn = self.get_or_declare_task_spawn();
+        let handle = self.builder.build_call(spawn, &[
+            entry_fn.as_global_value().as_pointer_value().into(),
+            ctx_ptr.into(),
+            i64_ty.const_int(ret_size, false).into(),
+        ], "async.spawn").unwrap().try_as_basic_value().basic().unwrap();
+        Ok(handle)
     }
 
     // NOTE (real stdlib): no `is_stdlib_io_intrinsic` /
@@ -4347,6 +4750,20 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn codegen_function(&mut self, f: &Function) -> Result<(), CodegenError> {
+        // Async-6: `async main` splits into a body fn (`__hella_async_main`,
+        // normal lowering of the user code) plus a C-ABI `main` wrapper that
+        // spawns the body as the root task and joins it.
+        if f.name == "main" && f.is_async {
+            let body_name = "__hella_async_main";
+            let body_f = self.funcs.get(body_name).map(|(fv, _)| *fv).unwrap();
+            // Codegen the user body into `__hella_async_main` (as an ordinary
+            // sync function).
+            let mut body_copy = f.clone();
+            body_copy.name = body_name.to_string();
+            body_copy.is_async = false;
+            self.codegen_function(&body_copy)?;
+            return self.codegen_async_main_wrapper(body_f, f);
+        }
         let (func, info) =
             self.funcs.get(&f.name).cloned().ok_or(CodegenError {
                 message: format!("undeclared func {}", f.name),
@@ -4368,7 +4785,7 @@ impl<'ctx> Codegen<'ctx> {
         // `__hella_argv0` global for `__hella_progname()` — all main forms
         // declare `(i32 argc, ptr argv)` at LLVM level, so this works with
         // or without a Hella-level `args` parameter.
-        if f.name == "main" {
+        if f.name == "main" && !self.funcs.contains_key("__hella_async_main") {
             let i64_ty = self.context.i64_type();
             let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
             let argc = self.builder.build_int_s_extend(func.get_nth_param(0).unwrap().into_int_value(), i64_ty, "argc64").unwrap();
@@ -4535,6 +4952,13 @@ impl<'ctx> Codegen<'ctx> {
                     crate::sema::Ty::Own(inner) => {
                         self.own_pair_type(inner.as_ref()).const_zero().into()
                     }
+                    // `task<T>` (Async-6): null handle (never observed: sema
+                    // rejects un-awaited tasks, so this is unreachable).
+                    crate::sema::Ty::Task(_) => self
+                        .context
+                        .ptr_type(inkwell::AddressSpace::default())
+                        .const_null()
+                        .into(),
                     crate::sema::Ty::Array(_) => self
                         .context
                         .i64_type()
@@ -4636,6 +5060,7 @@ impl<'ctx> Codegen<'ctx> {
             crate::sema::Ty::Own(inner) => {
                 Some(self.own_pair_type(inner.as_ref()).const_zero().into())
             }
+            crate::sema::Ty::Task(_) => Some(self.context.ptr_type(inkwell::AddressSpace::default()).const_null().into()),
             crate::sema::Ty::Array(_) => Some(self.context.i64_type().array_type(16).const_zero().into()),
             crate::sema::Ty::FixedArray { elem, size } => {
                 let n = size.unwrap_or(16) as u32;
@@ -5943,6 +6368,10 @@ impl<'ctx> Codegen<'ctx> {
                 if matches!(&d.ty, Type::String(_)) {
                     self.string_vars.insert(d.name.clone());
                 }
+                // Track `task<T>` handles for `await` result typing (Async-6).
+                if let Type::Task(el, _) = &d.ty {
+                    self.task_vars.insert(d.name.clone(), crate::sema::Ty::Task(Box::new((el.as_ref()).into())));
+                }
                 // Track class locals with destructors for RAII scope-exit calls.
                 // `this` is the borrowed receiver, never owned: skip it so a
                 // method/dtor body never destroys its own receiver.
@@ -6151,6 +6580,13 @@ impl<'ctx> Codegen<'ctx> {
                             .ptr_type(inkwell::AddressSpace::default())
                             .const_null()
                             .into(),
+                        // `task<T>` (Async-6): null handle (sema rejects
+                        // un-initialized task reads via the escape check).
+                        Type::Task(_, _) => self
+                            .context
+                            .ptr_type(inkwell::AddressSpace::default())
+                            .const_null()
+                            .into(),
                         Type::Optional(el, _) => {
                             let inner_zero: BasicValueEnum = match el.as_ref() {
                                 Type::Int(_) => self
@@ -6350,6 +6786,19 @@ impl<'ctx> Codegen<'ctx> {
                 Ok(false)
             }
             Stmt::Block(b) => self.codegen_block(b),
+            // `scope do ... end` (Async-6): at codegen a scope is a plain
+            // block — the join is structural (sema forced every task to be
+            // awaited inside), so no runtime barrier is emitted here.
+            Stmt::Scope(b) => self.codegen_block(b),
+            // `yield` (Async-6): cooperative checkpoint. Thread-backed
+            // tasks yield the OS thread (`sched_yield`); the declaration is
+            // lazy so sync programs never reference it (Async-8).
+            Stmt::Yield(span) => {
+                let f = self.get_or_declare_sched_yield();
+                self.builder.build_call(f, &[], "async.yield").unwrap();
+                let _ = span;
+                Ok(false)
+            }
             Stmt::Return(r) => {
                 self.emit_all_defers()?;
                 // Evaluate the return operand BEFORE destructors run. The
@@ -7840,6 +8289,12 @@ impl<'ctx> Codegen<'ctx> {
                         // Positional prefix, named reorder, default fill.
                         arg_vals.extend(self.pack_call_args(args, &info, 0)?);
                     }
+                    // Async-6: an `async` callee is never invoked inline.
+                    // Spawn its body on a worker thread and return the
+                    // `task<Ret>` handle immediately; `await` joins it.
+                    if info.is_async {
+                        return self.codegen_async_spawn_call(func, &info, arg_vals, expr.span);
+                    }
                     let call = self.builder.build_call(func, &arg_vals, "call").unwrap();
                     let vk = call.try_as_basic_value();
                     if vk.is_basic() { return Ok(vk.basic().unwrap()); } else { return Ok(self.context.i64_type().const_int(0,false).into()); }
@@ -8537,6 +8992,50 @@ impl<'ctx> Codegen<'ctx> {
                 } else { Err(CodegenError{message: "`super` outside class".into(), span: expr.span}) }
             }
             ExprKind::Paren(inner) => self.codegen_expr(inner),
+            // `await t` (Async-6): block-join the task, then copy out the
+            // inline result. `task<T>` values are opaque ptr handles; the
+            // result type comes from `task_vars` (decl-site tracking) or
+            // infer_expr_ty.
+            ExprKind::Await { task, span } => {
+                let handle = self.codegen_expr(task)?;
+                let handle_ptr = handle.into_pointer_value();
+                // join
+                let join = self.get_or_declare_task_join();
+                self.builder.build_call(join, &[handle_ptr.into()], "async.join").unwrap();
+                // result typing
+                let t_ty = self.infer_expr_ty(task).unwrap_or(crate::sema::Ty::Any);
+                match t_ty {
+                    crate::sema::Ty::Task(inner) => match inner.as_ref() {
+                        crate::sema::Ty::Void => {
+                            // task<void>: join, free, yield no value (i64 0
+                            // filler; callers treat `await` as an expr stmt).
+                            let res_fn = self.get_or_declare_task_result();
+                            let scratch = self.builder.build_alloca(self.context.i64_type(), "async.void.scratch").unwrap();
+                            self.builder.build_call(res_fn, &[handle_ptr.into(), scratch.into(), self.context.i64_type().const_int(0, false).into()], "async.result").unwrap();
+                            Ok(self.context.i64_type().const_int(0, false).into())
+                        }
+                        inner_t => {
+                            let rt = self.llvm_ty_for_sema(inner_t).ok_or(CodegenError {
+                                message: format!("`await` result type has no lowering: {inner_t}"),
+                                span: *span,
+                            })?;
+                            let n = self.llvm_byte_size(rt);
+                            let slot = self.builder.build_alloca(rt, "async.ret").unwrap();
+                            let res_fn = self.get_or_declare_task_result();
+                            self.builder.build_call(res_fn, &[handle_ptr.into(), slot.into(), self.context.i64_type().const_int(n, false).into()], "async.result").unwrap();
+                            Ok(self.builder.build_load(rt, slot, "async.result.load").unwrap())
+                        }
+                    },
+                    _ => Err(CodegenError {
+                        message: "`await` requires a `task<T>` handle".into(),
+                        span: *span,
+                    }),
+                }
+            }
+            // `spawn f(args)` (Async-6): identical to an async call — the
+            // Call arm already spawns async callees; `spawn` is the explicit
+            // form for readability inside `scope`.
+            ExprKind::Spawn { task, .. } => self.codegen_expr(task),
             ExprKind::New { ty, args, .. } => {
                 // Heap construction: `new Type(args)` -> `own Type` pair.
                 let inner_name = match ty {
@@ -9335,6 +9834,12 @@ impl<'ctx> Codegen<'ctx> {
         match &expr.kind {
             ExprKind::Ident(name) => {
                 let lookup = name.rsplit("::").next().unwrap_or(name);
+                // `task<T>` (Async-6): handles lower to an opaque ptr, so
+                // the decl-site registration must win over the generic
+                // pointer decode below.
+                if let Some(t) = self.task_vars.get(name).or_else(|| self.task_vars.get(lookup)) {
+                    return Ok(t.clone());
+                }
                 // Vectors lower as anonymous structs; report the vec type
                 // instead of attempting struct-name resolution (which would
                 // fail to find them in `struct_types`).
@@ -9501,6 +10006,29 @@ impl<'ctx> Codegen<'ctx> {
                 Ok(crate::sema::Ty::Map { key: Box::new(k), value: Box::new(v) })
             }
             ExprKind::Paren(inner) => self.infer_expr_ty(inner),
+            ExprKind::Call { callee, .. } => {
+                // Async-6: calls to known functions return the declared
+                // type (async callees yield `task<Ret>`).
+                if let Some((_, info)) = self.funcs.get(callee.as_str()) {
+                    if info.is_async {
+                        return Ok(crate::sema::Ty::Task(Box::new(info.ret.clone())));
+                    }
+                    return Ok(info.ret.clone());
+                }
+                Err(CodegenError{message: format!("cannot infer type of call `{callee}`"), span: expr.span})
+            }
+            ExprKind::Await { task, .. } => {
+                match self.infer_expr_ty(task)? {
+                    crate::sema::Ty::Task(inner) => Ok(*inner),
+                    _ => Err(CodegenError{message: "`await` on non-task".into(), span: expr.span}),
+                }
+            }
+            ExprKind::Spawn { task, .. } => {
+                match self.infer_expr_ty(task)? {
+                    t @ crate::sema::Ty::Task(_) => Ok(t),
+                    _ => Err(CodegenError{message: "`spawn` on non-async call".into(), span: expr.span}),
+                }
+            }
             _ => Err(CodegenError{message: "cannot infer type of this expr for struct GEP".into(), span: expr.span}),
         }
     }

@@ -341,6 +341,8 @@ struct Ctx {
     bases: Vec<PathBuf>,
     visited: HashSet<PathBuf>,
     errors: Vec<ImportError>,
+    /// `@cfg(debug)` truthiness for this expansion (see [`crate::cfg`]).
+    debug_mode: bool,
 }
 
 /// Inline `import` items recursively (textual inclusion before sema).
@@ -352,13 +354,24 @@ struct Ctx {
 /// `files` is the entry file plus every successfully resolved import —
 /// the complete source set a build depends on (used for rebuild checks).
 pub fn expand_imports(program: Program, importer: &Path) -> Expanded {
+    expand_imports_with_cfg(program, importer, false)
+}
+
+/// [`expand_imports`] with an explicit `debug` flag for `@cfg(debug)`
+/// (the CLI passes `true` only for debug link profiles; `check`/LSP and
+/// `--release` pass `false`, so analysis never depends on the link mode).
+pub fn expand_imports_with_cfg(program: Program, importer: &Path, debug_mode: bool) -> Expanded {
     let mut ctx = Ctx {
         bases: search_bases(importer),
         visited: HashSet::new(),
         errors: Vec::new(),
+        debug_mode,
     };
     let span = program.span;
-    let items = expand_items(program.items, importer, &mut ctx);
+    let mut items = expand_items(program.items, importer, &mut ctx);
+    // Entry file's own `@cfg(...)` items (imports above already filtered
+    // the imported files' item lists).
+    crate::cfg::apply_cfg(&mut items, ctx.debug_mode);
     let mut files: Vec<PathBuf> = ctx.visited.into_iter().collect();
     files.push(importer.to_path_buf());
     files.sort();
@@ -440,7 +453,10 @@ fn expand_items(
                 continue;
             }
         };
-        let sub_items = expand_items(sub.items, &path, ctx);
+        let mut sub_items = expand_items(sub.items, &path, ctx);
+        // `@cfg(...)`: drop conditionally-absent items before sema, so no
+        // conditional declaration reaches analysis or codegen.
+        crate::cfg::apply_cfg(&mut sub_items, ctx.debug_mode);
         if let Some(ref syms) = imp.symbols {
             let wanted: HashSet<String> = syms.iter().map(|(s, _)| s.clone()).collect();
             for it in sub_items {

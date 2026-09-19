@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 #[cfg(test)]
 mod tests;
-mod walk;
+pub(crate) mod walk;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Warning {

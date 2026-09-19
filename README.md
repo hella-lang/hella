@@ -96,6 +96,10 @@ A few things that make Hella Hella:
 - **Classes** with `this`, `initialize` constructors, `open`/`override`/`sealed`, traits + `implements`, and `get`/`set` properties.
 - **Generics with `where` bounds**, `distinct`/`typedef` types, `extend` blocks, closures, string interpolation (`"hi {name}"`), and `extern "c"` for calling C.
 - **`defer`** runs when its scope exits, on every path.
+- **`@cfg(...)`** compiles items conditionally: `@cfg(os = "macos")`,
+  `@cfg(target = "aarch64-apple-darwin")`, `@cfg(debug)` / `@cfg(debug = false)`,
+  joined with `or` (or `,`); stacking attributes means AND. The condition is
+  resolved during import expansion, so absent items never reach sema or codegen.
 
 ## Examples
 
@@ -118,6 +122,8 @@ cargo run -p hella -- build -f examples/basics.hll && ./examples/basics; echo $?
 | `default_args.hll` | Default parameter values and `named:` arguments |
 | `own_heap.hll` | Heap ownership (`own`, `new`, `delete`, moves, trait upcasts) |
 | `trait_objects.hll` | Trait objects and dynamic dispatch |
+| `async_basic.hll` | Structured concurrency: `async` functions, `task<T>`, `spawn`, `await`, `scope do ... end`, `yield` |
+| `cfg_platform.hll` | Conditional compilation: `@cfg(os = "...")`, `@cfg(debug)` |
 | `types_ints.hll` / `types_arr.hll` / `types_vec.hll` / `types_map.hll` / `types_methods.hll` | Integer widths, fixed arrays (incl. slicing), vectors, maps, methods |
 
 The exit code of each example is its answer; `basics` exits with `230`, `abstraction` with `233`, and so on.
@@ -132,6 +138,7 @@ hella/
 │   └── hella-lsp/       # the language server
 ├── examples/            # .hll example programs
 ├── stdlib/              # standard library, written in Hella itself
+├── runtime/             # C runtime sources (Windows shim + async task runtime)
 └── references/          # language spec and design notes
 ```
 
@@ -143,7 +150,7 @@ The grammar in `references/ebnf-0.1.txt` is authoritative. Also see `references/
 
 ## Status
 
-The core language (phases 0-5) compiles to native code: structs, classes, traits, enums, pattern matching, generics, closures, string interpolation, and C interop all work end to end. The gap list in `SKILL.md` tracks what remains.
+The core language (phases 0-5) compiles to native code: structs, classes, traits, enums, pattern matching, generics, closures, string interpolation, and C interop all work end to end. Structured concurrency is also in: `async` functions run as thread-backed tasks with `task<T>` handles, `await`/`spawn`/`scope do ... end` enforce single-await and scope-bound joins at compile time, and the async runtime (`runtime/hella_async.c`) is compiled and linked only when a program actually reaches async code — a synchronous binary gains no scheduler symbols. `import std::task` adds `yieldNow()`, `sleepMs()`, and `cancelled()`. Not yet async: I/O (a blocking libc call inside an `async` body still blocks that task's thread), worker-thread scheduling, channels/select. The gap list in `SKILL.md` tracks what remains.
 
 ## License
 
