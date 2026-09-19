@@ -120,10 +120,11 @@ fn eval_arg(arg: &AttributeArg, debug_mode: bool, triple: &str, os: &str) -> boo
                     // Bare identifier: truthy set of known predicates.
                     match name.as_str() {
                         "debug" => debug_mode,
-                        "windows" | "unix" => {
-                            (name.as_str() == "windows") == (os == "windows")
-                                || (name.as_str() == "unix" && os != "windows")
-                        }
+                        "windows" => os == "windows",
+                        // POSIX family: everything that is not Windows. An
+                        // unrecognized host (`unknown`) counts as neither,
+                        // so platform-specific code is never guessed.
+                        "unix" => os != "windows" && os != "unknown",
                         _ => false,
                     }
                 }
@@ -195,6 +196,26 @@ mod tests {
         let b = cfg_attr("@cfg(debug = false)");
         assert!(!eval_cfg(&b, true, None));
         assert!(eval_cfg(&b, false, None));
+    }
+
+    #[test]
+    fn unix_and_windows_predicates_are_exclusive() {
+        let unix = cfg_attr("@cfg(unix)");
+        let win = cfg_attr("@cfg(windows)");
+        match host_os() {
+            "windows" => {
+                assert!(!eval_cfg(&unix, true, None));
+                assert!(eval_cfg(&win, true, None));
+            }
+            "unknown" => {
+                assert!(!eval_cfg(&unix, true, None));
+                assert!(!eval_cfg(&win, true, None));
+            }
+            _ => {
+                assert!(eval_cfg(&unix, true, None));
+                assert!(!eval_cfg(&win, true, None));
+            }
+        }
     }
 
     #[test]
