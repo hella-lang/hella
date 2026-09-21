@@ -2374,13 +2374,14 @@ impl<'ctx> Codegen<'ctx> {
         self.unify_int_operands_with_unsigned(l, r, false)
     }
 
-    /// Max elements in a vector buffer (MVP fixed capacity; `push` past it
-    /// traps via `abort`).
-    const VEC_CAP: u32 = 16;
+    /// Max elements in a vector buffer (fixed capacity for now; `push` past it
+    /// traps via `abort`). Raised 16→256 as A2 working relief for compiler
+    /// sources; heap-growable `{ptr,len,cap}` is the follow-up.
+    const VEC_CAP: u32 = 256;
 
-    /// Max entries in a map (MVP fixed capacity; insert past it traps via
-    /// `abort`, mirroring `push`).
-    const MAP_CAP: u32 = 16;
+    /// Max entries in a map (fixed capacity for now; insert past it traps via
+    /// `abort`, mirroring `push`). Raised 16→256 with VEC_CAP.
+    const MAP_CAP: u32 = 256;
 
     /// Vector struct type `{ [CAP x E], i64 len }` for element LLVM type E.
     /// Anonymous structs are structurally uniqued by LLVM, so rebuilding per
