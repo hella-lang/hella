@@ -21,3 +21,5 @@ Policy: commit every single change; don't get stuck; get working first, optimize
 
 ## Log
 - 2026-09-21: branch created, roadmap noted. Starting A4.
+- 2026-09-21: A4 done (unsigned zext helper + unify, u32/i32 extern returns, %lld). Committed.
+- 2026-09-21: A2 partial (working-first): VEC/MAP cap 16->256 committed. Found: `v.len()`/`v[i]`/`v.pop()`-as-stmt do NOT lower through `ref` params (only `push`/`return v.pop()` verify); caller-side `while v.len()>0 do v.pop() end` on locals works. Full heap-growable vec + ref-method inference fix deferred to follow-up; not blocking A3.
