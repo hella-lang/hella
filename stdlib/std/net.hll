@@ -15,7 +15,6 @@
 // buffer), pass with its length; `tcpRecv` returns bytes read (0 = peer
 // closed, -1 = error) — only `buf[0..n]` is valid. Fds must be closed with
 // `tcpClose` (listeners and accepted sockets alike).
-
 extern "c" from "hella_sync" do
     int hella_tcp_connect(string ip, int port)
     int hella_tcp_listen(int port)
@@ -23,6 +22,8 @@ extern "c" from "hella_sync" do
     int hella_tcp_send(int fd, string buf, int n)
     int hella_tcp_recv(int fd, string buf, int n)
     void hella_tcp_close(int fd)
+    int hella_net_nonblock(int fd)
+    int hella_net_poll(int fd, int events, int timeoutMs)
 end
 
 /// Connects to IPv4 `ip`:`port`; returns the fd or -1.
@@ -54,4 +55,30 @@ end
 /// Closes `fd` (listener or connection; no further use).
 void tcpClose(int fd) do
     hella_tcp_close(fd)
+end
+
+/// Readiness mask bits for `tcpPoll` (B3 event loops).
+int pollRead() do
+    return 1
+end
+
+/// Writable bit for `tcpPoll`.
+int pollWrite() do
+    return 2
+end
+
+/// Flips `fd` to non-blocking (B3); returns 0 on success, -1 on error.
+/// A non-blocking `tcpRecv` returns -1 when no data is ready (EAGAIN) —
+/// pair with `tcpPoll` instead of blocking.
+int tcpSetNonblock(int fd) do
+    return hella_net_nonblock(fd)
+end
+
+/// Waits up to `timeoutMs` (clamped 0..60s) for `events` readiness on
+/// `fd` (B3; `pollRead()`/`pollWrite()` bits). Returns a readiness mask
+/// (1 readable/HUP, 2 writable, 4 error), 0 on timeout, -1 on error.
+/// Loop over a vec of fds for multi-connection servers without parking
+/// a thread per connection (see `examples/net_poll.hll`).
+int tcpPoll(int fd, int events, int timeoutMs) do
+    return hella_net_poll(fd, events, timeoutMs)
 end

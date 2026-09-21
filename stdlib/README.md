@@ -153,6 +153,12 @@ without its `import` is a sema error (`undefined function`) by design.
     peer close). IP literals only (no DNS); caller-owned string buffers.
     Blocking parks the task thread — serve each fd on its own task
     (see `examples/net_echo.hll`). Evented I/O is future work.
+  - Non-blocking + readiness (B3 event loops): `tcpSetNonblock(fd)`,
+    `tcpPoll(fd, events, timeoutMs)` (mask 1 readable/HUP, 2 writable,
+    4 error; 0 timeout, -1 error; `pollRead()`/`pollWrite()` bits).
+    Loop over a vec of non-blocking fds in one task instead of parking
+    a thread per connection (see `examples/net_poll.hll`). True
+    multi-fd/one-syscall poll and io_uring/kqueue backends are future.
 - `std::terminal::ansi` — `stdlib/std/terminal/ansi.hll`
   - Plain `const string` values, no functions, no FFI: SGR styles
     (`RESET BOLD DIM ITALIC UNDERLINE ...`), standard + bright foreground

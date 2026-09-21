@@ -125,6 +125,7 @@ cargo run -p hella -- build -f examples/basics.hll && ./examples/basics; echo $?
 | `async_basic.hll` | Structured concurrency: `async` functions, `task<T>`, `spawn`, `await`, `scope do ... end`, `yield` |
 | `sync_chan.hll` | Mutex + bounded channels: producer/consumer across tasks (`std::sync`, `std::chan`) |
 | `net_echo.hll` | Blocking TCP echo server + client (`std::net`, `std::time`) |
+| `net_poll.hll` | Single-threaded poll-loop echo server: non-blocking fds + `tcpPoll` readiness (B3 event loop) |
 | `systems_ptr.hll` | Raw pointers: `&x` address-of, `*p` load/store (`--target` selects the LLVM triple) |
 | `cfg_platform.hll` | Conditional compilation: `@cfg(os = "...")`, `@cfg(debug)` |
 | `types_ints.hll` / `types_arr.hll` / `types_vec.hll` / `types_map.hll` / `types_methods.hll` | Integer widths, fixed arrays (incl. slicing), vectors, maps, methods |

@@ -23,6 +23,7 @@
 #include <time.h>
 #include <sched.h>
 #include <errno.h>
+#include <poll.h>
 #endif
 
 /* Shared task-state foundation (thread/mutex/cond impl, task struct, TLS
@@ -376,6 +377,84 @@ void hella_tcp_close(int64_t fd) {
     closesocket((SOCKET)fd);
 #else
     close((int)fd);
+#endif
+}
+
+/* ── non-blocking + readiness poll (B3, working-first event loop) ──
+ *
+ * `hella_net_nonblock(fd)` flips a socket to non-blocking (fcntl
+ * O_NONBLOCK / ioctlsocket FIONBIO); `hella_net_poll(fd, events,
+ * timeoutMs)` waits up to timeoutMs for readiness (poll/WSAPoll):
+ * returns a mask (1 readable incl. HUP, 2 writable, 4 error), 0 on
+ * timeout, -1 on error/closed. Single-fd keeps the Hella surface trivial
+ * (no array marshalling); loop over a vec of fds for multi-connection
+ * servers (see examples/net_poll.hll). True multi-fd/one-syscall poll
+ * and io_uring/kqueue backends are future work.
+ */
+
+int hella_net_nonblock(int64_t fd) {
+    if (fd < 0) return -1;
+#ifdef _WIN32
+    {
+        u_long mode = 1;
+        return ioctlsocket((SOCKET)fd, FIONBIO, &mode);
+    }
+#else
+    {
+        int flags = fcntl((int)fd, F_GETFL, 0);
+        if (flags < 0) return -1;
+        return fcntl((int)fd, F_SETFL, flags | O_NONBLOCK);
+    }
+#endif
+}
+
+int64_t hella_net_poll(int64_t fd, int64_t events, int64_t timeoutMs) {
+    if (fd < 0) return -1;
+    if (timeoutMs < 0) timeoutMs = 0;
+    if (timeoutMs > 60000) timeoutMs = 60000;
+#ifdef _WIN32
+    {
+        WSAPOLLFD pfd;
+        int r;
+        pfd.fd = (SOCKET)fd;
+        pfd.events = 0;
+        if (events & 1) pfd.events |= POLLRDNORM | POLLRDBAND | POLLHUP;
+        if (events & 2) pfd.events |= POLLWRNORM;
+        pfd.revents = 0;
+        r = WSAPoll(&pfd, 1, (INT)timeoutMs);
+        if (r < 0) return -1;
+        if (r == 0) return 0;
+        {
+            int64_t mask = 0;
+            if (pfd.revents & (POLLRDNORM | POLLRDBAND | POLLHUP)) mask |= 1;
+            if (pfd.revents & POLLWRNORM) mask |= 2;
+            if (pfd.revents & (POLLERR | POLLNVAL)) mask |= 4;
+            return mask;
+        }
+    }
+#else
+    {
+        struct pollfd pfd;
+        int r;
+        pfd.fd = (int)fd;
+        pfd.events = 0;
+        if (events & 1) pfd.events |= POLLIN | POLLHUP;
+        if (events & 2) pfd.events |= POLLOUT;
+        pfd.revents = 0;
+        r = poll(&pfd, 1, (int)timeoutMs);
+        if (r < 0) {
+            if (errno == EINTR) return 0;
+            return -1;
+        }
+        if (r == 0) return 0;
+        {
+            int64_t mask = 0;
+            if (pfd.revents & (POLLIN | POLLHUP)) mask |= 1;
+            if (pfd.revents & POLLOUT) mask |= 2;
+            if (pfd.revents & (POLLERR | POLLNVAL)) mask |= 4;
+            return mask;
+        }
+    }
 #endif
 }
 
