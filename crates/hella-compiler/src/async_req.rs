@@ -171,6 +171,26 @@ pub fn uses_async_runtime(prog: &Program) -> bool {
     analyze(prog).needed
 }
 
+/// True when `prog` must link the sync runtime (`runtime/hella_sync.c`,
+/// B1 mutex + channels). Detection is declaration-based: any `extern`
+/// function named `hella_mutex_*` / `hella_chan_*` (declared by
+/// `std::sync` / `std::chan`) pulls it in. Pure-Hella programs pay nothing.
+pub fn uses_sync_runtime(prog: &Program) -> bool {
+    for item in &prog.items {
+        let it = unwrap_attr(item);
+        if let Item::Extern(ext) = it {
+            for mem in &ext.members {
+                if let ExternMember::Function { name, .. } = mem {
+                    if name.starts_with("hella_mutex_") || name.starts_with("hella_chan_") {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

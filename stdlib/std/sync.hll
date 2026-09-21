@@ -1,0 +1,39 @@
+// std::sync — mutex primitives for Hella (B1).
+// Import via: import std::sync
+//
+// Thin wrappers over `runtime/hella_sync.c` (linked only when this module
+// is imported). Mutexes are opaque handles (`any` ptr): create → lock /
+// unlock → destroy. Non-recursive; locking twice from the same thread
+// deadlocks (same as pthreads). Keep `bool+ref/out` errors: lock/unlock
+// abort on misuse (null handle) — fatal-assert policy like the async
+// runtime — rather than returning status codes.
+//
+// Use to guard `std::rand` globals or any shared state across `spawn`ed
+// tasks. One mutex per shared resource; hold it for the shortest span.
+
+extern "c" from "hella_sync" do
+    any hella_mutex_create()
+    void hella_mutex_lock(any handle)
+    void hella_mutex_unlock(any handle)
+    void hella_mutex_destroy(any handle)
+end
+
+/// Creates a mutex; destroy with `mutexDestroy` when done.
+any mutexCreate() do
+    return hella_mutex_create()
+end
+
+/// Locks `m`, blocking until held.
+void mutexLock(any m) do
+    hella_mutex_lock(m)
+end
+
+/// Unlocks `m`.
+void mutexUnlock(any m) do
+    hella_mutex_unlock(m)
+end
+
+/// Destroys `m` (must be unlocked; no further use).
+void mutexDestroy(any m) do
+    hella_mutex_destroy(m)
+end

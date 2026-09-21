@@ -1574,13 +1574,21 @@ impl<'ctx> Codegen<'ctx> {
                     if ret_is_c_int {
                         self.extern_int32_rets.insert(name.clone());
                     }
-                    let param_tys: Vec<crate::sema::Ty> = params.iter().filter(|p| !(p.is_variadic && p.name.is_empty())).map(|p| {
-                        let base: crate::sema::Ty = (&p.ty).into();
-                        if p.is_variadic {
-                            crate::sema::Ty::Array(Box::new(base))
-                        } else { base }
+                    // B1 fix: `ref`/`out` extern params (e.g. `rand_s(ref int)`,
+                    // channel recv) lower to opaque pointers, mirroring Hella
+                    // `ref`/`out` (declare_function). Previously the mode was
+                    // ignored so callers passed a pointer against an i64 slot
+                    // and any forwarding wrapper failed LLVM verification.
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let param_llvm: Vec<inkwell::types::BasicMetadataTypeEnum> = params.iter().filter(|p| !(p.is_variadic && p.name.is_empty())).map(|p| {
+                        if p.mode != ParamMode::None {
+                            ptr_ty.into()
+                        } else {
+                            let base: crate::sema::Ty = (&p.ty).into();
+                            let t = if p.is_variadic { crate::sema::Ty::Array(Box::new(base)) } else { base };
+                            self.llvm_ty_for_sema(&t).map(|bt| bt.into()).unwrap_or_else(|| ptr_ty.into())
+                        }
                     }).collect();
-                    let param_llvm: Vec<inkwell::types::BasicMetadataTypeEnum> = param_tys.iter().filter_map(|t| self.llvm_ty_for_sema(t).map(|bt| bt.into())).collect();
                     let fn_ty = match ret_ty {
                         crate::sema::Ty::Void => self.context.void_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::Int if wide_int_ret => self.context.i64_type().fn_type(&param_llvm, is_c_varargs),
@@ -1600,6 +1608,10 @@ impl<'ctx> Codegen<'ctx> {
                         crate::sema::Ty::Bool => self.context.bool_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::Char => self.context.i32_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::String => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, is_c_varargs),
+                        // B1 fix: `any`/pointer/function extern returns are
+                        // opaque pointers (previously fell through to void,
+                        // so sync handles arrived as null).
+                        crate::sema::Ty::Any | crate::sema::Ty::Pointer(_) | crate::sema::Ty::Function(_, _) => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::Float => self.context.f32_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::Double => self.context.f64_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::Struct(_) | crate::sema::Ty::Enum(_) | crate::sema::Ty::Generic(_,_) => {

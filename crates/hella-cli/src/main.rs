@@ -28,6 +28,11 @@ const HELLA_RT_C: &str = include_str!("../../../runtime/hella_rt.c");
 // (Async-8/Async-9): a synchronous program must not gain scheduler
 // symbols or async runtime dependencies.
 const HELLA_ASYNC_C: &str = include_str!("../../../runtime/hella_async.c");
+// Sync runtime (`runtime/hella_sync.c`, B1 mutex + channels). Compiled and
+// linked ONLY when the program declares `hella_mutex_*`/`hella_chan_*`
+// externs (i.e. imports `std::sync`/`std::chan`): sync-free programs gain
+// no pthread dependency beyond what async already requires.
+const HELLA_SYNC_C: &str = include_str!("../../../runtime/hella_sync.c");
 
 /// Hella brand green #00A693 as an ANSI truecolor style.
 fn brand_style() -> Style {
@@ -1454,13 +1459,15 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // pull the runtime in. Decided before the freshness check because the
     // runtime set is part of what identifies the binary.
     let needs_async = hella_compiler::async_req::uses_async_runtime(&program);
+    // B1: sync runtime (mutex + channels) only when declared (std::sync/chan).
+    let needs_sync = hella_compiler::async_req::uses_sync_runtime(&program);
 
     // ── Freshness ────────────────────────────────────────────────────
     // Skip codegen+link when the binary is newer than every source file
     // (entry + resolved imports) and the build stamp still matches this
     // profile and toolchain version. `run` relies on this: its binary
     // persists between invocations and only rebuilds on change.
-    if !opts.force && is_fresh(&exe_path, &source_files, opts.release, needs_async) {
+    if !opts.force && is_fresh(&exe_path, &source_files, opts.release, needs_async, needs_sync) {
         pb.finish_with_message("Finished");
         status(
             &pb,
@@ -1576,6 +1583,38 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
             link.arg("-pthread");
         }
     }
+    // B1: compile + link the sync runtime (mutex + channels) only when the
+    // program declares `hella_mutex_*`/`hella_chan_*` externs (i.e. imports
+    // `std::sync`/`std::chan`). Shares `-pthread` with the async runtime.
+    if needs_sync {
+        let s_src = obj_path.with_file_name("hella_sync_gen.c");
+        let s_obj = obj_path.with_file_name("hella_sync_gen.o");
+        if let Err(e) = fs::write(&s_src, HELLA_SYNC_C) {
+            pb.abandon();
+            return Err(miette::miette!("failed to write {}: {e}", s_src.display()));
+        }
+        extra_paths.push(s_src.clone());
+        extra_paths.push(s_obj.clone());
+        let mut cc = Command::new(&linker);
+        cc.arg("-c").arg(&s_src).arg("-o").arg(&s_obj);
+        if !cfg!(windows) {
+            cc.arg("-pthread");
+        }
+        let cc_status = cc.status().map_err(|e| {
+            pb.abandon();
+            miette::miette!("failed to invoke {linker} for the sync runtime: {e}")
+        })?;
+        if !cc_status.success() {
+            pb.abandon();
+            return Err(miette::miette!(
+                "compiling the sync runtime failed with {linker}"
+            ));
+        }
+        link.arg(&s_obj);
+        if !needs_async && !cfg!(windows) {
+            link.arg("-pthread");
+        }
+    }
     link.arg(&obj_path).arg("-o").arg(&exe_path);
     // Windows: `scanf`/`printf`-family names in the UCRT headers are inline
     // wrappers that forward to `__stdio_common_*`; a Hella object referencing
@@ -1633,7 +1672,7 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // Record what produced this binary so a later invocation can prove
     // freshness without recompiling (profile + toolchain version; sources
     // are compared by mtime against the binary itself).
-    write_build_stamp(&exe_path, opts.release, needs_async);
+    write_build_stamp(&exe_path, opts.release, needs_async, needs_sync);
 
     pb.finish_with_message("Finished");
     status(
@@ -1763,32 +1802,33 @@ fn stamp_path(exe: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
-fn stamp_contents(release: bool, needs_async: bool) -> String {
+fn stamp_contents(release: bool, needs_async: bool, needs_sync: bool) -> String {
     format!(
-        "profile={}\ntoolchain=hella {}\nasync={}\n",
+        "profile={}\ntoolchain=hella {}\nasync={}\nsync={}\n",
         if release { "release" } else { "debug" },
         env!("CARGO_PKG_VERSION"),
         // Async-9: the linked runtime set is part of what produced the
         // binary, so a sync<->async transition must rebuild even when no
-        // source mtime changed.
+        // source mtime changed. Same for the B1 sync runtime.
         if needs_async { "runtime" } else { "none" },
+        if needs_sync { "runtime" } else { "none" },
     )
 }
 
-fn write_build_stamp(exe: &Path, release: bool, needs_async: bool) {
-    let _ = fs::write(stamp_path(exe), stamp_contents(release, needs_async));
+fn write_build_stamp(exe: &Path, release: bool, needs_async: bool, needs_sync: bool) {
+    let _ = fs::write(stamp_path(exe), stamp_contents(release, needs_async, needs_sync));
 }
 
 /// True when `exe` exists, is newer than every source file, and its stamp
 /// matches this profile + toolchain version. Anything else (missing binary
 /// or stamp, profile/version switch, touched source) means rebuild.
-fn is_fresh(exe: &Path, sources: &[PathBuf], release: bool, needs_async: bool) -> bool {
+fn is_fresh(exe: &Path, sources: &[PathBuf], release: bool, needs_async: bool, needs_sync: bool) -> bool {
     let exe_mtime = match fs::metadata(exe).and_then(|m| m.modified()) {
         Ok(t) => t,
         Err(_) => return false,
     };
     match fs::read_to_string(stamp_path(exe)) {
-        Ok(contents) if contents == stamp_contents(release, needs_async) => {}
+        Ok(contents) if contents == stamp_contents(release, needs_async, needs_sync) => {}
         _ => return false,
     }
     sources.iter().all(|s| {
