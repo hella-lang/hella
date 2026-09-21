@@ -1,0 +1,57 @@
+// std::net — blocking TCP for Hella (B2).
+// Import via: import std::net
+//
+// Thin wrappers over `runtime/hella_sync.c` (linked only when
+// `std::sync`/`std::chan`/`std::time`/`std::net` is imported).
+// Sockets are `int` fds (-1 = error, `bool+ref/out` errors, no exceptions).
+// IPv4 literals only (`127.0.0.1`, `0.0.0.0`); hostname DNS is future work.
+//
+// BLOCKING: every call parks its task's thread to completion (same honesty
+// as `std::task`: nothing here is non-blocking). For concurrency, serve
+// each accepted fd on its own `spawn`ed task and fan results through a
+// `std::chan` channel (see `examples/net_echo.hll`). Evented I/O is B3.
+//
+// Buffers are caller-owned `string`s: `allocateString(n)` (or any heap
+// buffer), pass with its length; `tcpRecv` returns bytes read (0 = peer
+// closed, -1 = error) — only `buf[0..n]` is valid. Fds must be closed with
+// `tcpClose` (listeners and accepted sockets alike).
+
+extern "c" from "hella_sync" do
+    int hella_tcp_connect(string ip, int port)
+    int hella_tcp_listen(int port)
+    int hella_tcp_accept(int fd)
+    int hella_tcp_send(int fd, string buf, int n)
+    int hella_tcp_recv(int fd, string buf, int n)
+    void hella_tcp_close(int fd)
+end
+
+/// Connects to IPv4 `ip`:`port`; returns the fd or -1.
+int tcpConnect(string ip, int port) do
+    return hella_tcp_connect(ip, port)
+end
+
+/// Listens on all interfaces, `port`; returns the fd or -1.
+int tcpListen(int port) do
+    return hella_tcp_listen(port)
+end
+
+/// Accepts one connection on listener `fd` (blocks); returns the fd or -1.
+int tcpAccept(int fd) do
+    return hella_tcp_accept(fd)
+end
+
+/// Sends `n` bytes of `buf`; returns bytes sent or -1.
+int tcpSend(int fd, string buf, int n) do
+    return hella_tcp_send(fd, buf, n)
+end
+
+/// Receives up to `n` bytes into `buf`; returns bytes read, 0 on peer
+/// close, -1 on error.
+int tcpRecv(int fd, string buf, int n) do
+    return hella_tcp_recv(fd, buf, n)
+end
+
+/// Closes `fd` (listener or connection; no further use).
+void tcpClose(int fd) do
+    hella_tcp_close(fd)
+end

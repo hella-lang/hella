@@ -1568,8 +1568,12 @@ impl<'ctx> Codegen<'ctx> {
                     // Exempted: libc functions whose real return is
                     // size_t/long (`strlen`, `fread`, `fwrite`, `ftell`),
                     // which stay i64 (non-negative values read correctly).
+                    // Also exempted: Hella runtime helpers (`hella_*`),
+                    // whose C signatures use int64_t throughout (B2: wall
+                    // clock micros/millis would otherwise truncate to i32).
                     let wide_int_ret = matches!(ret_ty, crate::sema::Ty::Int)
-                        && matches!(name.as_str(), "strlen" | "fread" | "fwrite" | "ftell");
+                        && (matches!(name.as_str(), "strlen" | "fread" | "fwrite" | "ftell")
+                            || name.starts_with("hella_"));
                     let ret_is_c_int = matches!(ret_ty, crate::sema::Ty::Int) && !wide_int_ret;
                     if ret_is_c_int {
                         self.extern_int32_rets.insert(name.clone());

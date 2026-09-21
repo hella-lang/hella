@@ -28,11 +28,16 @@ const HELLA_RT_C: &str = include_str!("../../../runtime/hella_rt.c");
 // (Async-8/Async-9): a synchronous program must not gain scheduler
 // symbols or async runtime dependencies.
 const HELLA_ASYNC_C: &str = include_str!("../../../runtime/hella_async.c");
-// Sync runtime (`runtime/hella_sync.c`, B1 mutex + channels). Compiled and
-// linked ONLY when the program declares `hella_mutex_*`/`hella_chan_*`
-// externs (i.e. imports `std::sync`/`std::chan`): sync-free programs gain
-// no pthread dependency beyond what async already requires.
+// Sync runtime (`runtime/hella_sync.c`: B1 mutex + channels, B2 wall-clock
+// + blocking TCP). Compiled and linked ONLY when the program declares
+// `hella_mutex_*`/`hella_chan_*`/`hella_wall_*`/`hella_tcp_*` externs
+// (i.e. imports `std::sync`/`std::chan`/`std::time`/`std::net`): programs
+// without them gain no pthread/Winsock dependency.
 const HELLA_SYNC_C: &str = include_str!("../../../runtime/hella_sync.c");
+// Shared task-state header included by both runtimes (B1/B2): written next
+// to whichever generated .c files are compiled so `#include "hella_task.h"`
+// resolves. The TLS slot + cancellation live in the sync runtime.
+const HELLA_TASK_H: &str = include_str!("../../../runtime/hella_task.h");
 
 /// Hella brand green #00A693 as an ANSI truecolor style.
 fn brand_style() -> Style {
@@ -1459,8 +1464,11 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // pull the runtime in. Decided before the freshness check because the
     // runtime set is part of what identifies the binary.
     let needs_async = hella_compiler::async_req::uses_async_runtime(&program);
-    // B1: sync runtime (mutex + channels) only when declared (std::sync/chan).
-    let needs_sync = hella_compiler::async_req::uses_sync_runtime(&program);
+    // B1: sync runtime (mutex + channels, B2 wall-clock + TCP + sleep/yield)
+    // only when declared (std::sync/chan/time/net/task-sleep). The async
+    // runtime depends on it (TLS slot + sleep/yield live there), so async
+    // implies sync.
+    let needs_sync = hella_compiler::async_req::uses_sync_runtime(&program) || needs_async;
 
     // ── Freshness ────────────────────────────────────────────────────
     // Skip codegen+link when the binary is newer than every source file
@@ -1561,6 +1569,14 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
             pb.abandon();
             return Err(miette::miette!("failed to write {}: {e}", a_src.display()));
         }
+        // Shared header for `#include "hella_task.h"` (same dir resolves;
+        // cleaned with the other generated files below).
+        let task_hdr = obj_path.with_file_name("hella_task.h");
+        if let Err(e) = fs::write(&task_hdr, HELLA_TASK_H) {
+            pb.abandon();
+            return Err(miette::miette!("failed to write {}: {e}", task_hdr.display()));
+        }
+        extra_paths.push(task_hdr);
         extra_paths.push(a_src.clone());
         extra_paths.push(a_obj.clone());
         let mut cc = Command::new(&linker);
@@ -1593,6 +1609,14 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
             pb.abandon();
             return Err(miette::miette!("failed to write {}: {e}", s_src.display()));
         }
+        // Shared header for `#include "hella_task.h"` (same contents in
+        // both blocks; harmless to write twice when both runtimes link).
+        let task_hdr = obj_path.with_file_name("hella_task.h");
+        if let Err(e) = fs::write(&task_hdr, HELLA_TASK_H) {
+            pb.abandon();
+            return Err(miette::miette!("failed to write {}: {e}", task_hdr.display()));
+        }
+        extra_paths.push(task_hdr);
         extra_paths.push(s_src.clone());
         extra_paths.push(s_obj.clone());
         let mut cc = Command::new(&linker);
@@ -1630,6 +1654,14 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     #[cfg(windows)]
     if let Some(legacy) = windows_legacy_stdio_lib() {
         link.arg(&legacy);
+    }
+    // B2: the sync runtime's TCP helpers need Winsock on Windows. System
+    // SDK import libs resolve through link.exe's default search, so the
+    // bare name suffices (unlike the MSVC-dir legacy_stdio shim above).
+    // POSIX needs nothing extra (sockets live in libc).
+    #[cfg(windows)]
+    if needs_sync {
+        link.arg("ws2_32.lib");
     }
     // Linux does not fold libm into libc: `-lm` is required wherever
     // `std::math` (or any `from "libm"` extern) may appear. The system
