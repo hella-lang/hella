@@ -21,14 +21,19 @@ without its `import` is a sema error (`undefined function`) by design.
 - `std::math` — `stdlib/std/math.hll`
   - `double sqrt(double x)`, `sin`/`cos`/`tan`, `pow`, `floor`/`ceil`/`round`,
     `log`/`exp`, `fabs`, `fmin`/`fmax`, `atan2` via `libm`
-  - `int abs(int x)`, `min`/`max`, `clamp`, `absf`/`minf`/`maxf` wrappers
+  - `int abs(int x)`, `min`/`max`, `clamp`, `absf`/`minf`/`maxf` wrappers,
+    `double clampf(v, lo, hi)` (via `fmin`/`fmax`, so no double comparison
+    lowering is needed)
 - `std::str` — `stdlib/std/str.hll`
   - `int len(string s)`, `bool isEmpty`, `bool equals`/`int compare`,
     `bool contains`/`startsWith`/`endsWith`, `string clone`/`substring`
   - `indexOf(hay, needle)`, `indexOfFrom(hay, needle, start)`, `lastIndexOf`:
     byte offsets, `-1` on miss. Empty needle matches start/end. Negative search
     start clamps to 0; start beyond length returns -1, even for empty needle.
-  - `trim(s)` / `isAsciiSpace(c)` — ASCII space, tab, LF, CR, VT, FF only.
+  - `trim(s)` / `trimStart` / `trimEnd` / `isAsciiSpace(c)` — ASCII space,
+    tab, LF, CR, VT, FF only.
+  - `toUpper(s)` / `toLower(s)` — ASCII letters only; other bytes pass through.
+  - `isDigit(c)` / `isAlpha(c)` / `isAlphaNum(c)` — ASCII classification.
   - `splitNext(s, sep, ref cursor)` — initialize cursor to 0; call while it is
     nonnegative. Returns one field, updates cursor, sets -1 after the last field.
     Preserves leading/adjacent/trailing empty fields. Empty separator returns s
@@ -43,10 +48,25 @@ without its `import` is a sema error (`undefined function`) by design.
     allowed; rejects whitespace, empty/sign-only input, prefixes, separators,
     trailing junk and overflow. Returns false **and resets value to 0** on failure.
     Checks before multiply/subtract, including -9223372036854775808; no libc parser.
+  - `string toString(int v)` — exact decimal text for every 64-bit int
+    (bounded `%lld` `snprintf` into a 21-byte buffer; `%lld` is 64-bit on
+    every platform, unlike interpolation's `%ld`).
 - `std::env` — `stdlib/std/env.hll`
   - `string getEnv(string name)` (getenv + "" on miss, `string is null` now allowed), `bool hasEnv`, `void setEnv`/`unsetEnv` (setenv/unsetenv), `string cwd()` (getcwd + calloc)
+  - `string progName()` — `argv[0]` as the parent exec'd it (compiler-provided
+    `__hella_progname`; no libc symbol involved despite the `from "libc"` header)
+  - `void exitProcess(int code)` — immediate `exit(code)`; deferred cleanup
+    does not run, so reserve it for fatal paths
 - `std::fs` — `stdlib/std/fs.hll`
   - `bool exists(string path)` (access), `string readFile`/`void writeFile`/`appendFile`/`removeFile` (fopen/fseek/ftell/fread/fwrite/remove)
+  - `int fileSize(string path)` — bytes via `fseek`/`ftell`, or `-1` when
+    the file cannot be opened
+- `std::path` — `stdlib/std/path.hll` (pure Hella over `std::str`)
+  - `joinPath(a, b)` (exactly one `/`, empty sides pass through),
+    `basename(p)` (trailing slashes ignored; root/empty yield `""`),
+    `dirname(p)` (no slash yields `"."`; root yields `"/"`),
+    `extension(p)` (`"a.tar.gz"` → `"gz"`; dotfiles/dotless/trailing-dot yield `""`)
+  - `/`-separated only (no Windows `\` handling); composes with `std::fs` paths
 - `std::vector` — `stdlib/std/vector.hll` (pure Hella; named `vector` because
   `vec` is a compiler keyword and cannot be an import segment)
   - int vec: `iLen`/`iIsEmpty`/`iContains`/`iFirst`/`iLast`, `iPush`/`iPop`
@@ -56,7 +76,11 @@ without its `import` is a sema error (`undefined function`) by design.
     `contains` method hangs on ptr-element vecs)
   - double vec: `dLen`, `dPush` (`ref`) only (`contains` miscompiles f64,
     `+` has no double overload)
-  - no `*Clear`: `clear()` fails LLVM verification even on locals
+  - no `*Clear`/`*Sort`/`*Reverse`: `clear()` fails LLVM verification even
+    on locals, and indexing (`v[i]`, `v[i] = x`) plus `v.len()` do not lower
+    through `ref` params — only `push`/`pop` method calls do. Clear with a
+    caller-side `while v.len() > 0 do iPop(ref v) end` loop or by rebinding
+    to a fresh literal; sort/reverse need compiler support first
 - `std::map` — `stdlib/std/map.hll` (pure Hella, read-only)
   - `si*` (string:int), `ii*` (int:int), `ss*` (string:string):
     `Len`/`IsEmpty` (methods) + `Has`/`GetOr` (`for`-in loops — keyed
@@ -65,7 +89,8 @@ without its `import` is a sema error (`undefined function`) by design.
     calls do not codegen
 - `std::fmt` — `stdlib/std/fmt.hll`
   - `join(sep, parts)` (via `sJoin`), `repeat(s, n)`, `padStart(s, width)`,
-    `padEnd(s, width)` — checked-size allocations and pure Hella copying loops,
+    `padEnd(s, width)`, `padCenter(s, width)` (extra space goes right) —
+    checked-size allocations and pure Hella copying loops,
     no format strings or interpolation buffers. Widths are bytes; padding uses
     spaces and never truncates. Nonpositive repeat counts yield `""`.
     Output-size overflow and allocation failure assert rather than wrap/truncate.
@@ -103,6 +128,15 @@ without its `import` is a sema error (`undefined function`) by design.
     exposed until scope cancellation semantics settle).
   - Honest scope: these are cooperative primitives. `sleepMs` parks one
     task; nothing here turns blocking libc I/O into non-blocking I/O.
+- `std::terminal::ansi` — `stdlib/std/terminal/ansi.hll`
+  - Plain `const string` values, no functions, no FFI: SGR styles
+    (`RESET BOLD DIM ITALIC UNDERLINE ...`), standard + bright foreground
+    (`RED GREEN ... BRIGHT_RED ...`) and background (`BG_RED ...`) colors,
+    `FG_DEFAULT`/`BG_DEFAULT`, cursor movement and screen control
+    (`CURSOR_UP/DOWN/FORWARD/BACK/HOME`, `ERASE_LINE`, `ERASE_DISPLAY_ALL`,
+    `HIDE_CURSOR`/`SHOW_CURSOR`, alternate-screen enter/exit).
+  - Pair with `std::io`: `println("{RED}error{RESET}")`. Non-TTY output
+    keeps the raw bytes; gate on your own TTY detection when that matters.
 
 Import examples:
 
@@ -111,9 +145,12 @@ import std::io
 import std::io::{print, println}
 ```
 
-Selective imports keep extern blocks, but currently **drop helper dependencies**.
-Use whole-module imports for the higher-level APIs above (`import std::str`, not
-`import std::str::{trim}`). Simple IO selective imports remain usable.
+Selective imports keep the wanted symbols plus everything they reference
+(the resolver closes over call/identifier references, so `import std::str::{trim}`
+still brings `substring`/`allocateString`, and `import std::rand::{flip}` still
+brings the generator globals), and the module's `extern` blocks always ride along.
+Unrelated declarations stay out, so importing two modules that define the same
+helper name selectively does not collide.
 
 ## Migration from typed formatting / IO helpers
 
@@ -189,13 +226,16 @@ cargo build -p hella
 ./examples/stdlib_fmt
 ./target/debug/hella build --force -f examples/stdlib_rand.hll
 ./examples/stdlib_rand   # golden sequence; must pass on every platform
+./target/debug/hella build --force -f examples/stdlib_path.hll
+./examples/stdlib_path
 printf 'Ada\n42\n' | ./target/debug/hella run --force -f examples/stdlib_io.hll
 ```
 
 `crates/hella-compiler/tests/stdlib.rs` uses the public lexer/parser/import/sema/
-object APIs and a real C linker. It builds/runs all eight stdlib examples in debug
-and release, checks exact output, exercises long/blank/EOF input, and checks fatal
-size-overflow guards. It uses checkout imports and isolated scratch files, no
+object APIs and a real C linker. It builds/runs all ten stdlib examples in debug
+and release, checks exact output, exercises long/blank/EOF input, checks fatal
+size-overflow guards, and checks selective imports keep transitive helpers
+(`trim` + `toString` + `join` + an `ansi` const + `flip` with its globals). It uses checkout imports and isolated scratch files, no
 installed stdlib or prebuilt CLI; binaries have a ten-second timeout. Requires LLVM
 and `clang` (or `HELLA_LINKER`).
 

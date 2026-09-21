@@ -2463,7 +2463,8 @@ impl<'ctx> Codegen<'ctx> {
     fn sema_ty_is_unsigned(ty: &crate::sema::Ty) -> bool {
         matches!(
             ty,
-            crate::sema::Ty::SizedInt { signed: false, .. } | crate::sema::Ty::UInt
+            crate::sema::Ty::SizedInt { signed: false, .. }
+                | crate::sema::Ty::UInt
         )
     }
 

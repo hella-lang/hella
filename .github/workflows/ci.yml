@@ -205,6 +205,10 @@ jobs:
           rc=(${PIPESTATUS[@]})
           echo "rand bin_rc=${rc[0]} grep_rc=${rc[1]}"
           { [ "${rc[0]}" -eq 0 ] && [ "${rc[1]}" -eq 0 ]; } || fail=1
+          ./examples/stdlib_path | grep -q "path ok"
+          rc=(${PIPESTATUS[@]})
+          echo "path bin_rc=${rc[0]} grep_rc=${rc[1]}"
+          { [ "${rc[0]}" -eq 0 ] && [ "${rc[1]}" -eq 0 ]; } || fail=1
           exit $fail
 
       - name: Run async example (structured concurrency + conditional runtime)

@@ -1,5 +1,9 @@
-// std::num — strict decimal parsing in pure Hella.
+// std::num — strict decimal parsing and conversion in pure Hella.
 import std::str
+
+extern "c" from "libc" do
+    i32 snprintf(string buf, int size, string fmt, ...)
+end
 
 /// Parses an entire decimal signed 64-bit int. Optional leading + or -.
 /// No whitespace, separators, radix prefixes or trailing junk accepted.
@@ -57,4 +61,14 @@ bool parseInt(string s, ref int value) do
         value = -result
     end
     return true
+end
+
+/// Converts `v` to its decimal text, exact for every 64-bit int
+/// (including the minimum value). A bounded `%lld` write into a
+/// 21-byte buffer — no interpolation slab involved, and `%lld`
+/// is 64-bit on every platform (unlike interpolation's `%ld`).
+string toString(int v) do
+    string buf = allocateString(20)
+    snprintf(buf, 21, "%lld", v)
+    return buf
 end

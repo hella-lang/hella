@@ -47,6 +47,31 @@ string padStart(string s, int width) do
     return result
 end
 
+/// Centers in a byte width with ASCII spaces; never truncates.
+/// The extra space on odd padding goes right.
+string padCenter(string s, int width) do
+    int size = len(s)
+    if width <= size do
+        return s
+    end
+    string result = allocateString(width)
+    int left = (width - size) / 2
+    int i = 0
+    while i < left do
+        result[i] = ' '
+        i = i + 1
+    end
+    while i < left + size do
+        result[i] = s[i - left]
+        i = i + 1
+    end
+    while i < width do
+        result[i] = ' '
+        i = i + 1
+    end
+    return result
+end
+
 /// Right-pads to a byte width with ASCII spaces; never truncates.
 string padEnd(string s, int width) do
     int size = len(s)

@@ -17,6 +17,10 @@ int main() do
     assert equals(padStart("hi", 4), "  hi") is true
     assert equals(padEnd("hi", 4), "hi  ") is true
     assert equals(padStart("hello", 3), "hello") is true
+    assert equals(padCenter("hi", 5), " hi  ") is true
+    assert equals(padCenter("hi", 4), " hi ") is true
+    assert equals(padCenter("hello", 3), "hello") is true
+    assert equals(padCenter("", 3), "   ") is true
     // Beyond both the former 4KiB formatter slabs and 512-byte interpolation.
     string large = repeat("ab", 5000)
     assert len(large) is 10000

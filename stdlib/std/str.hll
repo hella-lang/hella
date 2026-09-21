@@ -263,3 +263,112 @@ string replaceAll(string s, string needle, string replacement) do
     end
     return result
 end
+
+/// Upper-cases ASCII letters (`a`-`z`); other bytes pass through unchanged.
+string toUpper(string s) do
+    string lower = "abcdefghijklmnopqrstuvwxyz"
+    string upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    int n = len(s)
+    string res = allocateString(n)
+    int i = 0
+    while i < n do
+        char c = s[i]
+        int j = 0
+        while j < 26 do
+            if lower[j] is c do
+                break
+            end
+            j = j + 1
+        end
+        if j < 26 do
+            res[i] = upper[j]
+        end else do
+            res[i] = c
+        end
+        i = i + 1
+    end
+    return res
+end
+
+/// Lower-cases ASCII letters (`A`-`Z`); other bytes pass through unchanged.
+string toLower(string s) do
+    string lower = "abcdefghijklmnopqrstuvwxyz"
+    string upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    int n = len(s)
+    string res = allocateString(n)
+    int i = 0
+    while i < n do
+        char c = s[i]
+        int j = 0
+        while j < 26 do
+            if upper[j] is c do
+                break
+            end
+            j = j + 1
+        end
+        if j < 26 do
+            res[i] = lower[j]
+        end else do
+            res[i] = c
+        end
+        i = i + 1
+    end
+    return res
+end
+
+/// Returns true for ASCII digits (`0`-`9`).
+bool isDigit(char c) do
+    string digits = "0123456789"
+    int i = 0
+    while i < 10 do
+        if digits[i] is c do
+            return true
+        end
+        i = i + 1
+    end
+    return false
+end
+
+/// Returns true for ASCII letters (`a`-`z`, `A`-`Z`).
+bool isAlpha(char c) do
+    string letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    int i = 0
+    while i < 52 do
+        if letters[i] is c do
+            return true
+        end
+        i = i + 1
+    end
+    return false
+end
+
+/// Returns true for ASCII letters and digits.
+bool isAlphaNum(char c) do
+    return isDigit(c) or isAlpha(c)
+end
+
+/// Removes leading ASCII whitespace (see `trim` for the definition).
+string trimStart(string s) do
+    int start = 0
+    int stop = len(s)
+    while start < stop do
+        if not isAsciiSpace(s[start]) do
+            break
+        end
+        start = start + 1
+    end
+    return substring(s, start, stop)
+end
+
+/// Removes trailing ASCII whitespace (see `trim` for the definition).
+string trimEnd(string s) do
+    int start = 0
+    int stop = len(s)
+    while stop > start do
+        if not isAsciiSpace(s[stop - 1]) do
+            break
+        end
+        stop = stop - 1
+    end
+    return substring(s, start, stop)
+end

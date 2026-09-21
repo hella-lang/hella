@@ -78,6 +78,20 @@ void appendFile(string path, string data) do
     fclose(f)
 end
 
+/// Returns the size of the file at `path` in bytes, or `-1` when the
+/// file cannot be opened.
+int fileSize(string path) do
+    string f = fopen(path, "r")
+    int size = 0
+    if f is null do
+        return -1
+    end
+    fseek(f, 0, 2)
+    size = ftell(f)
+    fclose(f)
+    return size
+end
+
 /// Removes the file at `path`.
 void removeFile(string path) do
     remove(path)

@@ -40,7 +40,10 @@ function name in sema or codegen.
    (`crates/hella-compiler/src/modules.rs`, shared by CLI and LSP): project root around
    `main.hll` first (local modules, `mod.hll` directory entries, cycle guard),
    then dev-checkout `stdlib/`, then `~/.hella/lib` (UNIX, via `hella setup`).
-   Selective imports always carry the module's `extern` blocks.
+   Selective imports always carry the module's `extern` blocks **plus the
+   transitive helper closure** (wanted symbols + everything they reference:
+   helper functions, consts, globals, nested-import items), so
+   `import std::str::{trim}` keeps `substring`/`allocateString`.
 
 ## Stdlib owns (pure Hella under `stdlib/`)
 
@@ -52,8 +55,9 @@ function name in sema or codegen.
 - **`std::types`** (`stdlib/std/types.hll`) — doc-only manifest of the
   implicit environment (`bool string i8…u128 int uint float double`). Declares
   nothing; importing is a no-op.
-- **Library modules** — `std::str` / `std::vector` / `std::map` / `std::math` /
-  `std::fs` / `std::env`: thin Hella wrappers or `extend` blocks over the
+- **Library modules** — `std::str` / `std::num` / `std::vector` / `std::map` /
+  `std::math` / `std::fs` / `std::env` / `std::path` / `std::fmt` / `std::rand` /
+  `std::task` / `std::terminal::ansi`: thin Hella wrappers or `extend` blocks over the
   primitive layouts. The compiler provides the layout + indexing/iteration
   mechanics; the *named method surface* (`len`, `push`, …) is documented and
   where possible fronted in stdlib. Full migration of `vec/map/string`

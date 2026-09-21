@@ -17,15 +17,18 @@ int main() do
     string missing = ""
     writeFile(path, data)
     assert exists(path) is true
+    assert fileSize(path) is 8
     content = readFile(path)
     assert equals(content, data) is true
     appendFile(path, "!")
+    assert fileSize(path) is 9
     content2 = readFile(path)
     assert equals(content2, "hello fs!") is true
     removeFile(path)
     assert exists(path) is false
     missing = readFile("hella_no_such_file_xyz.txt")
     assert isEmpty(missing) is true
+    assert fileSize("hella_no_such_file_xyz.txt") is -1
     println("fs ok")
     return 0
 end

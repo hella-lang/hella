@@ -1,0 +1,36 @@
+// stdlib_path.hll — regression for std::path
+
+import std::path
+import std::io
+import std::str
+
+int main() do
+    assert equals(joinPath("a", "b"), "a/b")
+    assert equals(joinPath("a/", "/b"), "a/b")
+    assert equals(joinPath("a", "/b"), "a/b")
+    assert equals(joinPath("a/", "b"), "a/b")
+    assert equals(joinPath("", "b"), "b")
+    assert equals(joinPath("a", ""), "a")
+    assert equals(joinPath("/", "/"), "/")
+    assert equals(basename("a/b"), "b")
+    assert equals(basename("a/b/"), "b")
+    assert equals(basename("b"), "b")
+    assert equals(basename("/"), "")
+    assert equals(basename(""), "")
+    assert equals(dirname("a/b"), "a")
+    assert equals(dirname("b"), ".")
+    assert equals(dirname("/b"), "/")
+    assert equals(dirname("a/b/"), "a")
+    assert equals(dirname("/"), "/")
+    assert equals(dirname("///"), "/")
+    assert equals(dirname(""), ".")
+    assert equals(extension("a.tar.gz"), "gz")
+    assert equals(extension(".gitignore"), "")
+    assert equals(extension("noext"), "")
+    assert equals(extension("a."), "")
+    assert equals(extension("a/b.c"), "c")
+    // split and rejoin round-trips
+    assert equals(joinPath(dirname("a/b/c.txt"), basename("a/b/c.txt")), "a/b/c.txt")
+    println("path ok")
+    return 0
+end
