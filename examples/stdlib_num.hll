@@ -1,5 +1,6 @@
 import std::num
 import std::io
+import std::str
 
 void reject(string s) do
     int value = 123
@@ -36,6 +37,15 @@ int main() do
     reject("9223372036854775808")
     reject("-9223372036854775809")
     reject("999999999999999999999999999999")
+    assert equals(toString(0), "0")
+    assert equals(toString(42), "42")
+    assert equals(toString(-42), "-42")
+    assert equals(toString(9223372036854775807), "9223372036854775807")
+    int imin = 0 - 9223372036854775807 - 1
+    assert equals(toString(imin), "-9223372036854775808")
+    // toString output round-trips through the strict parser
+    assert parseInt(toString(-12345), ref value)
+    assert value is -12345
     println("num ok")
     return 0
 end

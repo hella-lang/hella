@@ -1,0 +1,33 @@
+// std::time — wall-clock time for Hella (B2).
+// Import via: import std::time
+//
+// `sleepMs`/`yieldNow` stay in `std::task` (cooperative checkpoints).
+// This module is wall-clock observation over `runtime/hella_sync.c`
+// (linked only when `std::sync`/`std::chan`/`std::time`/`std::net` is
+// imported). `bool+ref/out` errors: the clock never fails visibly
+// (fallback 0); durations are plain `int` math.
+
+extern "c" from "hella_sync" do
+    int hella_wall_micros()
+end
+
+/// Milliseconds since the Unix epoch (wall clock, NOT monotonic — for
+/// timestamps, timeouts and deadlines, not short-interval benchmarks).
+int wallMs() do
+    return hella_wall_micros() / 1000
+end
+
+/// Microseconds since the Unix epoch (same clock as `wallMs`).
+int wallMicros() do
+    return hella_wall_micros()
+end
+
+/// Deadline `timeoutMs` after `fromMs` (both `wallMs` readings).
+int deadlineMs(int fromMs, int timeoutMs) do
+    return fromMs + timeoutMs
+end
+
+/// True when `wallMs()` has passed `deadline`.
+bool expiredMs(int deadline) do
+    return wallMs() >= deadline
+end

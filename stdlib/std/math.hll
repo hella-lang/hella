@@ -76,3 +76,9 @@ end
 double maxf(double a, double b) do
     return fmax(a, b)
 end
+
+/// Clamps `v` into `[lo, hi]` (via `fmin`/`fmax`, so no double
+/// comparison lowering is needed).
+double clampf(double v, double lo, double hi) do
+    return fmin(fmax(v, lo), hi)
+end

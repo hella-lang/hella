@@ -90,16 +90,31 @@ pub struct Codegen<'ctx> {
     /// opaque ptr; this map carries the sema `task<T>` for `await` result
     /// typing.
     task_vars: HashMap<String, crate::sema::Ty>,
-    /// Variables holding strings (`string s = ...`). LLVM type is `ptr`;
+    /// Declared pointee for `T*` variables (C1 systems). LLVM uses opaque
+    /// pointers, so `infer_expr_ty` cannot recover `u8` from an `i8*`
+    /// alloca — without this, `*pb` on a `u8*` loads `i64`. Tracked at
+    /// declaration like `string_vars`/`unsigned_vars`.
+    ptr_pointee: HashMap<String, crate::sema::Ty>,    /// Variables holding strings (`string s = ...`). LLVM type is `ptr`;
     /// tracked so `len()`/`is_empty()` lower instead of falling through to
     /// class-method resolution.
     string_vars: HashSet<String>,
+    /// Variables holding unsigned ints (`u8..u128`, `uint`). LLVM ints
+    /// carry no signedness, so `infer_expr_ty` reports every int-typed
+    /// local as `Ty::Int`; without this set `>>` on a `u64` local would
+    /// lower to an arithmetic (sign-propagating) shift. Tracked at
+    /// declaration like `string_vars` so `>>` lowers to a logical
+    /// (zero-fill) shift for unsigned operands.
+    unsigned_vars: HashSet<String>,
     /// Extern functions declared with a Hella `int` return that lower to a
     /// true C `int` (i32). Call results are sign-extended to Hella `int`
     /// (i64) at the call site — zero-extension would destroy the sign of
     /// e.g. `strcmp` (see `compare`), which only surfaced on libc
     /// implementations that don't return full-width negatives.
     extern_int32_rets: HashSet<String>,
+    /// Extern functions declared with an unsigned 32-bit return (`u32`)
+    /// that lower to C `uint32_t` (i32). Call results are zero-extended to
+    /// Hella width at the call site (sext would corrupt values >= 2^31).
+    extern_uint32_rets: HashSet<String>,
     /// Trait names declared in the program (for trait-object lowering).
     trait_names: HashSet<String>,
     /// `{data ptr, type tag}` pair struct type per named type that can
@@ -129,6 +144,11 @@ pub struct Codegen<'ctx> {
     /// Global initializers too complex to const-fold, evaluated at program
     /// start (in `main`, after the user `init` block): `(name, init)`.
     pending_global_inits: Vec<(String, Expr)>,
+    /// Generic struct definitions (`struct Box<T> ...`) for A1 true
+    /// monomorphization: base name -> decl. Specializations
+    /// (`Box<int>`, `Box<string>`) are generated on demand in the declare
+    /// phase with substituted field types, instead of erasing `T` to i64.
+    generic_struct_defs: HashMap<String, StructDecl>,
 }
 
 /// One program-end destruction entry: a single slot, or a fixed array slot
@@ -205,8 +225,11 @@ impl<'ctx> Codegen<'ctx> {
             vec_vars: HashSet::new(),
             map_vars: HashSet::new(),
             string_vars: HashSet::new(),
+            unsigned_vars: HashSet::new(),
             task_vars: HashMap::new(),
+            ptr_pointee: HashMap::new(),
             extern_int32_rets: HashSet::new(),
+            extern_uint32_rets: HashSet::new(),
             trait_names: HashSet::new(),
             pair_types: HashMap::new(),
             class_tags: HashMap::new(),
@@ -218,6 +241,7 @@ impl<'ctx> Codegen<'ctx> {
             global_owns: Vec::new(),
             global_dtors: Vec::new(),
             pending_global_inits: Vec::new(),
+            generic_struct_defs: HashMap::new(),
         }
     }
 
@@ -301,6 +325,9 @@ impl<'ctx> Codegen<'ctx> {
         }
         // Dynamic-type tags for trait objects (needs all classes declared).
         self.assign_class_tags();
+        // A1: specialize generic structs with concrete args before emission
+        // so `Box<string>` layouts carry ptr fields (not erased i64).
+        self.monomorph_generic_structs(prog);
         for item in &prog.items {
             let it: &Item = match item {
                 Item::Attributed{attrs: _, item} => item.as_ref(),
@@ -584,6 +611,11 @@ impl<'ctx> Codegen<'ctx> {
                 span: s.name_span,
             });
         }
+        // A1: remember generic definitions for on-demand specialization.
+        // The erased base is still declared (compat for unparameterized use).
+        if !s.generic_params.is_empty() {
+            self.generic_struct_defs.insert(s.name.clone(), s.clone());
+        }
         let opaque = self.context.opaque_struct_type(&s.name);
         // Insert early to allow self-reference (not needed Phase 2) and duplicate check
         self.struct_types.insert(s.name.clone(), opaque);
@@ -604,6 +636,126 @@ impl<'ctx> Codegen<'ctx> {
         self.struct_fields.insert(s.name.clone(), field_map);
         self.struct_field_defaults.insert(s.name.clone(), field_defaults);
         Ok(())
+    }
+
+    /// Substitute generic params in an AST type (A1 monomorphization).
+    fn subst_ast_ty(ty: &Type, map: &HashMap<String, Type>) -> Type {
+        match ty {
+            Type::Named(n, sp) => {
+                if let Some(rep) = map.get(n) { rep.clone() } else { ty.clone() }
+            }
+            Type::Generic(n, args, sp) => {
+                if map.contains_key(n) && args.is_empty() {
+                    map[n].clone()
+                } else {
+                    Type::Generic(n.clone(), args.iter().map(|a| Self::subst_ast_ty(a, map)).collect(), *sp)
+                }
+            }
+            Type::Array(el, sp) => Type::Array(Box::new(Self::subst_ast_ty(el, map)), *sp),
+            Type::FixedArray { elem, size, span } => Type::FixedArray { elem: Box::new(Self::subst_ast_ty(elem, map)), size: *size, span: *span },
+            Type::Vec { elem, span } => Type::Vec { elem: Box::new(Self::subst_ast_ty(elem, map)), span: *span },
+            Type::Map { key, value, span } => Type::Map { key: Box::new(Self::subst_ast_ty(key, map)), value: Box::new(Self::subst_ast_ty(value, map)), span: *span },
+            Type::Pointer(el, sp) => Type::Pointer(Box::new(Self::subst_ast_ty(el, map)), *sp),
+            Type::Optional(el, sp) => Type::Optional(Box::new(Self::subst_ast_ty(el, map)), *sp),
+            Type::Own(el, sp) => Type::Own(Box::new(Self::subst_ast_ty(el, map)), *sp),
+            Type::Task(el, sp) => Type::Task(Box::new(Self::subst_ast_ty(el, map)), *sp),
+            Type::Tuple(tys, sp) => Type::Tuple(tys.iter().map(|t| Self::subst_ast_ty(t, map)).collect(), *sp),
+            Type::FunctionType(ret, args, sp) => Type::FunctionType(Box::new(Self::subst_ast_ty(ret, map)), args.iter().map(|a| Self::subst_ast_ty(a, map)).collect(), *sp),
+            _ => ty.clone(),
+        }
+    }
+
+    /// Ensure a `Base<args>` specialization exists; returns its key.
+    /// Concrete-only: any arg still naming a generic param is skipped
+    /// (erasure fallback). Idempotent via `struct_types` cache.
+    fn ensure_generic_struct(&mut self, base: &str, args: &[Type]) -> Option<String> {
+        let key = format!("{}<{}>", base, args.iter().map(|a| a.name()).collect::<Vec<_>>().join(","));
+        if self.struct_types.contains_key(&key) {
+            return Some(key);
+        }
+        // Skip when args still contain bare generic params.
+        let is_bare_param = |t: &Type| matches!(t, Type::Named(n, _) if n.len() == 1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false));
+        if args.iter().any(is_bare_param) {
+            return None;
+        }
+        let def = self.generic_struct_defs.get(base)?.clone();
+        if def.generic_params.len() != args.len() {
+            return None;
+        }
+        let map: HashMap<String, Type> = def.generic_params.iter().map(|gp| gp.name.clone()).zip(args.iter().cloned()).collect();
+        let opaque = self.context.opaque_struct_type(&key);
+        self.struct_types.insert(key.clone(), opaque);
+        self.declare_pair_type(&key);
+        let mut field_map = HashMap::new();
+        let mut field_tys = Vec::new();
+        let mut field_defaults = HashMap::new();
+        for (idx, f) in def.fields.iter().enumerate() {
+            let sub = Self::subst_ast_ty(&f.ty, &map);
+            let lty = self.llvm_ty_for(&sub);
+            field_map.insert(f.name.clone(), idx as u32);
+            field_tys.push(lty);
+            if let Some(d) = &f.default {
+                field_defaults.insert(f.name.clone(), d.clone());
+            }
+        }
+        opaque.set_body(&field_tys, false);
+        self.struct_fields.insert(key.clone(), field_map);
+        self.struct_field_defaults.insert(key.clone(), field_defaults);
+        Some(key)
+    }
+
+    /// Pre-pass: walk top-level items for `Generic(base, args)` uses with
+    /// concrete args and specialize each struct. Runs in the declare phase
+    /// (`&mut`) so `llvm_ty_for` (`&self`) finds keys later.
+    fn monomorph_generic_structs(&mut self, program: &Program) {
+        fn collect_ty(t: &Type, out: &mut Vec<(String, Vec<Type>)>) {
+            match t {
+                Type::Generic(n, args, _) => {
+                    out.push((n.clone(), args.clone()));
+                    for a in args { collect_ty(a, out); }
+                }
+                Type::Array(el, _) | Type::Pointer(el, _) | Type::Optional(el, _)
+                | Type::Own(el, _) | Type::Task(el, _) => collect_ty(el, out),
+                Type::FixedArray { elem, .. } | Type::Vec { elem, .. } => collect_ty(elem, out),
+                Type::Map { key, value, .. } => { collect_ty(key, out); collect_ty(value, out); }
+                Type::Tuple(tys, _) => { for x in tys { collect_ty(x, out); } }
+                Type::FunctionType(ret, args, _) => { collect_ty(ret, out); for x in args { collect_ty(x, out); } }
+                _ => {}
+            }
+        }
+        let mut uses: Vec<(String, Vec<Type>)> = Vec::new();
+        for item in &program.items {
+            let it: &Item = match item {
+                Item::Attributed { item, .. } => item.as_ref(),
+                other => other,
+            };
+            match it {
+                Item::Struct(s) => { for f in &s.fields { collect_ty(&f.ty, &mut uses); } }
+                Item::Function(f) => {
+                    collect_ty(&f.ret_ty, &mut uses);
+                    for p in &f.params { collect_ty(&p.ty, &mut uses); }
+                }
+                Item::Class(c) => {
+                    for f in &c.fields { collect_ty(&f.ty, &mut uses); }
+                    for m in &c.methods { collect_ty(&m.ret_ty, &mut uses); for p in &m.params { collect_ty(&p.ty, &mut uses); } }
+                }
+                Item::Var(v) => { collect_ty(&v.ty, &mut uses); }
+                Item::Const(c) => { if let Some(t) = &c.ty { collect_ty(t, &mut uses); } }
+                Item::Enum(_) | Item::Trait(_) | Item::Typedef(_) | Item::Distinct(_)
+                | Item::Extension(_) | Item::Import(_) | Item::Extern(_) | Item::Init(_)
+                | Item::Attributed { .. } => {}
+            }
+        }
+        // Also scan function bodies for `let T x = ...` annotations? Top-level
+        // + signatures cover struct-field cases; body-local generic struct
+        // vars lower through the same key once declared here when named at
+        // top level. Body-only uses fall back to erasure (compat).
+        for (base, args) in uses {
+            let lookup = base.rsplit("::").next().unwrap_or(&base).to_string();
+            if self.generic_struct_defs.contains_key(&lookup) {
+                self.ensure_generic_struct(&lookup, &args);
+            }
+        }
     }
 
     fn declare_class(&mut self, c: &ClassDecl) -> Result<(), CodegenError> {
@@ -1421,26 +1573,54 @@ impl<'ctx> Codegen<'ctx> {
                     // Exempted: libc functions whose real return is
                     // size_t/long (`strlen`, `fread`, `fwrite`, `ftell`),
                     // which stay i64 (non-negative values read correctly).
+                    // Also exempted: Hella runtime helpers (`hella_*`),
+                    // whose C signatures use int64_t throughout (B2: wall
+                    // clock micros/millis would otherwise truncate to i32).
                     let wide_int_ret = matches!(ret_ty, crate::sema::Ty::Int)
-                        && matches!(name.as_str(), "strlen" | "fread" | "fwrite" | "ftell");
+                        && (matches!(name.as_str(), "strlen" | "fread" | "fwrite" | "ftell")
+                            || name.starts_with("hella_"));
                     let ret_is_c_int = matches!(ret_ty, crate::sema::Ty::Int) && !wide_int_ret;
                     if ret_is_c_int {
                         self.extern_int32_rets.insert(name.clone());
                     }
-                    let param_tys: Vec<crate::sema::Ty> = params.iter().filter(|p| !(p.is_variadic && p.name.is_empty())).map(|p| {
-                        let base: crate::sema::Ty = (&p.ty).into();
-                        if p.is_variadic {
-                            crate::sema::Ty::Array(Box::new(base))
-                        } else { base }
+                    // B1 fix: `ref`/`out` extern params (e.g. `rand_s(ref int)`,
+                    // channel recv) lower to opaque pointers, mirroring Hella
+                    // `ref`/`out` (declare_function). Previously the mode was
+                    // ignored so callers passed a pointer against an i64 slot
+                    // and any forwarding wrapper failed LLVM verification.
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let param_llvm: Vec<inkwell::types::BasicMetadataTypeEnum> = params.iter().filter(|p| !(p.is_variadic && p.name.is_empty())).map(|p| {
+                        if p.mode != ParamMode::None {
+                            ptr_ty.into()
+                        } else {
+                            let base: crate::sema::Ty = (&p.ty).into();
+                            let t = if p.is_variadic { crate::sema::Ty::Array(Box::new(base)) } else { base };
+                            self.llvm_ty_for_sema(&t).map(|bt| bt.into()).unwrap_or_else(|| ptr_ty.into())
+                        }
                     }).collect();
-                    let param_llvm: Vec<inkwell::types::BasicMetadataTypeEnum> = param_tys.iter().filter_map(|t| self.llvm_ty_for_sema(t).map(|bt| bt.into())).collect();
                     let fn_ty = match ret_ty {
                         crate::sema::Ty::Void => self.context.void_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::Int if wide_int_ret => self.context.i64_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::Int => self.context.i32_type().fn_type(&param_llvm, is_c_varargs),
+                        crate::sema::Ty::UInt => self.context.i64_type().fn_type(&param_llvm, is_c_varargs),
+                        crate::sema::Ty::SizedInt { bits, signed } => {
+                            // Fixed-width extern returns lower to their natural C width
+                            // (A4: previously fell through to void). 32-bit signed
+                            // still needs sext tracking; 32-bit unsigned needs zext.
+                            if bits == 32 && signed {
+                                self.extern_int32_rets.insert(name.clone());
+                            } else if bits == 32 && !signed {
+                                self.extern_uint32_rets.insert(name.clone());
+                            }
+                            self.llvm_int_for_bits(bits).fn_type(&param_llvm, is_c_varargs)
+                        }
                         crate::sema::Ty::Bool => self.context.bool_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::Char => self.context.i32_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::String => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, is_c_varargs),
+                        // B1 fix: `any`/pointer/function extern returns are
+                        // opaque pointers (previously fell through to void,
+                        // so sync handles arrived as null).
+                        crate::sema::Ty::Any | crate::sema::Ty::Pointer(_) | crate::sema::Ty::Function(_, _) => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::Float => self.context.f32_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::Double => self.context.f64_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::Struct(_) | crate::sema::Ty::Enum(_) | crate::sema::Ty::Generic(_,_) => {
@@ -1564,6 +1744,12 @@ impl<'ctx> Codegen<'ctx> {
         self.globals.insert(c.name.clone(), (ptr, ty));
         if matches!(c.ty, Some(Type::String(_))) {
             self.string_vars.insert(c.name.clone());
+        }
+        if c.ty.as_ref().is_some_and(Self::ast_ty_is_unsigned) {
+            self.unsigned_vars.insert(c.name.clone());
+        }
+        if let Some(t) = c.ty.as_ref() {
+            self.track_ptr_var(&c.name, t);
         }
         Ok(())
     }
@@ -1954,6 +2140,7 @@ impl<'ctx> Codegen<'ctx> {
         if matches!(&v.ty, Type::String(_)) {
             self.string_vars.insert(v.name.clone());
         }
+        self.track_unsigned_var(&v.name, &v.ty);
         // Ownership tracking for program-end destruction.
         match &v.ty {
             Type::Own(inner, _) => {
@@ -2028,6 +2215,7 @@ impl<'ctx> Codegen<'ctx> {
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
+                        self.track_unsigned_var(&param.name, &param.ty);
                     }
                     let _ = self.codegen_block(&f.body)?;
                     if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
@@ -2087,6 +2275,7 @@ impl<'ctx> Codegen<'ctx> {
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
+                        self.track_unsigned_var(&param.name, &param.ty);
                     }
                     let _ = self.codegen_block(&op.body)?;
                     if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
@@ -2145,6 +2334,7 @@ impl<'ctx> Codegen<'ctx> {
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
+                        self.track_unsigned_var(&param.name, &param.ty);
                         let _ = self.codegen_block(body)?;
                         if self.builder.get_insert_block().unwrap().get_terminator().is_none() { self.builder.build_return(None).unwrap(); }
                         self.vars.pop();
@@ -2229,16 +2419,20 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
-    /// Coerce an integer value to a destination LLVM type via trunc/sext.
+    /// Coerce an integer value to a destination LLVM type via trunc/sext/zext.
     /// Non-integer or same-type values pass through unchanged. Used so that
     /// `i32 x = 5` (i64 literal → i32 slot) emits valid IR with opaque ptrs
     /// (the verifier cannot catch width mismatches on `ptr` stores).
     /// Also converts int↔pointer (via inttoptr/ptrtoint) for undetermined
     /// (`any`) vector slots, which are i64 and may hold string pointers.
-    fn coerce_to_ty(
+    /// `unsigned_src` selects zero-extend (instead of sign-extend) when
+    /// widening — required for `u8..u128`/`uint` values (A4 ABI fix; LLVM
+    /// ints are signless so the Hella signedness must pick sext vs zext).
+    fn coerce_to_ty_with_unsigned(
         &self,
         val: BasicValueEnum<'ctx>,
         dest: BasicTypeEnum<'ctx>,
+        unsigned_src: bool,
     ) -> BasicValueEnum<'ctx> {
         let src = val.get_type();
         if src == dest {
@@ -2252,8 +2446,11 @@ impl<'ctx> Codegen<'ctx> {
                 if sw > dw {
                     self.builder.build_int_truncate(iv, d, "trunc").unwrap().into()
                 } else if sw < dw {
-                    // Signed extend (MVP: all ints sext; unsigned zext deferred).
-                    self.builder.build_int_s_extend(iv, d, "sext").unwrap().into()
+                    if unsigned_src {
+                        self.builder.build_int_z_extend(iv, d, "zext").unwrap().into()
+                    } else {
+                        self.builder.build_int_s_extend(iv, d, "sext").unwrap().into()
+                    }
                 } else {
                     val
                 }
@@ -2293,12 +2490,23 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
-    /// Unify two integer operands to the wider width (sext the narrower).
-    /// Non-integer pairs pass through unchanged.
-    fn unify_int_operands(
+    fn coerce_to_ty(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        dest: BasicTypeEnum<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        self.coerce_to_ty_with_unsigned(val, dest, false)
+    }
+
+    /// Unify two integer operands to the wider width (sext/zext the narrower).
+    /// Non-integer pairs pass through unchanged. `either_unsigned` selects
+    /// zero-extend when widening — callers pass true when either side is a
+    /// `u8..u128`/`uint` value (A4 ABI fix).
+    fn unify_int_operands_with_unsigned(
         &self,
         l: BasicValueEnum<'ctx>,
         r: BasicValueEnum<'ctx>,
+        either_unsigned: bool,
     ) -> (BasicValueEnum<'ctx>, BasicValueEnum<'ctx>) {
         match (l.get_type(), r.get_type()) {
             (BasicTypeEnum::IntType(lt), BasicTypeEnum::IntType(rt)) => {
@@ -2307,22 +2515,31 @@ impl<'ctx> Codegen<'ctx> {
                 if lw == rw {
                     (l, r)
                 } else if lw < rw {
-                    (self.coerce_to_ty(l, r.get_type()), r)
+                    (self.coerce_to_ty_with_unsigned(l, r.get_type(), either_unsigned), r)
                 } else {
-                    (l, self.coerce_to_ty(r, l.get_type()))
+                    (l, self.coerce_to_ty_with_unsigned(r, l.get_type(), either_unsigned))
                 }
             }
             _ => (l, r),
         }
     }
 
-    /// Max elements in a vector buffer (MVP fixed capacity; `push` past it
-    /// traps via `abort`).
-    const VEC_CAP: u32 = 16;
+    fn unify_int_operands(
+        &self,
+        l: BasicValueEnum<'ctx>,
+        r: BasicValueEnum<'ctx>,
+    ) -> (BasicValueEnum<'ctx>, BasicValueEnum<'ctx>) {
+        self.unify_int_operands_with_unsigned(l, r, false)
+    }
 
-    /// Max entries in a map (MVP fixed capacity; insert past it traps via
-    /// `abort`, mirroring `push`).
-    const MAP_CAP: u32 = 16;
+    /// Max elements in a vector buffer (fixed capacity for now; `push` past it
+    /// traps via `abort`). Raised 16→256 as A2 working relief for compiler
+    /// sources; heap-growable `{ptr,len,cap}` is the follow-up.
+    const VEC_CAP: u32 = 256;
+
+    /// Max entries in a map (fixed capacity for now; insert past it traps via
+    /// `abort`, mirroring `push`). Raised 16→256 with VEC_CAP.
+    const MAP_CAP: u32 = 256;
 
     /// Vector struct type `{ [CAP x E], i64 len }` for element LLVM type E.
     /// Anonymous structs are structurally uniqued by LLVM, so rebuilding per
@@ -2429,6 +2646,76 @@ impl<'ctx> Codegen<'ctx> {
         }
         let lookup = name.rsplit("::").next().unwrap_or(name);
         lookup != name && self.vec_vars.contains(lookup)
+    }
+
+    /// `true` when the AST type denotes an unsigned int (`u8..u128`,
+    /// `uint`, resolved through the same stdlib-name table as sema).
+    fn ast_ty_is_unsigned(ty: &Type) -> bool {
+        match ty {
+            Type::Named(name, _) => matches!(
+                crate::sema::Ty::from_stdlib_name(name.rsplit("::").next().unwrap_or(name)),
+                Some(crate::sema::Ty::SizedInt { signed: false, .. })
+                    | Some(crate::sema::Ty::UInt)
+            ),
+            _ => false,
+        }
+    }
+
+    /// `true` when the sema type is an unsigned int.
+    fn sema_ty_is_unsigned(ty: &crate::sema::Ty) -> bool {
+        matches!(
+            ty,
+            crate::sema::Ty::SizedInt { signed: false, .. }
+                | crate::sema::Ty::UInt
+        )
+    }
+
+    /// Record a declared `T*` pointee for deref lowering. Call at every
+    /// declaration site that tracks `string_vars`/`unsigned_vars`.
+    fn track_ptr_var(&mut self, name: &str, ty: &Type) {
+        if let Type::Pointer(el, _) = ty {
+            self.ptr_pointee.insert(name.to_string(), el.as_ref().into());
+        }
+    }
+
+    /// Record an unsigned-int variable for shift lowering. Call at every
+    /// declaration site that tracks `string_vars`/`vec_vars`. Also records
+    /// `T*` pointees (C1) so one call covers every declaration site.
+    fn track_unsigned_var(&mut self, name: &str, ty: &Type) {
+        if Self::ast_ty_is_unsigned(ty) {
+            self.unsigned_vars.insert(name.to_string());
+        }
+        self.track_ptr_var(name, ty);
+    }
+
+    /// Is this variable an unsigned int (tracked at declaration)?
+    fn is_unsigned_var(&self, name: &str) -> bool {
+        if self.unsigned_vars.contains(name) {
+            return true;
+        }
+        let lookup = name.rsplit("::").next().unwrap_or(name);
+        lookup != name && self.unsigned_vars.contains(lookup)
+    }
+
+    /// `true` when `>>` on this expression must be a logical (zero-fill)
+    /// shift: the operand is an unsigned int. Idents resolve through
+    /// decl-site tracking (LLVM ints carry no signedness); calls resolve
+    /// through the callee's declared return type; anything else falls
+    /// back to `infer_expr_ty` (literals stay arithmetic).
+    fn is_unsigned_expr(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Paren(inner) => self.is_unsigned_expr(inner),
+            ExprKind::Ident(name) => self.is_unsigned_var(name),
+            ExprKind::Call { callee, .. } => self
+                .funcs
+                .get(callee.as_str())
+                .is_some_and(|(_, info)| Self::sema_ty_is_unsigned(&info.ret)),
+            _ => matches!(
+                self.infer_expr_ty(expr),
+                Ok(crate::sema::Ty::SizedInt { signed: false, .. })
+                    | Ok(crate::sema::Ty::UInt)
+            ),
+        }
     }
 
     /// Map struct type `{ [CAP x K], [CAP x V], i64 len }`.
@@ -3196,17 +3483,16 @@ impl<'ctx> Codegen<'ctx> {
             }
             Type::Generic(n, args, _) => {
                 let lookup = n.rsplit("::").next().unwrap_or(n);
-                if let Some(st) = self.struct_types.get(lookup) {
+                // A1: specialized key first (`Box<string>`), erased base as fallback.
+                let key = format!("{}<{}>", lookup, args.iter().map(|a| a.name()).collect::<Vec<_>>().join(","));
+                if let Some(st) = self.struct_types.get(&key) {
+                    st.as_basic_type_enum().into()
+                } else if let Some(st) = self.struct_types.get(lookup) {
                     st.as_basic_type_enum().into()
                 } else if let Some(et) = self.enum_types.get(lookup) {
                     et.as_basic_type_enum().into()
                 } else {
-                    let key = format!("{}<{}>", lookup, args.iter().map(|a| a.name()).collect::<Vec<_>>().join(","));
-                    if let Some(st) = self.struct_types.get(&key) {
-                        st.as_basic_type_enum().into()
-                    } else {
-                        panic!("unknown generic type {n}")
-                    }
+                    panic!("unknown generic type {n}")
                 }
             }
             Type::FunctionType(_, _, _) => self.context.ptr_type(inkwell::AddressSpace::default()).into(),
@@ -3729,6 +4015,18 @@ impl<'ctx> Codegen<'ctx> {
         let fn_ty = self.context.i32_type().fn_type(&[ptr_ty.into(), ptr_ty.into()], true);
         self.module.add_function("sprintf", fn_ty, None)
     }
+    fn get_or_declare_snprintf(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("snprintf") { return f; }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = self.context.i32_type().fn_type(&[ptr_ty.into(), self.context.i64_type().into(), ptr_ty.into()], true);
+        self.module.add_function("snprintf", fn_ty, None)
+    }
+    fn get_or_declare_strncat(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("strncat") { return f; }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), self.context.i64_type().into()], false);
+        self.module.add_function("strncat", fn_ty, None)
+    }
     fn get_or_declare_strdup(&self) -> FunctionValue<'ctx> {
         if let Some(f) = self.module.get_function("strdup") { return f; }
         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -4133,6 +4431,14 @@ impl<'ctx> Codegen<'ctx> {
         }
         if is_string {
             self.string_vars.insert(name.clone());
+        }
+        if opt_ty.as_ref().is_some_and(Self::ast_ty_is_unsigned)
+            || param_sema_ty.as_ref().is_some_and(|t| Self::sema_ty_is_unsigned(t))
+        {
+            self.unsigned_vars.insert(name.clone());
+        }
+        if let Some(t) = opt_ty {
+            self.track_ptr_var(name, t);
         }
         if let Some(class_name) = match opt_ty {
             Some(t) => self.dtor_name_for_ast_ty(t),
@@ -4884,6 +5190,7 @@ impl<'ctx> Codegen<'ctx> {
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
+                        self.track_unsigned_var(&param.name, &param.ty);
                     // Track `own` params for destruction at function exit.
                     self.track_own_param(alloca, &param.ty);
                     // Track params needing destructors (user dtors,
@@ -5167,6 +5474,7 @@ impl<'ctx> Codegen<'ctx> {
             }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
+                        self.track_unsigned_var(&param.name, &param.ty);
         }
         let always_returns = self.codegen_block(&method.body)?;
         if !always_returns && self.builder.get_insert_block().unwrap().get_terminator().is_none() {
@@ -5245,6 +5553,7 @@ impl<'ctx> Codegen<'ctx> {
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
+                        self.track_unsigned_var(&param.name, &param.ty);
         }
         // `initialize` sugar: this.field = param for each param matching a field
         // EBNF §22: initialize is sugar for this.field = field
@@ -6061,6 +6370,7 @@ impl<'ctx> Codegen<'ctx> {
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
+                        self.track_unsigned_var(&param.name, &param.ty);
             let _ = self.codegen_block(body)?;
             if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
                 self.builder.build_return(None).unwrap();
@@ -6106,6 +6416,7 @@ impl<'ctx> Codegen<'ctx> {
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
+                        self.track_unsigned_var(&param.name, &param.ty);
         }
         let _ = self.codegen_block(&op.body)?;
         if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
@@ -6292,6 +6603,12 @@ impl<'ctx> Codegen<'ctx> {
     fn codegen_stmt(&mut self, stmt: &Stmt) -> Result<bool, CodegenError> {
         match stmt {
             Stmt::VarDecl(d) => {
+                // A1: ensure `Box<string>` specialization for body-local vars
+                // (declare-phase pre-pass only sees top-level items).
+                if let Type::Generic(n, args, _) = &d.ty {
+                    let base = n.rsplit("::").next().unwrap_or(n).to_string();
+                    self.ensure_generic_struct(&base, args);
+                }
                 // Fixed arrays with an array-literal initializer allocate the
                 // exact length: inferred `int arr x = [...]` uses the init
                 // length; explicit `int arr[N] x = [...]` uses N (sema has
@@ -6368,6 +6685,8 @@ impl<'ctx> Codegen<'ctx> {
                 if matches!(&d.ty, Type::String(_)) {
                     self.string_vars.insert(d.name.clone());
                 }
+                self.track_unsigned_var(&d.name, &d.ty);
+                self.track_ptr_var(&d.name, &d.ty);
                 // Track `task<T>` handles for `await` result typing (Async-6).
                 if let Type::Task(el, _) = &d.ty {
                     self.task_vars.insert(d.name.clone(), crate::sema::Ty::Task(Box::new((el.as_ref()).into())));
@@ -6476,7 +6795,11 @@ impl<'ctx> Codegen<'ctx> {
                         let val = self.codegen_expr(init)?;
                         // Box class values flowing into trait-typed slots.
                         let val = self.box_trait_value(val, ty, d.span)?;
-                        let coerced = self.coerce_to_ty(val, ty);
+                        // C-fix: zero-extend when widening unsigned values
+                        // (`u8 b` into `int` must read 255, not -1).
+                        let unsigned_src = Self::ast_ty_is_unsigned(&d.ty)
+                            || self.is_unsigned_expr(init);
+                        let coerced = self.coerce_to_ty_with_unsigned(val, ty, unsigned_src);
                         self.builder.build_store(alloca, coerced).unwrap();
                         // Move from owned source: null the source slot(s) so their
                         // scope destroy becomes a no-op (poison is checked in sema).
@@ -6666,6 +6989,12 @@ impl<'ctx> Codegen<'ctx> {
                 if matches!(c.ty, Some(Type::String(_))) {
                     self.string_vars.insert(c.name.clone());
                 }
+                if c.ty.as_ref().is_some_and(Self::ast_ty_is_unsigned) {
+                    self.unsigned_vars.insert(c.name.clone());
+                }
+                if let Some(t) = c.ty.as_ref() {
+                    self.track_ptr_var(&c.name, t);
+                }
                 // Vector const with literal initializer: per-element buffer fill.
                 if let (Some(Type::Vec { .. }), ExprKind::ArrayLit(elems)) =
                     (&c.ty, &c.init.kind)
@@ -6711,7 +7040,9 @@ impl<'ctx> Codegen<'ctx> {
                 };
                 let alloca = self.create_entry_block_alloca(&c.name, actual_ty);
                 self.vars.last_mut().unwrap().insert(c.name.clone(), (alloca, actual_ty));
-                let stored = self.coerce_to_ty(init_val, actual_ty);
+                let unsigned_dest = c.ty.as_ref().is_some_and(Self::ast_ty_is_unsigned)
+                    || self.is_unsigned_expr(&c.init);
+                let stored = self.coerce_to_ty_with_unsigned(init_val, actual_ty, unsigned_dest);
                 self.builder.build_store(alloca, stored).unwrap();
                 Ok(false)
             }
@@ -6766,7 +7097,7 @@ impl<'ctx> Codegen<'ctx> {
                         self.builder.build_call(puts, &[msg_val.into()], "puts_assert").unwrap();
                     } else {
                         // for non-string message, try to print as int?
-                        let fmt = self.builder.build_global_string_ptr("assertion failed: %ld\n", "assert_fmt").unwrap();
+                        let fmt = self.builder.build_global_string_ptr("assertion failed: %lld\n", "assert_fmt").unwrap();
                         let printf = self.get_or_declare_printf();
                         self.builder.build_call(printf, &[fmt.as_pointer_value().into(), msg_val.into()], "printf_assert").unwrap();
                     }
@@ -7495,6 +7826,41 @@ impl<'ctx> Codegen<'ctx> {
                         self.builder.build_store(ptr, nxt).unwrap();
                         Ok(nxt.into())
                     }
+                    // C1 systems: `&x` is the storage pointer; `*p` loads
+                    // through it with the pointee LLVM type.
+                    UnaryOp::AddrOf => {
+                        let ptr = self.codegen_as_ptr(inner)?;
+                        Ok(ptr.into())
+                    }
+                    UnaryOp::Deref => {
+                        let ptr_ty = self.infer_expr_ty(inner)?;
+                        match ptr_ty {
+                            crate::sema::Ty::Pointer(pointee) => {
+                                let v = self.codegen_expr(inner)?;
+                                let dest = self.llvm_ty_for_sema(&pointee).ok_or(CodegenError {
+                                    message: format!("cannot load through pointer to `{pointee}`"),
+                                    span: expr.span,
+                                })?;
+                                Ok(self.builder.build_load(dest, v.into_pointer_value(), "deref").unwrap())
+                            }
+                            crate::sema::Ty::Own(pointee) => {
+                                // `own` is a `{data ptr, tag}` pair: unwrap
+                                // the data pointer, then load the inner type.
+                                let v = self.codegen_expr(inner)?;
+                                let pair = v.into_struct_value();
+                                let data = self.builder.build_extract_value(pair, 0, "own.data").unwrap().into_pointer_value();
+                                let dest = self.llvm_ty_for_sema(&pointee).ok_or(CodegenError {
+                                    message: format!("cannot load through `own {pointee}`"),
+                                    span: expr.span,
+                                })?;
+                                Ok(self.builder.build_load(dest, data, "own.deref").unwrap())
+                            }
+                            other => Err(CodegenError {
+                                message: format!("cannot dereference `{other}` (need `T*`)"),
+                                span: expr.span,
+                            }),
+                        }
+                    }
                 }
             }
             ExprKind::Postfix { op, expr: inner } => {
@@ -7558,7 +7924,8 @@ impl<'ctx> Codegen<'ctx> {
                 }
                 let l = self.codegen_expr(lhs)?;
                 let r = self.codegen_expr(rhs)?;
-                let (l, r) = self.unify_int_operands(l, r);
+                let either_unsigned = self.is_unsigned_expr(lhs) || self.is_unsigned_expr(rhs);
+                let (l, r) = self.unify_int_operands_with_unsigned(l, r, either_unsigned);
                 Ok(match op {
                     BinOp::Add => self
                         .builder
@@ -7710,7 +8077,23 @@ impl<'ctx> Codegen<'ctx> {
                     BinOp::BitOr => self.builder.build_or(l.into_int_value(), r.into_int_value(), "bitor").unwrap().into(),
                     BinOp::BitXor => self.builder.build_xor(l.into_int_value(), r.into_int_value(), "bitxor").unwrap().into(),
                     BinOp::Shl => self.builder.build_left_shift(l.into_int_value(), r.into_int_value(), "shl").unwrap().into(),
-                    BinOp::Shr => self.builder.build_right_shift(l.into_int_value(), r.into_int_value(), false, "shr").unwrap().into(),
+                    // `>>` is LOGICAL (zero-fill) for unsigned operands:
+                    // `u64`/`uN` (stdlib types skill) are unsigned, and a
+                    // sign-propagating shift would corrupt random/PRNG code
+                    // whose values legitimately have the high bit set.
+                    // Signed int-like types keep the arithmetic shift.
+                    BinOp::Shr => {
+                        // inkwell's `is_signed` means "emit an arithmetic
+                        // (sign-propagating) shift": true for signed int-
+                        // likes, false for unsigned (logical, zero-fill).
+                        // `u64`/`uN`/`uint` must be logical — PRNG-style
+                        // code relies on the high bit being a data bit.
+                        // Signedness comes from decl-site tracking: LLVM
+                        // ints carry none, so `infer_expr_ty` alone
+                        // reports every int local as `Ty::Int`.
+                        let unsigned = self.is_unsigned_expr(lhs);
+                        self.builder.build_right_shift(l.into_int_value(), r.into_int_value(), !unsigned, "shr").unwrap().into()
+                    }
                     BinOp::NullCoalesce => {
                         // `a ?? b`: `a` is an Optional `{value, present}`
                         // struct (or legacy int/pointer zero-check).
@@ -7874,7 +8257,11 @@ impl<'ctx> Codegen<'ctx> {
                             }
                         }
                         let val = self.box_trait_value(val, dest_ty, expr.span)?;
-                        let coerced = self.coerce_to_ty(val, dest_ty);
+                        // C-fix: zero-extend unsigned sources on widen
+                        // (mirrors the VarDecl path above).
+                        let unsigned_src = self.is_unsigned_var(name)
+                            || self.is_unsigned_expr(value);
+                        let coerced = self.coerce_to_ty_with_unsigned(val, dest_ty, unsigned_src);
                         self.builder.build_store(ptr, coerced).unwrap();
                         // Move from owned source: null the source slot(s).
                         // Transparent through `?:`/parens/match arms; skips
@@ -8125,6 +8512,30 @@ impl<'ctx> Codegen<'ctx> {
                         }
                         return Err(CodegenError{message: "unsupported indexing assignment base; only direct array variable indexing supported".into(), span: lhs.span});
                     }
+                    // C1 systems: `*p = v` stores through the pointer.
+                    ExprKind::Unary { op: UnaryOp::Deref, expr: inner } => {
+                        let ptr_ty = self.infer_expr_ty(inner)?;
+                        let raw = self.codegen_expr(inner)?;
+                        let (ptr, pointee) = match &ptr_ty {
+                            crate::sema::Ty::Pointer(p) => (raw.into_pointer_value(), p.as_ref().clone()),
+                            crate::sema::Ty::Own(p) => {
+                                let pair = raw.into_struct_value();
+                                let data = self.builder.build_extract_value(pair, 0, "own.data").unwrap().into_pointer_value();
+                                (data, p.as_ref().clone())
+                            }
+                            other => return Err(CodegenError {
+                                message: format!("cannot assign through `{other}` (need `T*`)"),
+                                span: lhs.span,
+                            }),
+                        };
+                        let dest = self.llvm_ty_for_sema(&pointee).ok_or(CodegenError {
+                            message: format!("cannot store through pointer to `{pointee}`"),
+                            span: lhs.span,
+                        })?;
+                        let coerced = self.coerce_to_ty(val, dest);
+                        self.builder.build_store(ptr, coerced).unwrap();
+                        Ok(coerced)
+                    }
                     _ => Err(CodegenError {
                         message: "invalid assignment target".into(),
                         span: lhs.span,
@@ -8315,10 +8726,18 @@ impl<'ctx> Codegen<'ctx> {
                         // Extern C `int` returns lower as i32; Hella `int`
                         // is i64, so sign-extend (not zero-extend: the sign
                         // of e.g. strcmp/scanf results must survive).
+                        // Unsigned `u32` returns zero-extend instead (A4).
                         if self.extern_int32_rets.contains(callee) {
                             if let BasicValueEnum::IntValue(iv) = v {
                                 if iv.get_type().get_bit_width() == 32 {
                                     return Ok(self.builder.build_int_s_extend(iv, self.context.i64_type(), "extern.sext").unwrap().into());
+                                }
+                            }
+                        }
+                        if self.extern_uint32_rets.contains(callee) {
+                            if let BasicValueEnum::IntValue(iv) = v {
+                                if iv.get_type().get_bit_width() == 32 {
+                                    return Ok(self.builder.build_int_z_extend(iv, self.context.i64_type(), "extern.zext").unwrap().into());
                                 }
                             }
                         }
@@ -8392,10 +8811,19 @@ impl<'ctx> Codegen<'ctx> {
                 // rvalue field load: need field pointer then load
                 let field_ptr = self.codegen_field_ptr(object, field)?;
                 let obj_ty2 = self.infer_expr_ty(object)?;
-                if let crate::sema::Ty::Struct(ref sname) = obj_ty2 {
-                    let fields = self.struct_fields.get(sname).unwrap();
+                // A1: map `Box<string>` to its specialized key.
+                let sname_owned: Option<String> = match &obj_ty2 {
+                    crate::sema::Ty::Struct(n) => Some(n.clone()),
+                    crate::sema::Ty::Generic(base, args) => {
+                        let key = format!("{}<{}>", base, args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(","));
+                        if self.struct_types.contains_key(&key) { Some(key) } else { Some(base.clone()) }
+                    }
+                    _ => None,
+                };
+                if let Some(sname) = sname_owned {
+                    let fields = self.struct_fields.get(&sname).unwrap();
                     let idx = *fields.get(field).unwrap();
-                    let st = self.struct_types.get(sname).unwrap();
+                    let st = self.struct_types.get(&sname).unwrap();
                     let field_ty = st.get_field_type_at_index(idx).unwrap();
                     Ok(self
                         .builder
@@ -8670,8 +9098,19 @@ impl<'ctx> Codegen<'ctx> {
                 Ok(self.context.i32_type().const_int(*ch as u64, false).into())
             }
             ExprKind::StructLit { ty, fields } => {
+                // A1: `Box<string> has ... end` uses the specialized struct.
                 let sname = match ty {
-                    Type::Named(n, _) => n.clone(),
+                    Type::Named(n, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
+                    Type::Generic(n, args, _) => {
+                        let base = n.rsplit("::").next().unwrap_or(n).to_string();
+                        if let Some(key) = self.ensure_generic_struct(&base, args) {
+                            key
+                        } else if self.struct_types.contains_key(&base) {
+                            base
+                        } else {
+                            return Err(CodegenError { message: "struct literal requires named type".into(), span: expr.span });
+                        }
+                    }
                     _ => {
                         return Err(CodegenError {
                             message: "struct literal requires named type"
@@ -8797,38 +9236,78 @@ impl<'ctx> Codegen<'ctx> {
             }
             ExprKind::Match(m) => self.codegen_match(m, expr.span),
             ExprKind::InterpolatedString(parts, _) => {
-                let buffer = self.builder.build_alloca(self.context.i8_type().array_type(512), "interp.buf").unwrap();
+                // A3: bounded interpolation. 4KiB stack buffer, every append
+                // via strncat with remaining-space computed from strlen, int/
+                // float temps via snprintf. Overlong text truncates instead
+                // of smashing the stack; exact-size building belongs in
+                // std::fmt (checked allocs). 64-bit ints use %lld (portable).
+                const INTERP_CAP: u64 = 4096;
+                let arr_ty = self.context.i8_type().array_type(INTERP_CAP as u32);
+                let buffer = self.builder.build_alloca(arr_ty, "interp.buf").unwrap();
                 let buf_ptr = self.builder.build_bit_cast(buffer.as_basic_value_enum(), self.context.ptr_type(inkwell::AddressSpace::default()), "interp.ptr").unwrap().into_pointer_value();
-                let first = unsafe { self.builder.build_gep(self.context.i8_type().array_type(512), buffer, &[self.context.i32_type().const_int(0,false), self.context.i32_type().const_int(0,false)], "first").unwrap() };
+                let first = unsafe { self.builder.build_gep(arr_ty, buffer, &[self.context.i32_type().const_int(0,false), self.context.i32_type().const_int(0,false)], "first").unwrap() };
                 self.builder.build_store(first, self.context.i8_type().const_int(0,false)).unwrap();
+                // Append helper: strncat(buf, part, CAP-1-strlen(buf)).
+                // When remaining <= 0 the append is skipped (truncation).
+                let append_bounded = |me: &Self, part_ptr: inkwell::values::PointerValue<'ctx>| {
+                    let strlen = me.get_or_declare_strlen();
+                    let strncat = me.get_or_declare_strncat();
+                    let cur_len = me.builder.build_call(strlen, &[buf_ptr.into()], "interp.len").unwrap().try_as_basic_value().basic().unwrap().into_int_value();
+                    let cur64 = me.builder.build_int_z_extend_or_bit_cast(cur_len, me.context.i64_type(), "interp.len64").unwrap();
+                    let cap = me.context.i64_type().const_int(INTERP_CAP - 1, false);
+                    let rem = me.builder.build_int_sub(cap, cur64, "interp.rem").unwrap();
+                    let cur_block = me.builder.get_insert_block().unwrap();
+                    let cur_fn = cur_block.get_parent().unwrap();
+                    let do_cat = me.context.append_basic_block(cur_fn, "interp.cat");
+                    let done = me.context.append_basic_block(cur_fn, "interp.done");
+                    let positive = me.builder.build_int_compare(inkwell::IntPredicate::SGT, rem, me.context.i64_type().const_zero(), "interp.has").unwrap();
+                    me.builder.build_conditional_branch(positive, do_cat, done).unwrap();
+                    me.builder.position_at_end(do_cat);
+                    me.builder.build_call(strncat, &[buf_ptr.into(), part_ptr.into(), rem.into()], "strncat").unwrap();
+                    me.builder.build_unconditional_branch(done).unwrap();
+                    me.builder.position_at_end(done);
+                };
                 for part in parts {
                     match part {
                         InterpolatedPart::Literal(s) => {
                             let lit_ptr = self.builder.build_global_string_ptr(s, "interp.lit").unwrap();
-                            let strcat = self.get_or_declare_strcat();
-                            self.builder.build_call(strcat, &[buf_ptr.into(), lit_ptr.as_pointer_value().into()], "strcat").unwrap();
+                            append_bounded(self, lit_ptr.as_pointer_value());
                         }
                         InterpolatedPart::Expr(e) => {
                             let val = self.codegen_expr(e)?;
                             if val.is_int_value() {
+                                // C-fix: `%lld` needs a full i64. Narrow
+                                // loads (`u8`/`i16`/...) would pass short
+                                // values into varargs (adjacent stack bytes
+                                // leak in). Extend: zero for unsigned exprs,
+                                // sign otherwise (best-effort signedness).
+                                let iv = val.into_int_value();
+                                let wide: BasicValueEnum<'ctx> = if iv.get_type().get_bit_width() < 64 {
+                                    if self.is_unsigned_expr(e) {
+                                        self.builder.build_int_z_extend(iv, self.context.i64_type(), "interp.zext").unwrap().into()
+                                    } else {
+                                        self.builder.build_int_s_extend(iv, self.context.i64_type(), "interp.sext").unwrap().into()
+                                    }
+                                } else {
+                                    val
+                                };
                                 let int_buf = self.builder.build_alloca(self.context.i8_type().array_type(64), "intbuf").unwrap();
                                 let int_ptr = self.builder.build_bit_cast(int_buf.as_basic_value_enum(), self.context.ptr_type(inkwell::AddressSpace::default()), "intptr").unwrap().into_pointer_value();
-                                let fmt = self.builder.build_global_string_ptr("%ld", "fmt.int").unwrap();
-                                let sprintf = self.get_or_declare_sprintf();
-                                self.builder.build_call(sprintf, &[int_ptr.into(), fmt.as_pointer_value().into(), val.into()], "sprintf").unwrap();
-                                let strcat = self.get_or_declare_strcat();
-                                self.builder.build_call(strcat, &[buf_ptr.into(), int_ptr.into()], "strcat").unwrap();
+                                let fmt = self.builder.build_global_string_ptr("%lld", "fmt.int").unwrap();
+                                let snprintf = self.get_or_declare_snprintf();
+                                let sz = self.context.i64_type().const_int(64, false);
+                                self.builder.build_call(snprintf, &[int_ptr.into(), sz.into(), fmt.as_pointer_value().into(), wide.into()], "snprintf").unwrap();
+                                append_bounded(self, int_ptr);
                             } else if val.is_pointer_value() {
-                                let strcat = self.get_or_declare_strcat();
-                                self.builder.build_call(strcat, &[buf_ptr.into(), val.into()], "strcat").unwrap();
+                                append_bounded(self, val.into_pointer_value());
                             } else if val.is_float_value() {
                                 let flt_buf = self.builder.build_alloca(self.context.i8_type().array_type(64), "fltbuf").unwrap();
                                 let flt_ptr = self.builder.build_bit_cast(flt_buf.as_basic_value_enum(), self.context.ptr_type(inkwell::AddressSpace::default()), "fltptr").unwrap().into_pointer_value();
                                 let fmt = self.builder.build_global_string_ptr("%f", "fmt.flt").unwrap();
-                                let sprintf = self.get_or_declare_sprintf();
-                                self.builder.build_call(sprintf, &[flt_ptr.into(), fmt.as_pointer_value().into(), val.into()], "sprintf").unwrap();
-                                let strcat = self.get_or_declare_strcat();
-                                self.builder.build_call(strcat, &[buf_ptr.into(), flt_ptr.into()], "strcat").unwrap();
+                                let snprintf = self.get_or_declare_snprintf();
+                                let sz = self.context.i64_type().const_int(64, false);
+                                self.builder.build_call(snprintf, &[flt_ptr.into(), sz.into(), fmt.as_pointer_value().into(), val.into()], "snprintf").unwrap();
+                                append_bounded(self, flt_ptr);
                             }
                         }
                     }
@@ -9888,6 +10367,13 @@ impl<'ctx> Codegen<'ctx> {
                             let bw = ty.into_int_type().get_bit_width();
                             if bw == 1 { return Ok(crate::sema::Ty::Bool); } else { return Ok(crate::sema::Ty::Int); }
                         } else if ty.is_pointer_type() {
+                            // C1: declared `T*` pointees resolve exactly;
+                            // strings and other pointers stay `Pointer(Int)`
+                            // (compat: pointee width only matters for loads
+                            // through declared locals).
+                            if let Some(pointee) = self.ptr_pointee.get(name).or_else(|| self.ptr_pointee.get(lookup)).cloned() {
+                                return Ok(crate::sema::Ty::Pointer(Box::new(pointee)));
+                            }
                             return Ok(crate::sema::Ty::Pointer(Box::new(crate::sema::Ty::Int)));
                         } else if ty.is_array_type() {
                             return Ok(crate::sema::Ty::Array(Box::new(crate::sema::Ty::Int)));
@@ -9946,6 +10432,15 @@ impl<'ctx> Codegen<'ctx> {
             }
             ExprKind::MemberAccess { object, field, .. } => {
                 let obj_ty = self.infer_expr_ty(object)?;
+                // A1: `Box<string>` — look up the specialized key first.
+                if let crate::sema::Ty::Generic(base, args) = &obj_ty {
+                    let key = format!("{}<{}>", base, args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(","));
+                    if let (Some(fields), Some(st)) = (self.struct_fields.get(&key), self.struct_types.get(&key)) {
+                        let idx = fields.get(field).ok_or(CodegenError{message: format!("struct `{key}` has no field `{field}`"), span: expr.span})?;
+                        let fty = st.get_field_type_at_index(*idx).unwrap();
+                        return self.llvm_field_to_sema(fty, expr.span);
+                    }
+                }
                 if let crate::sema::Ty::Struct(ref sname) = obj_ty {
                     // Trait-typed receiver: field type from the first
                     // implementor (sema validated agreement across all).
@@ -10006,6 +10501,17 @@ impl<'ctx> Codegen<'ctx> {
                 Ok(crate::sema::Ty::Map { key: Box::new(k), value: Box::new(v) })
             }
             ExprKind::Paren(inner) => self.infer_expr_ty(inner),
+            // C1 systems: `&x` is `Pointer(inner)`; `*p` is the pointee.
+            ExprKind::Unary { op, expr: inner } => {
+                match op {
+                    UnaryOp::AddrOf => Ok(crate::sema::Ty::Pointer(Box::new(self.infer_expr_ty(inner)?))),
+                    UnaryOp::Deref => match self.infer_expr_ty(inner)? {
+                        crate::sema::Ty::Pointer(p) | crate::sema::Ty::Own(p) => Ok(*p),
+                        other => Err(CodegenError { message: format!("cannot dereference `{other}`"), span: expr.span }),
+                    },
+                    _ => self.infer_expr_ty(inner),
+                }
+            }
             ExprKind::Call { callee, .. } => {
                 // Async-6: calls to known functions return the declared
                 // type (async callees yield `task<Ret>`).
@@ -10065,12 +10571,28 @@ pub fn compile_to_object(
     obj_path: &Path,
     opt: OptLevel,
 ) -> Result<(), String> {
+    compile_to_object_for(program, obj_path, opt, None)
+}
+
+/// Object emission for an explicit LLVM target triple (`--target`, C2
+/// systems): `None` means the host triple (default `compile_to_object`
+/// behavior). Only `x86_64`/`aarch64` families are built in (workspace
+/// `inkwell` features); anything else fails in `target_machine_for`.
+pub fn compile_to_object_for(
+    program: &Program,
+    obj_path: &Path,
+    opt: OptLevel,
+    target: Option<&str>,
+) -> Result<(), String> {
     let context = Context::create();
     let mut cg = Codegen::new(&context, "hella");
     cg.release = opt == OptLevel::Release;
     cg.compile_program(program).map_err(|e| {
         format!("{} at {}..{}", e.message, e.span.start, e.span.end)
     })?;
+    if let Some(triple) = target {
+        cg.module.set_triple(&inkwell::targets::TargetTriple::create(triple));
+    }
     // NOTE: no `module.verify()` on Windows: `LLVMVerifyModule`
     // segfaults (STATUS_ACCESS_VIOLATION) there for ordinary modules
     // whose function-level checks all pass (upstream Windows LLVM
@@ -10090,7 +10612,7 @@ pub fn compile_to_object(
     // `module.verify`). `opt` is honored via the `clang -O` flag.
     #[cfg(not(windows))]
     {
-        let machine = target_machine(opt)?;
+        let machine = target_machine_for(opt, target)?;
         if opt == OptLevel::Release {
             cg.optimize_for_release(&machine)?;
         }
@@ -10101,7 +10623,7 @@ pub fn compile_to_object(
     }
     #[cfg(windows)]
     {
-        windows_compile_ir_to_object(&cg, obj_path, opt)
+        windows_compile_ir_to_object(&cg, obj_path, opt, target)
     }
 }
 
@@ -10117,6 +10639,7 @@ fn windows_compile_ir_to_object(
     cg: &Codegen<'_>,
     obj_path: &Path,
     opt: OptLevel,
+    target: Option<&str>,
 ) -> Result<(), String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
@@ -10149,9 +10672,13 @@ fn windows_compile_ir_to_object(
         OptLevel::Debug => "-O0",
         OptLevel::Release => "-O3",
     };
-    let status = std::process::Command::new(&linker)
-        .arg("-c")
-        .arg(opt_flag)
+    let mut cmd = std::process::Command::new(&linker);
+    cmd.arg("-c").arg(opt_flag);
+    // C2 systems: forward an explicit `--target` to clang's assembler.
+    if let Some(triple) = target {
+        cmd.arg(format!("--target={triple}"));
+    }
+    let status = cmd
         .arg(&ll_path)
         .arg("-o")
         .arg(obj_path)
@@ -10170,15 +10697,34 @@ fn windows_compile_ir_to_object(
 pub fn target_machine(
     opt: OptLevel,
 ) -> Result<inkwell::targets::TargetMachine, String> {
-    // Host-only init: we always emit for the default (host) triple below,
-    // and initializing every backend references LLVM target libs that some
-    // distributions (notably the upstream Windows tarball) do not ship,
-    // breaking the link with unresolved LLVMInitialize*Target symbols.
+    target_machine_for(opt, None)
+}
+
+/// Target machine for an explicit LLVM triple (`--target`, C2 systems).
+/// Initializes native + x86 + aarch64 backends (the workspace `inkwell`
+/// feature set); triples outside those families fail with the LLVM error.
+pub fn target_machine_for(
+    opt: OptLevel,
+    target: Option<&str>,
+) -> Result<inkwell::targets::TargetMachine, String> {
+    // Native init always (host triple is the default); x86 + aarch64 inits
+    // cover `--target` crosses within the workspace feature set
+    // (`target-x86`, `target-aarch64`). Other families stay unbuilt on
+    // purpose (Windows tarball lacks their LLVM libs — see note below).
     inkwell::targets::Target::initialize_native(
         &inkwell::targets::InitializationConfig::default(),
     )
     .map_err(|e| e.to_string())?;
-    let triple = inkwell::targets::TargetMachine::get_default_triple();
+    inkwell::targets::Target::initialize_x86(
+        &inkwell::targets::InitializationConfig::default(),
+    );
+    inkwell::targets::Target::initialize_aarch64(
+        &inkwell::targets::InitializationConfig::default(),
+    );
+    let triple = match target {
+        Some(t) => inkwell::targets::TargetTriple::create(t),
+        None => inkwell::targets::TargetMachine::get_default_triple(),
+    };
     let target =
         inkwell::targets::Target::from_triple(&triple).map_err(|e| e.to_string())?;
     target

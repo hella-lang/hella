@@ -71,6 +71,24 @@ int main() do
     cursor = 99
     assert equals(splitNext("a", ",", ref cursor), "")
     assert cursor is -1
+    assert equals(toUpper("abcXYZ09!"), "ABCXYZ09!")
+    assert equals(toUpper(""), "")
+    assert equals(toLower("abcXYZ09!"), "abcxyz09!")
+    assert equals(toLower(""), "")
+    assert isDigit('5') is true
+    assert isDigit('a') is false
+    assert isAlpha('z') is true
+    assert isAlpha('Z') is true
+    assert isAlpha('5') is false
+    assert isAlphaNum('5') is true
+    assert isAlphaNum('Q') is true
+    assert isAlphaNum('!') is false
+    assert equals(trimStart("  hi  "), "hi  ")
+    assert equals(trimEnd("  hi  "), "  hi")
+    assert equals(trimStart("hi"), "hi")
+    assert equals(trimEnd("hi"), "hi")
+    assert equals(trimStart(""), "")
+    assert equals(trimEnd(""), "")
 
     println("string ok")
     return 0

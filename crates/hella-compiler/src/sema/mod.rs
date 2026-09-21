@@ -1937,8 +1937,16 @@ impl Checker {
                 }
             }
         }
-        // Handle extern functions / structs / enums / consts
+        // Handle extern functions / structs / enums / consts. Unwrap
+        // `Item::Attributed` first: `@cfg(...) extern ... do ... end` is
+        // legal source (`cfg` decides whether the block survives expansion,
+        // and other attributes are ignored) — without the unwrap every
+        // declaration in an attributed extern block would be invisible.
         for item in &prog.items {
+            let item = match item {
+                Item::Attributed { item, .. } => item.as_ref(),
+                other => other,
+            };
             if let Item::Extern(ex) = item {
                 for mem in &ex.members {
                     match mem {
@@ -1960,7 +1968,9 @@ impl Checker {
                                 }
                                 pt
                             }).collect();
-                            let param_modes: Vec<ParamMode> = vec![ParamMode::None; param_tys.len()];
+                            // Extern params may declare `ref`/`out` (C
+                            // out-parameters); call sites must match.
+                            let param_modes: Vec<ParamMode> = params.iter().map(|p| p.mode).collect();
                             self.funcs.insert(name.clone(), FuncSig{ret, params: param_tys, param_modes, param_names: params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: params.iter().map(|p| p.is_variadic).collect(), param_defaults: params.iter().map(|_| None).collect(), generic_params: Vec::new(), where_clause: None, is_async: false, span: *name_span});
                         }
                         crate::ast::ExternMember::Struct{name, name_span, fields, ..} => {
@@ -2877,6 +2887,21 @@ impl Checker {
                         }
                         t
                     }
+                    // C1 systems: `&x` yields `T*`; `*p` loads through `T*`.
+                    UnaryOp::AddrOf => Ty::Pointer(Box::new(t)),
+                    UnaryOp::Deref => match t {
+                        Ty::Pointer(inner) => *inner,
+                        Ty::Own(inner) => *inner,
+                        other => {
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "cannot dereference `{other}` (need `T*`)"
+                                ),
+                                span: expr.span,
+                            });
+                            Ty::Int
+                        }
+                    },
                 }
             }
             ExprKind::Postfix { op, expr: inner } => {
@@ -3414,6 +3439,20 @@ impl Checker {
             } => {
                 let obj_ty = self.check_expr(object);
                 let effective_ty = self.deref_ty(&obj_ty);
+                // A1: `Box<string>` field access — substitute generic params.
+                if let Ty::Generic(base, args) = &effective_ty {
+                    if let Some(sinfo) = self.structs.get(base).cloned() {
+                        if sinfo.generic_params.len() == args.len() {
+                            if let Some((_, fty_raw)) = sinfo.field_map.get(field) {
+                                let map: HashMap<String, Ty> = sinfo.generic_params.iter().map(|gp| gp.name.clone()).zip(args.iter().cloned()).collect();
+                                return Self::subst_generic_ty(fty_raw, &map);
+                            }
+                        }
+                        if let Some((_, fty)) = sinfo.field_map.get(field) {
+                            return fty.clone();
+                        }
+                    }
+                }
                 if let Ty::Struct(ref sname) = effective_ty {
                     if let Some(sinfo) = self.structs.get(sname).cloned() {
                         if let Some((_, fty)) = sinfo.field_map.get(field) {
@@ -3470,6 +3509,31 @@ impl Checker {
             }
             ExprKind::StructLit { ty, fields } => {
                 let lit_ty = self.resolve_type(ty);
+                // A1: `Box<string> has ... end` — substitute generic params.
+                if let Ty::Generic(base, args) = &lit_ty {
+                    if let Some(sinfo) = self.structs.get(base).cloned() {
+                        if sinfo.generic_params.len() == args.len() {
+                            let map: HashMap<String, Ty> = sinfo.generic_params.iter().map(|gp| gp.name.clone()).zip(args.iter().cloned()).collect();
+                            let mut seen = HashSet::new();
+                            for (fname, fspan, fexpr) in fields {
+                                if !seen.insert(fname) {
+                                    self.errors.push(SemError { message: format!("duplicate field `{fname}` in struct literal"), span: *fspan });
+                                }
+                                if let Some((_, expected_raw)) = sinfo.field_map.get(fname) {
+                                    let expected_ty = Self::subst_generic_ty(expected_raw, &map);
+                                    let got = self.check_expr(fexpr);
+                                    if &got != &expected_ty {
+                                        self.errors.push(SemError{message: format!("field `{fname}`: expected `{expected_ty}`, found `{got}`"), span: fexpr.span});
+                                    }
+                                } else {
+                                    self.errors.push(SemError { message: format!("unknown field `{fname}` for struct `{base}`"), span: *fspan });
+                                    let _ = self.check_expr(fexpr);
+                                }
+                            }
+                            return lit_ty;
+                        }
+                    }
+                }
                 let sname = match lit_ty {
                     Ty::Struct(ref n) => n.clone(),
                     _ => {
@@ -5177,10 +5241,29 @@ impl Checker {
                     }
                 }
             }
+            ExprKind::Unary { op: UnaryOp::Deref, expr: inner } => {
+                self.check_deref_lvalue(inner, expr.span)
+            }
             _ => {
                 self.errors.push(SemError {
                     message: "invalid assignment target".into(),
                     span: expr.span,
+                });
+                Ty::Int
+            }
+        }
+    }
+
+    /// Lvalue through a pointer dereference (`*p = v`, C1 systems).
+    fn check_deref_lvalue(&mut self, inner: &Expr, span: Span) -> Ty {
+        let t = self.check_expr(inner);
+        match t {
+            Ty::Pointer(pointee) => *pointee,
+            Ty::Own(pointee) => *pointee,
+            other => {
+                self.errors.push(SemError {
+                    message: format!("cannot assign through `{other}` (need `T*`)"),
+                    span,
                 });
                 Ty::Int
             }

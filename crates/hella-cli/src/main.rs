@@ -28,6 +28,16 @@ const HELLA_RT_C: &str = include_str!("../../../runtime/hella_rt.c");
 // (Async-8/Async-9): a synchronous program must not gain scheduler
 // symbols or async runtime dependencies.
 const HELLA_ASYNC_C: &str = include_str!("../../../runtime/hella_async.c");
+// Sync runtime (`runtime/hella_sync.c`: B1 mutex + channels, B2 wall-clock
+// + blocking TCP). Compiled and linked ONLY when the program declares
+// `hella_mutex_*`/`hella_chan_*`/`hella_wall_*`/`hella_tcp_*` externs
+// (i.e. imports `std::sync`/`std::chan`/`std::time`/`std::net`): programs
+// without them gain no pthread/Winsock dependency.
+const HELLA_SYNC_C: &str = include_str!("../../../runtime/hella_sync.c");
+// Shared task-state header included by both runtimes (B1/B2): written next
+// to whichever generated .c files are compiled so `#include "hella_task.h"`
+// resolves. The TLS slot + cancellation live in the sync runtime.
+const HELLA_TASK_H: &str = include_str!("../../../runtime/hella_task.h");
 
 /// Hella brand green #00A693 as an ANSI truecolor style.
 fn brand_style() -> Style {
@@ -183,6 +193,13 @@ struct BuildArgs {
     /// Error instead of resolving or updating hella.lock (CI reproducibility)
     #[arg(long, default_value_t = false)]
     frozen: bool,
+
+    /// LLVM target triple to emit for (C2 systems, e.g.
+    /// `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`). Default: host.
+    /// Only `x86_64`/`aarch64` families are built in; the final link also
+    /// passes `--target=` to the C driver (which must know the target).
+    #[arg(long, value_name = "TRIPLE")]
+    target: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -227,6 +244,13 @@ struct RunArgs {
     /// Error instead of resolving or updating hella.lock (CI reproducibility)
     #[arg(long, default_value_t = false)]
     frozen: bool,
+
+    /// LLVM target triple to emit for (C2 systems, e.g.
+    /// `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`). Default: host.
+    /// Only `x86_64`/`aarch64` families are built in; the final link also
+    /// passes `--target=` to the C driver (which must know the target).
+    #[arg(long, value_name = "TRIPLE")]
+    target: Option<String>,
 
     /// Arguments forwarded to the program (use `--` to separate them)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -360,6 +384,8 @@ struct CompileOptions<'a> {
     /// are entry-less by design — same rule as the LSP).
     require_main: bool,
     force: bool,
+    /// Explicit LLVM target triple (`--target`, C2). `None` = host.
+    target: Option<String>,
 }
 
 fn main() -> miette::Result<()> {
@@ -824,6 +850,7 @@ fn run_install(args: InstallArgs) -> miette::Result<()> {
             check_only: false,
             require_main: true,
             force: true,
+            target: None,
         };
         let _ = compile(opts)?;
         Ok(())
@@ -1068,6 +1095,7 @@ fn run_build(args: BuildArgs) -> miette::Result<()> {
         check_only: false,
         require_main: true,
         force: args.force,
+        target: args.target,
     };
     let _ = compile(opts)?;
     Ok(())
@@ -1091,6 +1119,7 @@ fn run_check(args: CheckArgs) -> miette::Result<()> {
         check_only: true,
         require_main,
         force: false,
+        target: None,
     };
     let _ = compile(opts)?;
     Ok(())
@@ -1152,6 +1181,7 @@ fn run_run(args: RunArgs) -> miette::Result<()> {
         check_only: false,
         require_main: true,
         force: args.force,
+        target: args.target,
     };
     let built = compile(opts)?;
     let exe = match built {
@@ -1454,13 +1484,18 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // pull the runtime in. Decided before the freshness check because the
     // runtime set is part of what identifies the binary.
     let needs_async = hella_compiler::async_req::uses_async_runtime(&program);
+    // B1: sync runtime (mutex + channels, B2 wall-clock + TCP + sleep/yield)
+    // only when declared (std::sync/chan/time/net/task-sleep). The async
+    // runtime depends on it (TLS slot + sleep/yield live there), so async
+    // implies sync.
+    let needs_sync = hella_compiler::async_req::uses_sync_runtime(&program) || needs_async;
 
     // ── Freshness ────────────────────────────────────────────────────
     // Skip codegen+link when the binary is newer than every source file
     // (entry + resolved imports) and the build stamp still matches this
     // profile and toolchain version. `run` relies on this: its binary
     // persists between invocations and only rebuilds on change.
-    if !opts.force && is_fresh(&exe_path, &source_files, opts.release, needs_async) {
+    if !opts.force && is_fresh(&exe_path, &source_files, opts.release, needs_async, needs_sync, opts.target.as_deref()) {
         pb.finish_with_message("Finished");
         status(
             &pb,
@@ -1480,9 +1515,14 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         &format!("{} ({build_kind})", gpath(&obj_path)),
     );
     let t_cg = Instant::now();
-    if let Err(e) =
-        codegen_to_object(&program, &obj_path, &filename, &source, opt)
-    {
+    if let Err(e) = codegen_to_object(
+        &program,
+        &obj_path,
+        &filename,
+        &source,
+        opt,
+        opts.target.as_deref(),
+    ) {
         pb.abandon();
         return Err(e);
     }
@@ -1504,6 +1544,12 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         e
     })?;
     let mut link = Command::new(&linker);
+    // C2 systems: explicit `--target` goes to the final link and every
+    // runtime-TU compile below (async/sync/shim) so all objects agree.
+    // The C driver must know the target (clang does; a bare `cc` may not).
+    if let Some(triple) = opts.target.as_deref() {
+        link.arg(format!("--target={triple}"));
+    }
     // Windows: the MSVC C runtime lacks the POSIX `setenv`/`unsetenv` names the
     // `std::env` module declares, so compile the embedded
     // `runtime/hella_rt.c` shim and link it along.
@@ -1523,11 +1569,12 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         }
         extra_paths.push(rt_src.clone());
         extra_paths.push(rt_obj.clone());
-        let cc_status = Command::new(&linker)
-            .arg("-c")
-            .arg(&rt_src)
-            .arg("-o")
-            .arg(&rt_obj)
+        let mut rt_cc = Command::new(&linker);
+        rt_cc.arg("-c").arg(&rt_src).arg("-o").arg(&rt_obj);
+        if let Some(triple) = opts.target.as_deref() {
+            rt_cc.arg(format!("--target={triple}"));
+        }
+        let cc_status = rt_cc
             .status()
             .map_err(|e| {
                 pb.abandon();
@@ -1554,10 +1601,21 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
             pb.abandon();
             return Err(miette::miette!("failed to write {}: {e}", a_src.display()));
         }
+        // Shared header for `#include "hella_task.h"` (same dir resolves;
+        // cleaned with the other generated files below).
+        let task_hdr = obj_path.with_file_name("hella_task.h");
+        if let Err(e) = fs::write(&task_hdr, HELLA_TASK_H) {
+            pb.abandon();
+            return Err(miette::miette!("failed to write {}: {e}", task_hdr.display()));
+        }
+        extra_paths.push(task_hdr);
         extra_paths.push(a_src.clone());
         extra_paths.push(a_obj.clone());
         let mut cc = Command::new(&linker);
         cc.arg("-c").arg(&a_src).arg("-o").arg(&a_obj);
+        if let Some(triple) = opts.target.as_deref() {
+            cc.arg(format!("--target={triple}"));
+        }
         if !cfg!(windows) {
             cc.arg("-pthread");
         }
@@ -1576,6 +1634,49 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
             link.arg("-pthread");
         }
     }
+    // B1: compile + link the sync runtime (mutex + channels) only when the
+    // program declares `hella_mutex_*`/`hella_chan_*` externs (i.e. imports
+    // `std::sync`/`std::chan`). Shares `-pthread` with the async runtime.
+    if needs_sync {
+        let s_src = obj_path.with_file_name("hella_sync_gen.c");
+        let s_obj = obj_path.with_file_name("hella_sync_gen.o");
+        if let Err(e) = fs::write(&s_src, HELLA_SYNC_C) {
+            pb.abandon();
+            return Err(miette::miette!("failed to write {}: {e}", s_src.display()));
+        }
+        // Shared header for `#include "hella_task.h"` (same contents in
+        // both blocks; harmless to write twice when both runtimes link).
+        let task_hdr = obj_path.with_file_name("hella_task.h");
+        if let Err(e) = fs::write(&task_hdr, HELLA_TASK_H) {
+            pb.abandon();
+            return Err(miette::miette!("failed to write {}: {e}", task_hdr.display()));
+        }
+        extra_paths.push(task_hdr);
+        extra_paths.push(s_src.clone());
+        extra_paths.push(s_obj.clone());
+        let mut cc = Command::new(&linker);
+        cc.arg("-c").arg(&s_src).arg("-o").arg(&s_obj);
+        if let Some(triple) = opts.target.as_deref() {
+            cc.arg(format!("--target={triple}"));
+        }
+        if !cfg!(windows) {
+            cc.arg("-pthread");
+        }
+        let cc_status = cc.status().map_err(|e| {
+            pb.abandon();
+            miette::miette!("failed to invoke {linker} for the sync runtime: {e}")
+        })?;
+        if !cc_status.success() {
+            pb.abandon();
+            return Err(miette::miette!(
+                "compiling the sync runtime failed with {linker}"
+            ));
+        }
+        link.arg(&s_obj);
+        if !needs_async && !cfg!(windows) {
+            link.arg("-pthread");
+        }
+    }
     link.arg(&obj_path).arg("-o").arg(&exe_path);
     // Windows: `scanf`/`printf`-family names in the UCRT headers are inline
     // wrappers that forward to `__stdio_common_*`; a Hella object referencing
@@ -1591,6 +1692,14 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     #[cfg(windows)]
     if let Some(legacy) = windows_legacy_stdio_lib() {
         link.arg(&legacy);
+    }
+    // B2: the sync runtime's TCP helpers need Winsock on Windows. System
+    // SDK import libs resolve through link.exe's default search, so the
+    // bare name suffices (unlike the MSVC-dir legacy_stdio shim above).
+    // POSIX needs nothing extra (sockets live in libc).
+    #[cfg(windows)]
+    if needs_sync {
+        link.arg("ws2_32.lib");
     }
     // Linux does not fold libm into libc: `-lm` is required wherever
     // `std::math` (or any `from "libm"` extern) may appear. The system
@@ -1633,7 +1742,7 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // Record what produced this binary so a later invocation can prove
     // freshness without recompiling (profile + toolchain version; sources
     // are compared by mtime against the binary itself).
-    write_build_stamp(&exe_path, opts.release, needs_async);
+    write_build_stamp(&exe_path, opts.release, needs_async, needs_sync, opts.target.as_deref());
 
     pb.finish_with_message("Finished");
     status(
@@ -1763,32 +1872,34 @@ fn stamp_path(exe: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
-fn stamp_contents(release: bool, needs_async: bool) -> String {
+fn stamp_contents(release: bool, needs_async: bool, needs_sync: bool, target: Option<&str>) -> String {
     format!(
-        "profile={}\ntoolchain=hella {}\nasync={}\n",
+        "profile={}\ntoolchain=hella {}\nasync={}\nsync={}\ntarget={}\n",
         if release { "release" } else { "debug" },
         env!("CARGO_PKG_VERSION"),
         // Async-9: the linked runtime set is part of what produced the
         // binary, so a sync<->async transition must rebuild even when no
-        // source mtime changed.
+        // source mtime changed. Same for the B1 sync runtime and C2 target.
         if needs_async { "runtime" } else { "none" },
+        if needs_sync { "runtime" } else { "none" },
+        target.unwrap_or("host"),
     )
 }
 
-fn write_build_stamp(exe: &Path, release: bool, needs_async: bool) {
-    let _ = fs::write(stamp_path(exe), stamp_contents(release, needs_async));
+fn write_build_stamp(exe: &Path, release: bool, needs_async: bool, needs_sync: bool, target: Option<&str>) {
+    let _ = fs::write(stamp_path(exe), stamp_contents(release, needs_async, needs_sync, target));
 }
 
 /// True when `exe` exists, is newer than every source file, and its stamp
 /// matches this profile + toolchain version. Anything else (missing binary
 /// or stamp, profile/version switch, touched source) means rebuild.
-fn is_fresh(exe: &Path, sources: &[PathBuf], release: bool, needs_async: bool) -> bool {
+fn is_fresh(exe: &Path, sources: &[PathBuf], release: bool, needs_async: bool, needs_sync: bool, target: Option<&str>) -> bool {
     let exe_mtime = match fs::metadata(exe).and_then(|m| m.modified()) {
         Ok(t) => t,
         Err(_) => return false,
     };
     match fs::read_to_string(stamp_path(exe)) {
-        Ok(contents) if contents == stamp_contents(release, needs_async) => {}
+        Ok(contents) if contents == stamp_contents(release, needs_async, needs_sync, target) => {}
         _ => return false,
     }
     sources.iter().all(|s| {
@@ -1832,10 +1943,11 @@ fn codegen_to_object(
     filename: &str,
     source: &str,
     opt: hella_compiler::codegen::OptLevel,
+    target: Option<&str>,
 ) -> miette::Result<()> {
-    if let Err(msg) =
-        hella_compiler::codegen::compile_to_object(program, obj_path, opt)
-    {
+    if let Err(msg) = hella_compiler::codegen::compile_to_object_for(
+        program, obj_path, opt, target,
+    ) {
         let diag = hella_compiler::error::SingleDiagnostic::new(
             filename.to_string(),
             source.to_string(),

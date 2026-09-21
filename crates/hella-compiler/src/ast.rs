@@ -412,6 +412,10 @@ pub enum ExternMember {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternParam {
     pub is_variadic: bool,
+    /// `ref`/`out` on an extern parameter means the C function writes
+    /// through the pointer (e.g. `rand_s(ref int out)`): the call site
+    /// passes the variable's address, exactly like a Hella `ref` param.
+    pub mode: ParamMode,
     pub ty: Type,
     pub name: String,
     pub name_span: Span,
@@ -750,6 +754,8 @@ pub enum UnaryOp {
     BitNot, // ~
     Inc, // ++ prefix/postfix
     Dec, // -- prefix/postfix
+    AddrOf, // &x (C1 systems: address-of, yields T*)
+    Deref, // *p (C1 systems: load through T*)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

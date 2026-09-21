@@ -17,6 +17,12 @@ pub(crate) fn function_exprs(f: &Function, v: &mut impl FnMut(&Expr)) {
 pub(crate) fn block_exprs(b: &Block, v: &mut impl FnMut(&Expr)) {
     block(b, v);
 }
+
+/// Crate-visible: visit a single expression and its children (used by
+/// the selective-import dependency closure, modules.rs).
+pub(crate) fn exprs(e: &Expr, v: &mut impl FnMut(&Expr)) {
+    expr(e, v);
+}
 fn params(ps: &[Param], v: &mut impl FnMut(&Expr)) {
     for p in ps {
         if let Some(e) = &p.default {

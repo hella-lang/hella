@@ -1,0 +1,20 @@
+// systems_ptr — raw pointers for systems work (C1).
+// `&x` takes an address (`T*`), `*p` loads through it, `*p = v` stores.
+// Exit code is the stored-through value (99).
+import std::io
+
+
+void main() do
+    int  x = 41
+    int* p = &x
+    int  y = *p
+    println("{y}")
+    *p = 99
+    println("{x}")
+
+    // Pointee width matters: unsigned bytes zero-extend on load.
+    u8  b  = 255
+    u8* pb = &b
+    u8  c  = *pb
+    println("{c}")
+end

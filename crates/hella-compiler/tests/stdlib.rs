@@ -10,14 +10,21 @@ use std::{
 
 struct Scratch(PathBuf);
 impl Scratch {
-    fn new() -> Self {
+    fn new(tag: &str) -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
             .unwrap();
-        let dir = root
-            .join("target")
-            .join(format!("stdlib-e2e-{}", std::process::id()));
+        // Unique per test: the suite runs tests in parallel and each
+        // test rewrites `main.hll`/`test.o`/the binary on every build.
+        let dir = root.join("target").join(format!(
+            "stdlib-e2e-{}-{tag}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }
@@ -98,17 +105,19 @@ impl Drop for Scratch {
 
 #[test]
 fn stdlib_compiles_links_and_runs_debug_and_release() {
-    let scratch = Scratch::new();
+    let scratch = Scratch::new("all");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for opt in [codegen::OptLevel::Debug, codegen::OptLevel::Release] {
         for (name, expected) in [
             ("string", "string ok\n"),
             ("fmt", "fmt ok\n"),
+            ("rand", "rand ok\n"),
             ("num", "num ok\n"),
             ("math", "doubles ok\nmath ok\n"),
             ("collections", "collections ok\n"),
             ("env", "env ok\n"),
             ("fs", "fs ok\n"),
+            ("path", "path ok\n"),
             ("io", "io: ok\n42\nA\nname? hello Ada\nage? 42\n"),
         ] {
             let source = fs::read_to_string(
@@ -157,5 +166,46 @@ end
             let exe = scratch.compile(&source, opt);
             scratch.run(&exe, "", false);
         }
+    }
+}
+
+#[test]
+fn stdlib_selective_imports_keep_transitive_helpers() {
+    // A selective import keeps the wanted symbols plus everything they
+    // reference: `trim` needs `substring`/`allocateString`, `toString`
+    // needs its nested `std::str` deps, `join` needs nested
+    // `std::vector` deps, `RED` is a const (previously kept nothing),
+    // and `flip` needs the module-level generator globals.
+    let scratch = Scratch::new("selective");
+    for opt in [codegen::OptLevel::Debug, codegen::OptLevel::Release] {
+        let exe = scratch.compile(
+            r#"
+import std::io
+import std::str::{trim, equals, len}
+import std::terminal::ansi::{RED, RESET}
+import std::rand::{seed, flip}
+import std::num::{toString}
+import std::fmt::{join}
+int main() do
+    assert equals(trim("  hi  "), "hi")
+    assert len(RED) is 5
+    println("{RED}hi{RESET}")
+    seed(1)
+    bool a = flip()
+    seed(1)
+    assert flip() is a
+    assert equals(toString(-42), "-42")
+    string vec parts = ["a", "b"]
+    assert equals(join(",", parts), "a,b")
+    println("selective ok")
+    return 0
+end
+"#,
+            opt,
+        );
+        assert_eq!(
+            scratch.run(&exe, "", true).0,
+            "\u{1b}[31mhi\u{1b}[0m\nselective ok\n"
+        );
     }
 }

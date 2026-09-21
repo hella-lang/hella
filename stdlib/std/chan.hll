@@ -1,0 +1,69 @@
+// std::chan — bounded channels for Hella (B1).
+// Import via: import std::chan
+//
+// Blocking FIFO queues over `runtime/hella_sync.c` (linked only when
+// imported). Two flavors: int channels (`chanCreateInt/sendInt/recvInt`)
+// and pointer channels (`...Ptr`, for `string`/`any` values — the C queue
+// carries the pointer, not a copy; the sender must keep the referent alive
+// until received, same rule as `std::str` aliasing).
+//
+// `recv` blocks until a value arrives or the channel is closed AND drained
+// (`ok` out-param reports which; `bool+ref/out` errors, no exceptions).
+// `send` blocks when full; `send` on a closed channel fails closed.
+// `close` wakes all waiters; `destroy` frees the queue (drain first).
+
+extern "c" from "hella_sync" do
+    any hella_chan_create(int capacity)
+    void hella_chan_close(any handle)
+    void hella_chan_destroy(any handle)
+    int hella_chan_send_int(any handle, int value)
+    int hella_chan_recv_int(any handle, ref int value)
+    int hella_chan_send_ptr(any handle, string value)
+    int hella_chan_recv_ptr(any handle, ref string value)
+    int hella_chan_len(any handle)
+end
+
+/// Creates an int channel holding up to `capacity` values (clamped 1..1M).
+any chanCreateInt(int capacity) do
+    return hella_chan_create(capacity)
+end
+
+/// Creates a pointer (string/any) channel.
+any chanCreatePtr(int capacity) do
+    return hella_chan_create(capacity)
+end
+
+/// Sends `value`; returns false when the channel is closed.
+bool chanSendInt(any ch, int value) do
+    return hella_chan_send_int(ch, value) is 0
+end
+
+/// Receives into `value`; `ok` is false when closed and drained.
+bool chanRecvInt(any ch, out int value) do
+    return hella_chan_recv_int(ch, ref value) is 0
+end
+
+/// Sends a string/pointer value; pointer is queued, not copied.
+bool chanSendPtr(any ch, string value) do
+    return hella_chan_send_ptr(ch, value) is 0
+end
+
+/// Receives a string/pointer value.
+bool chanRecvPtr(any ch, out string value) do
+    return hella_chan_recv_ptr(ch, ref value) is 0
+end
+
+/// Closes `ch`; pending values still drain, waiters wake.
+void chanClose(any ch) do
+    hella_chan_close(ch)
+end
+
+/// Destroys `ch` (close first; no further use).
+void chanDestroy(any ch) do
+    hella_chan_destroy(ch)
+end
+
+/// Current queued count (or -1 on misuse).
+int chanLen(any ch) do
+    return hella_chan_len(ch)
+end

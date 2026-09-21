@@ -26,13 +26,14 @@ end
 
 /// Cooperative checkpoint: offers the OS scheduler a chance to run other
 /// ready tasks. Cheap; safe to call in loops that would otherwise hog a
-/// task's thread. Synchronous programs never reference it.
+/// task's thread. Works from sync and async code alike.
 void yieldNow() do
     sched_yield()
 end
 
 /// Parks the calling task for `ms` milliseconds (clamped at 0). On POSIX
 /// this is `nanosleep` retried across `EINTR`; on Windows it is `Sleep`.
+/// Works from sync and async code alike (sync runtime, not the task system).
 void sleepMs(int ms) do
     hella_sleep_ms(ms)
 end
@@ -41,6 +42,8 @@ end
 /// cooperative cancellation). A task body should poll this at natural
 /// checkpoints and return early; nothing preempts it. Outside a task
 /// (e.g. on the main thread) this is always false.
+/// ASYNC-ONLY: calling it from a synchronous program fails to link
+/// (`hella_task_self` lives in the async runtime).
 bool cancelled() do
     any self = hella_task_self()
     if self is null do

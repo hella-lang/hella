@@ -31,6 +31,13 @@ int main() do
     double mn = fmin(1.5, 2.5)
     double mx = fmax(1.5, 2.5)
     double at = atan2(0.0, 1.0)
+    // clampf via fmin/fmax (double `is` not yet lowered: coverage only;
+    // negative double literals and `-` do not exist for doubles, so the
+    // below-lo case comes from libm: log(0.5) is negative)
+    double cf = clampf(10.0, 0.0, 5.0)
+    double below = log(0.5)
+    double cf2 = clampf(below, 0.0, 5.0)
+    double cf3 = clampf(3.0, 0.0, 5.0)
     // touch values so they are not DCE'd
     println("doubles ok")
 

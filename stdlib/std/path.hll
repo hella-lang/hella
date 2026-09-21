@@ -1,0 +1,106 @@
+// std::path — `/`-separated path helpers for Hella (pure Hella).
+// Import via: import std::path
+//
+// Byte-oriented like `std::str`: only `/` separates segments (no
+// Windows `\` handling — normalize before calling there). Allocs are
+// exact-size via `allocateString`; see stdlib/README.md on ownership.
+
+import std::str
+
+/// Joins two segments with exactly one `/` between them. Empty sides
+/// pass through (`joinPath("", "b")` is `"b"`); a doubled separator
+/// collapses (`joinPath("a/", "/b")` is `"a/b"`).
+string joinPath(string a, string b) do
+    if isEmpty(a) do
+        return b
+    end
+    if isEmpty(b) do
+        return a
+    end
+    int aLen = len(a)
+    if endsWith(a, "/") and startsWith(b, "/") do
+        aLen = aLen - 1
+    end
+    bool needSep = not endsWith(a, "/") and not startsWith(b, "/")
+    int sep = 0
+    if needSep do
+        sep = 1
+    end
+    int total = aLen + len(b)
+    assert total <= 9223372036854775806 - sep
+    total = total + sep
+    string result = allocateString(total)
+    int i = 0
+    while i < aLen do
+        result[i] = a[i]
+        i = i + 1
+    end
+    int dest = aLen
+    if needSep do
+        result[dest] = '/'
+        dest = dest + 1
+    end
+    int j = 0
+    int bLen = len(b)
+    while j < bLen do
+        result[dest] = b[j]
+        dest = dest + 1
+        j = j + 1
+    end
+    return result
+end
+
+/// Final segment after the last `/` (`basename("a/b")` is `"b"`).
+/// Trailing slashes are ignored (`basename("a/b/")` is `"b"`);
+/// the root and empty input yield `""`.
+string basename(string p) do
+    int stop = len(p)
+    while stop > 0 do
+        if p[stop - 1] is not '/' do
+            break
+        end
+        stop = stop - 1
+    end
+    int slash = lastIndexOf(substring(p, 0, stop), "/")
+    if slash < 0 do
+        return substring(p, 0, stop)
+    end
+    return substring(p, slash + 1, stop)
+end
+
+/// Directory portion up to (not including) the last `/`.
+/// No slash yields `"."`; the root (and any all-slash path) yields `"/"`.
+string dirname(string p) do
+    if isEmpty(p) do
+        return "."
+    end
+    // Never strip the leading slash: `stop > 1` keeps `/` (and `///`)
+    // intact so they report the root instead of `.`.
+    int stop = len(p)
+    while stop > 1 do
+        if p[stop - 1] is not '/' do
+            break
+        end
+        stop = stop - 1
+    end
+    int slash = lastIndexOf(substring(p, 0, stop), "/")
+    if slash < 0 do
+        return "."
+    end
+    if slash is 0 do
+        return "/"
+    end
+    return substring(p, 0, slash)
+end
+
+/// Text after the last `.` in the final segment
+/// (`extension("a.tar.gz")` is `"gz"`). Dotfiles (`.gitignore`),
+/// dotless names, and trailing dots yield `""`.
+string extension(string p) do
+    string base = basename(p)
+    int dot = lastIndexOf(base, ".")
+    if dot <= 0 do
+        return ""
+    end
+    return substring(base, dot + 1, len(base))
+end

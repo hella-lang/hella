@@ -1,3 +1,12 @@
+// std::terminal::ansi — ANSI/VT100 escape constants for Hella.
+// Import via: import std::terminal::ansi
+// (or selective: import std::terminal::ansi::{RED, RESET, BOLD}).
+//
+// Plain `const string` values (SGR colors/styles, cursor movement,
+// screen control); no functions, no FFI. Pair with `std::io` printing:
+// `println("{RED}error{RESET}")`. Non-TTY output keeps the raw bytes,
+// so gate on your own TTY detection when that matters.
+
 /// Reset all attributes.
 const string RESET = "[0m"
 

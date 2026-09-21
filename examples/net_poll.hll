@@ -1,0 +1,118 @@
+// net_poll — single-threaded poll-loop echo server (B3).
+// One task, no threads per connection: the listener and all clients are
+// non-blocking; `tcpPoll` finds readable fds and plain `tcpRecv`/`tcpSend`
+// move the bytes. Serves two connections then exits 0.
+// Run: ./net_poll server & ./net_poll client & ./net_poll client; wait.
+import std::io
+import std::str
+import std::net
+
+
+int runServer(int port) do
+    int listener = tcpListen(port)
+    if listener is -1 do
+        eprintln("listen failed")
+        return 1
+    end
+    int rc = tcpSetNonblock(listener)
+    if rc is not 0 do
+        eprintln("nonblock failed")
+        tcpClose(listener)
+        return 1
+    end
+    int vec fds    = [0, 0, 0, 0, 0, 0, 0, 0]
+    int     n      = 0
+    int     served = 0
+    string  buf    = allocateString(256)
+    int     guard  = 0
+    while served < 2 and guard < 2000 do
+        guard = guard + 1
+        int ready = tcpPoll(listener, pollRead(), 100)
+        if ready > 0 do
+            int conn = tcpAccept(listener)
+            if conn is not -1 and n < 8 do
+                int ok = tcpSetNonblock(conn)
+                if ok is 0 do
+                    fds[n] = conn
+                    n = n + 1
+                end
+                else do
+                    tcpClose(conn)
+                end
+            end
+            else do
+                if conn is not -1 do
+                    tcpClose(conn)
+                end
+            end
+        end
+        int i = 0
+        while i < n do
+            int fd = fds[i]
+            int r  = tcpPoll(fd, pollRead(), 0)
+            if r > 0 do
+                int got = tcpRecv(fd, buf, 255)
+                if got <= 0 do
+                    tcpClose(fd)
+                    fds[i] = fds[n - 1]
+                    fds.pop()
+                    n = n - 1
+                end
+                else do
+                    int sent = tcpSend(fd, buf, got)
+                    if sent is got do
+                        served = served + 1
+                    end
+                    i = i + 1
+                end
+            end
+            else do
+                i = i + 1
+            end
+        end
+    end
+    int k = 0
+    while k < n do
+        tcpClose(fds[k])
+        k = k + 1
+    end
+    tcpClose(listener)
+    if served is 2 do
+        return 0
+    end
+    return 1
+end
+
+int runClient(string ip, int port, string msg) do
+    int fd = tcpConnect(ip, port)
+    if fd is -1 do
+        eprintln("connect failed")
+        return 1
+    end
+    int n    = len(msg)
+    int sent = tcpSend(fd, msg, n)
+    if sent is not n do
+        eprintln("send failed")
+        tcpClose(fd)
+        return 1
+    end
+    string buf = allocateString(256)
+    int    got = tcpRecv(fd, buf, 255)
+    tcpClose(fd)
+    if got is n do
+        println(buf)
+        return 0
+    end
+    eprintln("echo mismatch")
+    return 1
+end
+
+int main(string[] args) do
+    int port = 18789
+    if args.len() > 0 do
+        if equals(args[0], "server") do
+            return runServer(port)
+        end
+    end
+    return runClient("127.0.0.1", port, "poll hella")
+end

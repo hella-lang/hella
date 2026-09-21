@@ -1164,7 +1164,7 @@ impl Parser {
                             // Check if `...` is alone (C varargs) or `...type ident` or `... ident` (derived)
                             if self.peek_token() == Some(&Token::RParen) {
                                 // `...` alone like `printf(string fmt, ...)`
-                                params.push(ExternParam { is_variadic: true, ty: Type::Any(dot_span), name: "".to_string(), name_span: dot_span, span: dot_span });
+                                params.push(ExternParam { is_variadic: true, mode: ParamMode::None, ty: Type::Any(dot_span), name: "".to_string(), name_span: dot_span, span: dot_span });
                             } else if self.peek_token() == Some(&Token::Ident) {
                                 // Could be `... vda` (derived) or `...int vda` (type is Ident `int`? but `int` is token Int, not Ident)
                                 // For `... vda` derived, next is Ident and following is `,` or `)` or `=`
@@ -1172,26 +1172,37 @@ impl Parser {
                                 if next_is_delim {
                                     let (pn, pn_span) = self.parse_ident()?;
                                     let span = Span::new(dot_span.start, pn_span.end);
-                                    params.push(ExternParam { is_variadic: true, ty: Type::Named("__derived__".to_string(), pn_span), name: pn, name_span: pn_span, span });
+                                    params.push(ExternParam { is_variadic: true, mode: ParamMode::None, ty: Type::Named("__derived__".to_string(), pn_span), name: pn, name_span: pn_span, span });
                                 } else {
                                     // `...type ident` where type is next
                                     let pty = self.parse_type()?;
                                     let (pn, pn_span) = self.parse_ident()?;
                                     let span = Span::new(dot_span.start, pn_span.end);
-                                    params.push(ExternParam { is_variadic: true, ty: pty, name: pn, name_span: pn_span, span });
+                                    params.push(ExternParam { is_variadic: true, mode: ParamMode::None, ty: pty, name: pn, name_span: pn_span, span });
                                 }
                             } else {
                                 // `...` with type like `...int vda` where `int` is not Ident but token Int
                                 let pty = self.parse_type()?;
                                 let (pn, pn_span) = self.parse_ident()?;
                                 let span = Span::new(dot_span.start, pn_span.end);
-                                params.push(ExternParam { is_variadic: true, ty: pty, name: pn, name_span: pn_span, span });
+                                params.push(ExternParam { is_variadic: true, mode: ParamMode::None, ty: pty, name: pn, name_span: pn_span, span });
                             }
                         } else {
+                            // Optional parameter mode: `ref T name` / `out T ident`
+                            // (C out-parameters: `rand_s(ref int out)`).
+                            let mode = if self.peek_token() == Some(&Token::Ref) {
+                                self.advance();
+                                ParamMode::Ref
+                            } else if self.peek_token() == Some(&Token::Out) {
+                                self.advance();
+                                ParamMode::Out
+                            } else {
+                                ParamMode::None
+                            };
                             let pty = self.parse_type()?;
                             let pty_span = pty.span();
                             let (pn, pn_span) = self.parse_ident()?;
-                            params.push(ExternParam { is_variadic: false, ty: pty, name: pn, name_span: pn_span, span: Span::new(pty_span.start, pn_span.end)});
+                            params.push(ExternParam { is_variadic: false, mode, ty: pty, name: pn, name_span: pn_span, span: Span::new(pty_span.start, pn_span.end)});
                         }
                         if !self.consume_if(Token::Comma) { break; }
                         if self.peek_token() == Some(&Token::RParen) { break; }
@@ -2506,7 +2517,8 @@ impl Parser {
         if !is_assign {
             return Ok(lhs);
         }
-        // Allow Ident, MemberAccess, Index, NullableMemberAccess as lvalue
+        // Allow Ident, MemberAccess, Index, NullableMemberAccess, and
+        // pointer dereference (`*p`) as lvalues (C1 systems).
         let is_lvalue = matches!(
             lhs.kind,
             ExprKind::Ident(_)
@@ -2514,6 +2526,7 @@ impl Parser {
                 | ExprKind::NullableMemberAccess { .. }
                 | ExprKind::Index { .. }
                 | ExprKind::Paren(_)
+                | ExprKind::Unary { op: UnaryOp::Deref, .. }
         );
         if !is_lvalue {
             return Err(ParseError {
@@ -2888,6 +2901,33 @@ impl Parser {
             return Ok(Expr {
                 kind: ExprKind::Unary {
                     op: UnaryOp::Dec,
+                    expr: Box::new(expr),
+                },
+                span,
+            });
+        }
+        // C1 systems: `&x` address-of and `*p` dereference. In prefix
+        // position both are unambiguous (`&` is only infix at the
+        // bitwise-and level, `*` only at the multiplicative level).
+        if self.peek_token() == Some(&Token::Ampersand) {
+            let start = self.advance().unwrap().span.start;
+            let expr = self.parse_unary()?;
+            let span = Span::new(start, expr.span.end);
+            return Ok(Expr {
+                kind: ExprKind::Unary {
+                    op: UnaryOp::AddrOf,
+                    expr: Box::new(expr),
+                },
+                span,
+            });
+        }
+        if self.peek_token() == Some(&Token::Star) {
+            let start = self.advance().unwrap().span.start;
+            let expr = self.parse_unary()?;
+            let span = Span::new(start, expr.span.end);
+            return Ok(Expr {
+                kind: ExprKind::Unary {
+                    op: UnaryOp::Deref,
                     expr: Box::new(expr),
                 },
                 span,

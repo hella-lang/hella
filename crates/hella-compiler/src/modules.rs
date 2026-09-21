@@ -390,6 +390,33 @@ pub struct Expanded {
     pub files: Vec<PathBuf>,
 }
 
+/// Unwrap `@cfg`-surviving attributes for name matching and linkage
+/// detection: a surviving `@cfg(unix) extern ...` block is still an
+/// extern block, and `@cfg(unix) u64 osEntropy() ...` is still a
+/// function named `osEntropy`.
+fn unwrap_item(item: &Item) -> &Item {
+    match item {
+        Item::Attributed { item, .. } => unwrap_item(item),
+        other => other,
+    }
+}
+
+/// Declared name of a top-level item, if it has one.
+fn item_name(item: &Item) -> Option<&str> {
+    match unwrap_item(item) {
+        Item::Function(f) => Some(&f.name),
+        Item::Struct(s) => Some(&s.name),
+        Item::Class(c) => Some(&c.name),
+        Item::Enum(e) => Some(&e.name),
+        Item::Trait(t) => Some(&t.name),
+        Item::Typedef(t) => Some(&t.name),
+        Item::Distinct(d) => Some(&d.name),
+        Item::Const(c) => Some(&c.name),
+        Item::Var(v) => Some(&v.name),
+        _ => None,
+    }
+}
+
 fn expand_items(
     items: Vec<Item>,
     importer: &Path,
@@ -458,19 +485,69 @@ fn expand_items(
         // conditional declaration reaches analysis or codegen.
         crate::cfg::apply_cfg(&mut sub_items, ctx.debug_mode);
         if let Some(ref syms) = imp.symbols {
-            let wanted: HashSet<String> = syms.iter().map(|(s, _)| s.clone()).collect();
+            let wanted: HashSet<String> =
+                syms.iter().map(|(s, _)| s.clone()).collect();
+            // Selective imports keep the wanted symbols plus everything
+            // they reference, so `import std::str::{trim}` still brings
+            // `substring`/`allocateString`, `import std::rand::{flip}`
+            // still brings the generator globals, and
+            // `import std::terminal::ansi::{RED}` finds the const at all.
+            // `extern` blocks are linkage requirements, not selectable
+            // symbols: they always ride along.
+            let mut by_name: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
+            for (i, it) in sub_items.iter().enumerate() {
+                if let Some(n) = item_name(it) {
+                    by_name.entry(n).or_insert(i);
+                }
+            }
+            let mut keep: HashSet<String> = HashSet::new();
+            let mut stack: Vec<String> = Vec::new();
+            for n in wanted.iter() {
+                if by_name.contains_key(n.as_str()) && keep.insert(n.clone()) {
+                    stack.push(n.clone());
+                }
+            }
+            while let Some(name) = stack.pop() {
+                let Some(&idx) = by_name.get(name.as_str()) else {
+                    continue;
+                };
+                let mut refs: Vec<String> = Vec::new();
+                let mut collect = |e: &crate::ast::Expr| match &e.kind {
+                    crate::ast::ExprKind::Call { callee, .. } => {
+                        refs.push(callee.clone())
+                    }
+                    crate::ast::ExprKind::Ident(n) => refs.push(n.clone()),
+                    _ => {}
+                };
+                match unwrap_item(&sub_items[idx]) {
+                    Item::Function(f) => {
+                        crate::lint::walk::function_exprs(f, &mut collect)
+                    }
+                    Item::Const(c) => {
+                        crate::lint::walk::exprs(&c.init, &mut collect)
+                    }
+                    Item::Var(v) => {
+                        if let Some(init) = &v.init {
+                            crate::lint::walk::exprs(init, &mut collect);
+                        }
+                    }
+                    _ => {}
+                }
+                for r in refs {
+                    if by_name.contains_key(r.as_str())
+                        && keep.insert(r.clone())
+                    {
+                        stack.push(r);
+                    }
+                }
+            }
             for it in sub_items {
-                match &it {
-                    Item::Function(f) if wanted.contains(&f.name) => out_items.push(it),
-                    Item::Struct(s) if wanted.contains(&s.name) => out_items.push(it),
-                    Item::Class(c) if wanted.contains(&c.name) => out_items.push(it),
-                    Item::Enum(e) if wanted.contains(&e.name) => out_items.push(it),
-                    Item::Import(_) => {}
-                    // `extern` blocks are linkage requirements, not
-                    // selectable symbols: a selective import like
-                    // `import std::io::{print}` still needs the libc
-                    // declarations its wrappers call into.
+                match unwrap_item(&it) {
                     Item::Extern(_) => out_items.push(it),
+                    _ if item_name(&it).is_some_and(|n| keep.contains(n)) => {
+                        out_items.push(it);
+                    }
                     _ => {}
                 }
             }

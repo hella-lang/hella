@@ -45,6 +45,9 @@ impl Scratch {
         let errors = sema::check(&program);
         assert!(errors.is_empty(), "sema: {errors:?}");
         let needs_async = async_req::uses_async_runtime(&program);
+        // Sync runtime (TLS slot + sleep/yield live there; async implies
+        // sync) mirrors the CLI's conditional link (B1/B2).
+        let needs_sync = async_req::uses_sync_runtime(&program) || needs_async;
         let object = self.0.join("test.o");
         codegen::compile_to_object(&program, &object, opt).unwrap();
         let exe = self.0.join(if cfg!(windows) { "test.exe" } else { "test" });
@@ -59,6 +62,12 @@ impl Scratch {
         if needs_async {
             command.arg(root().join("runtime/hella_async.c"));
             if !cfg!(windows) {
+                command.arg("-pthread");
+            }
+        }
+        if needs_sync {
+            command.arg(root().join("runtime/hella_sync.c"));
+            if !needs_async && !cfg!(windows) {
                 command.arg("-pthread");
             }
         }
