@@ -199,6 +199,12 @@ jobs:
           rc=(${PIPESTATUS[@]})
           echo "fmt bin_rc=${rc[0]} grep_rc=${rc[1]}"
           { [ "${rc[0]}" -eq 0 ] && [ "${rc[1]}" -eq 0 ]; } || fail=1
+          # std::rand: golden sequence (seed 42) must match byte-for-byte
+          # on every platform; entropy-seeded draws only need to parse.
+          ./examples/stdlib_rand | grep -q "rand ok"
+          rc=(${PIPESTATUS[@]})
+          echo "rand bin_rc=${rc[0]} grep_rc=${rc[1]}"
+          { [ "${rc[0]}" -eq 0 ] && [ "${rc[1]}" -eq 0 ]; } || fail=1
           exit $fail
 
       - name: Run async example (structured concurrency + conditional runtime)

@@ -71,6 +71,22 @@ without its `import` is a sema error (`undefined function`) by design.
     Output-size overflow and allocation failure assert rather than wrap/truncate.
 - `std::types` — `stdlib/std/types.hll` (doc-only manifest of the implicit
   environment: `bool string i8…u128 int uint float double`; importing is a no-op)
+- `std::rand` — `stdlib/std/rand.hll` (Async-10 sibling: uses `@cfg` for the
+  platform split)
+  - Deterministic xoshiro256** generator, seeded via standard splitmix64
+    (`seed(42)` produces the same stream as any splitmix64 implementation —
+    the example is a golden test). `seed`/`seedRandom` (OS entropy),
+    `next` (raw u64), `intRange`/`intBelow` (rejection sampling, no modulo
+    bias), `bitsBelow`, `chance`, `flip`.
+  - Cross-platform entropy via `@cfg`: POSIX reads 8 bytes from
+    `/dev/urandom` (`fopen`/`fgetc`, plain libc, no extra link flags);
+    Windows uses UCRT `rand_s` declared with `ref` out-params. One `@cfg`
+    per platform block; the other is absent from the program entirely.
+  - NOT cryptographically secure (documented in the module header); the
+    generator state is module-global and not thread-safe.
+  - Requires the unsigned `>>` fix: `u64 >> n` lowers to a logical shift
+    (`u64Const` builds 64-bit constants from `int`-fitting halves, since
+    Hella literals are `int`-bounded).
 - `std::task` — `stdlib/std/task.hll` (named `task` because `async` is a
   compiler keyword and cannot be an import segment, same as `vector` vs `vec`;
   Async-10)
@@ -171,6 +187,8 @@ cargo test --workspace
 cargo build -p hella
 ./target/debug/hella build --force -f examples/stdlib_fmt.hll
 ./examples/stdlib_fmt
+./target/debug/hella build --force -f examples/stdlib_rand.hll
+./examples/stdlib_rand   # golden sequence; must pass on every platform
 printf 'Ada\n42\n' | ./target/debug/hella run --force -f examples/stdlib_io.hll
 ```
 

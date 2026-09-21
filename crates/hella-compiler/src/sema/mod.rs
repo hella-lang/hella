@@ -1937,8 +1937,16 @@ impl Checker {
                 }
             }
         }
-        // Handle extern functions / structs / enums / consts
+        // Handle extern functions / structs / enums / consts. Unwrap
+        // `Item::Attributed` first: `@cfg(...) extern ... do ... end` is
+        // legal source (`cfg` decides whether the block survives expansion,
+        // and other attributes are ignored) — without the unwrap every
+        // declaration in an attributed extern block would be invisible.
         for item in &prog.items {
+            let item = match item {
+                Item::Attributed { item, .. } => item.as_ref(),
+                other => other,
+            };
             if let Item::Extern(ex) = item {
                 for mem in &ex.members {
                     match mem {
@@ -1960,7 +1968,9 @@ impl Checker {
                                 }
                                 pt
                             }).collect();
-                            let param_modes: Vec<ParamMode> = vec![ParamMode::None; param_tys.len()];
+                            // Extern params may declare `ref`/`out` (C
+                            // out-parameters); call sites must match.
+                            let param_modes: Vec<ParamMode> = params.iter().map(|p| p.mode).collect();
                             self.funcs.insert(name.clone(), FuncSig{ret, params: param_tys, param_modes, param_names: params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: params.iter().map(|p| p.is_variadic).collect(), param_defaults: params.iter().map(|_| None).collect(), generic_params: Vec::new(), where_clause: None, is_async: false, span: *name_span});
                         }
                         crate::ast::ExternMember::Struct{name, name_span, fields, ..} => {

@@ -1,0 +1,256 @@
+// std::rand — deterministic PRNG + OS-entropy seeding for Hella.
+// Import via: import std::rand
+//
+// HONEST SCOPE: the generator is xoshiro256**, a high-quality general-
+// purpose PRNG. It is NOT cryptographically secure — do not use it for
+// keys, tokens, or anything an attacker must not predict. The only
+// cryptographic-strength piece is the OS entropy used by `seedRandom()`.
+//
+// Cross-platform entropy (via `@cfg`, EBNF 34a):
+// * POSIX (macOS/Linux/BSD): read 8 bytes from /dev/urandom via
+//   `fopen`/`fgetc` (plain libc; `fgetc` returns bytes as ints, so no
+//   byte-to-int cast is needed anywhere). No extra link flags.
+// * Windows: `rand_s` from the UCRT (linked by default with MSVC/clang;
+//   declared with `ref` out-params, matching the C signature).
+//
+// The generator state is module-level (one global generator per program).
+// Functions are single-threaded by contract; calling them concurrently
+// from multiple tasks is a data race (use one generator per task once
+// per-task state exists).
+
+// ── Deterministic generator state (xoshiro256**) ────────────────────
+// Four 64-bit words, seeded via splitmix64 so even a single small seed
+// expands into a well-mixed state.
+u64 r0 = 0
+u64 r1 = 0
+u64 r2 = 0
+u64 r3 = 0
+
+// Logical (zero-fill) right shift. `>>` on `u64` already lowers to an
+// unsigned shift (the compiler emits lshr for unsigned types), so this is
+// a no-op passthrough kept for readability of the rotation helper below.
+u64 ushr(u64 x, int n) do
+    return x >> n
+end
+
+/// 64-bit rotate left (xoshiro's `rotl`).
+u64 rotl(u64 x, int k) do
+    return (x << k) | (x >> (64 - k))
+end
+
+/// Internal: splitmix64 step — used only for seeding (not the generator).
+/// The magic constants are from Steele et al.; all arithmetic wraps by
+/// design (two's-complement u64 semantics). Constants are built from
+/// `int`-fitting halves because Hella literals are `int`-bounded:
+/// 0x9E3779B97F4A7C15, 0xBF58476D1CE4E5B9, 0x94D049BB133111EB.
+u64 mix64(u64 x) do
+    x = (x ^ (x >> 30)) * u64Const(-1084733587, 484763065)
+    x = (x ^ (x >> 27)) * u64Const(-1798288965, 321982955)
+    return x ^ (x >> 31)
+end
+
+// ── 64-bit constant builder (Hella literals are `int`-bounded) ─────
+// Any `int i` in [-2^63, 2^63-1] converts to its bit pattern for free:
+// `u64 x = i` reinterprets the 64 bits. This helper documents the trick
+// for the few places the low half alone is not enough (`hi` defaults to
+// 0). So `u64Const(hi, lo)` = `(hi << 32) | zeroext(lo)`.
+u64 u64Const(int hi, int lo) do
+    u64 lo64 = lo & 4294967295
+    u64 hi64 = hi & 4294967295
+    return lo64 | (hi64 << 32)
+end
+
+/// All-ones u64 (u64-max; no `u64` literal above `int` max exists).
+u64 allOnes() do
+    return 0 - 1
+end
+
+/// Internal: splitmix64 state — a single word that advances by the
+/// golden ratio each draw, mixed through splitmix64's bijection.
+/// Standard construction: any language implementing splitmix64
+/// produces the same stream from the same seed (and we cross-check).
+u64 smState = 0
+
+u64 smNext() do
+    smState = smState + u64Const(-1640531527, 2135587861)
+    return mix64(smState)
+end
+
+/// Seed the generator deterministically from `s`. Standard
+/// splitmix64 expander, so `seed(s)` matches any splitmix64
+/// implementation elsewhere (the example binary is a golden test).
+void seed(u64 s) do
+    smState = s
+    r0 = smNext()
+    r1 = smNext()
+    r2 = smNext()
+    r3 = smNext()
+end
+
+// ── Cross-platform OS entropy ───────────────────────────────────────
+// OS bytes arrive as a `u64` via index arithmetic on the raw buffer:
+// `buf[i]` yields a `char`; comparing each against the 256 literal bytes
+// recovers the numeric value without casts.
+
+@cfg(unix)
+extern "c" from "libc" do
+    string fopen(string path, string mode)
+    int fgetc(string file)
+    int fclose(string file)
+end
+
+@cfg(windows)
+extern "c" from "libc" do
+    int rand_s(ref int slot)
+end
+
+/// Internal: 8 bytes of OS entropy from /dev/urandom, folded into a u64
+/// seed. `fgetc` returns each byte as an `int` (0-255, EOF = -1), so no
+/// byte-to-int casts are needed anywhere in this module. Returns 0 only
+/// when urandom is unreadable or short — practically impossible on a
+/// live system; the caller falls back so the generator is never unseeded.
+@cfg(unix)
+u64 osEntropy() do
+    string f = fopen("/dev/urandom", "r")
+    if f is null do
+        return 0
+    end
+    u64 v = 0
+    int i = 0
+    bool bad = false
+    while i < 8 do
+        int byte = fgetc(f)
+        if byte < 0 do
+            bad = true
+            i = 8
+        end else do
+            v = (v << 8) | byte
+            i = i + 1
+        end
+    end
+    fclose(f)
+    if bad do
+        return 0
+    end
+    return v
+end
+
+/// Internal (Windows): 8 bytes of OS entropy from the UCRT `rand_s`,
+/// which is seeded from the OS CSPRNG. rand_s writes 4 bytes per call, so
+/// two calls fill the 64-bit word. Returns 0 on failure (see POSIX note).
+@cfg(windows)
+u64 osEntropy() do
+    int lo = 0
+    int hi = 0
+    if rand_s(ref lo) is not 0 do
+        return 0
+    end
+    if rand_s(ref hi) is not 0 do
+        return 0
+    end
+    // `u64Const` masks both 32-bit halves (zero-extension, no sign junk).
+    return u64Const(hi, lo)
+end
+
+/// Seed the generator from the operating system's entropy source.
+/// Falls back to a fixed non-zero seed if the OS source fails or returns
+/// zero, so the generator is never left unseeded (0x0139408DCCBBF7A44 —
+/// an arbitrary odd 64-bit pattern).
+void seedRandom() do
+    u64 entropy = osEntropy()
+    u64 zero = 0
+    if entropy is zero do
+        entropy = u64Const(20529293, -876643772)
+    end
+    seed(entropy)
+end
+
+// ── Generator core (xoshiro256**) ───────────────────────────────────
+
+/// Next raw 64-bit value and advance the state.
+u64 next() do
+    u64 result = rotl(r1 * 5, 7) * 9
+    u64 t = r1 << 17
+    r2 = r2 ^ r0
+    r3 = r3 ^ r1
+    r1 = r1 ^ r2
+    r0 = r0 ^ r3
+    r2 = r2 ^ t
+    r3 = rotl(r3, 45)
+    return result
+end
+
+/// Uniform integer in [lo, hi] (inclusive on both ends).
+/// hi < lo yields lo (the range is empty, so nothing to choose).
+int intRange(int lo, int hi) do
+    if hi <= lo do
+        return lo
+    end
+    u64 span = hi - lo + 1
+    // Rejection sampling against the largest multiple of `span` below
+    // 2^63. Draws are masked non-negative first (`& low63`), so every
+    // comparison/remainder here is signed-safe and the result is exactly
+    // uniform (no modulo bias).
+    u64 low63 = (1 << 63) - 1
+    u64 limit = low63 - (low63 % span)
+    u64 draw = next() & low63
+    while draw > limit do
+        draw = next() & low63
+    end
+    return lo + (draw % span)
+end
+
+/// Uniform integer in [0, n). `n <= 0` yields 0 (empty range).
+int intBelow(int n) do
+    if n <= 0 do
+        return 0
+    end
+    return intRange(0, n - 1)
+end
+
+/// True with probability `percent`% (0 never, 100 always).
+/// Values outside 0..100 clamp to the nearest endpoint.
+bool chance(int percent) do
+    if percent <= 0 do
+        return false
+    end
+    if percent >= 100 do
+        return true
+    end
+    return intBelow(100) < percent
+end
+
+/// A fair coin flip.
+bool flip() do
+    // One bit of the raw stream; `>> 63` yields 0/1 (logical shift on u64).
+    u64 one = 1
+    return (next() >> 63) is one
+end
+
+/// Uniform value in [0, 2^bits) for `0 <= bits <= 63`. Each bit is drawn
+/// from the stream, so the result is unbiased by construction. `bits <= 0`
+/// yields 0; `bits > 63` clamps to 63 (a signed `int` cannot hold more).
+int bitsBelow(int bits) do
+    if bits <= 0 do
+        return 0
+    end
+    if bits > 63 do
+        bits = 63
+    end
+    u64 one = 1
+    int acc = 0
+    int drawn = 0
+    while drawn < bits do
+        u64 raw = next()
+        int b = 0
+        while b < 64 and drawn < bits do
+            // Take the high bit each time: the low bits of xoshiro are
+            // the weakest, so consume from the top.
+            u64 bit = (raw >> (63 - b)) & one
+            acc = (acc << 1) | bit
+            drawn = drawn + 1
+            b = b + 1
+        end
+    end
+    return acc
+end

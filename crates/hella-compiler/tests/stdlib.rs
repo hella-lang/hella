@@ -104,6 +104,7 @@ fn stdlib_compiles_links_and_runs_debug_and_release() {
         for (name, expected) in [
             ("string", "string ok\n"),
             ("fmt", "fmt ok\n"),
+            ("rand", "rand ok\n"),
             ("num", "num ok\n"),
             ("math", "doubles ok\nmath ok\n"),
             ("collections", "collections ok\n"),
