@@ -94,6 +94,13 @@ pub struct Codegen<'ctx> {
     /// tracked so `len()`/`is_empty()` lower instead of falling through to
     /// class-method resolution.
     string_vars: HashSet<String>,
+    /// Variables holding unsigned ints (`u8..u128`, `uint`). LLVM ints
+    /// carry no signedness, so `infer_expr_ty` reports every int-typed
+    /// local as `Ty::Int`; without this set `>>` on a `u64` local would
+    /// lower to an arithmetic (sign-propagating) shift. Tracked at
+    /// declaration like `string_vars` so `>>` lowers to a logical
+    /// (zero-fill) shift for unsigned operands.
+    unsigned_vars: HashSet<String>,
     /// Extern functions declared with a Hella `int` return that lower to a
     /// true C `int` (i32). Call results are sign-extended to Hella `int`
     /// (i64) at the call site — zero-extension would destroy the sign of
@@ -205,6 +212,7 @@ impl<'ctx> Codegen<'ctx> {
             vec_vars: HashSet::new(),
             map_vars: HashSet::new(),
             string_vars: HashSet::new(),
+            unsigned_vars: HashSet::new(),
             task_vars: HashMap::new(),
             extern_int32_rets: HashSet::new(),
             trait_names: HashSet::new(),
@@ -1565,6 +1573,9 @@ impl<'ctx> Codegen<'ctx> {
         if matches!(c.ty, Some(Type::String(_))) {
             self.string_vars.insert(c.name.clone());
         }
+        if c.ty.as_ref().is_some_and(Self::ast_ty_is_unsigned) {
+            self.unsigned_vars.insert(c.name.clone());
+        }
         Ok(())
     }
 
@@ -1954,6 +1965,7 @@ impl<'ctx> Codegen<'ctx> {
         if matches!(&v.ty, Type::String(_)) {
             self.string_vars.insert(v.name.clone());
         }
+        self.track_unsigned_var(&v.name, &v.ty);
         // Ownership tracking for program-end destruction.
         match &v.ty {
             Type::Own(inner, _) => {
@@ -2028,6 +2040,7 @@ impl<'ctx> Codegen<'ctx> {
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
+                        self.track_unsigned_var(&param.name, &param.ty);
                     }
                     let _ = self.codegen_block(&f.body)?;
                     if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
@@ -2087,6 +2100,7 @@ impl<'ctx> Codegen<'ctx> {
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
+                        self.track_unsigned_var(&param.name, &param.ty);
                     }
                     let _ = self.codegen_block(&op.body)?;
                     if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
@@ -2145,6 +2159,7 @@ impl<'ctx> Codegen<'ctx> {
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
+                        self.track_unsigned_var(&param.name, &param.ty);
                         let _ = self.codegen_block(body)?;
                         if self.builder.get_insert_block().unwrap().get_terminator().is_none() { self.builder.build_return(None).unwrap(); }
                         self.vars.pop();
@@ -2429,6 +2444,65 @@ impl<'ctx> Codegen<'ctx> {
         }
         let lookup = name.rsplit("::").next().unwrap_or(name);
         lookup != name && self.vec_vars.contains(lookup)
+    }
+
+    /// `true` when the AST type denotes an unsigned int (`u8..u128`,
+    /// `uint`, resolved through the same stdlib-name table as sema).
+    fn ast_ty_is_unsigned(ty: &Type) -> bool {
+        match ty {
+            Type::Named(name, _) => matches!(
+                crate::sema::Ty::from_stdlib_name(name.rsplit("::").next().unwrap_or(name)),
+                Some(crate::sema::Ty::SizedInt { signed: false, .. })
+                    | Some(crate::sema::Ty::UInt)
+            ),
+            _ => false,
+        }
+    }
+
+    /// `true` when the sema type is an unsigned int.
+    fn sema_ty_is_unsigned(ty: &crate::sema::Ty) -> bool {
+        matches!(
+            ty,
+            crate::sema::Ty::SizedInt { signed: false, .. } | crate::sema::Ty::UInt
+        )
+    }
+
+    /// Record an unsigned-int variable for shift lowering. Call at every
+    /// declaration site that tracks `string_vars`/`vec_vars`.
+    fn track_unsigned_var(&mut self, name: &str, ty: &Type) {
+        if Self::ast_ty_is_unsigned(ty) {
+            self.unsigned_vars.insert(name.to_string());
+        }
+    }
+
+    /// Is this variable an unsigned int (tracked at declaration)?
+    fn is_unsigned_var(&self, name: &str) -> bool {
+        if self.unsigned_vars.contains(name) {
+            return true;
+        }
+        let lookup = name.rsplit("::").next().unwrap_or(name);
+        lookup != name && self.unsigned_vars.contains(lookup)
+    }
+
+    /// `true` when `>>` on this expression must be a logical (zero-fill)
+    /// shift: the operand is an unsigned int. Idents resolve through
+    /// decl-site tracking (LLVM ints carry no signedness); calls resolve
+    /// through the callee's declared return type; anything else falls
+    /// back to `infer_expr_ty` (literals stay arithmetic).
+    fn is_unsigned_expr(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Paren(inner) => self.is_unsigned_expr(inner),
+            ExprKind::Ident(name) => self.is_unsigned_var(name),
+            ExprKind::Call { callee, .. } => self
+                .funcs
+                .get(callee.as_str())
+                .is_some_and(|(_, info)| Self::sema_ty_is_unsigned(&info.ret)),
+            _ => matches!(
+                self.infer_expr_ty(expr),
+                Ok(crate::sema::Ty::SizedInt { signed: false, .. })
+                    | Ok(crate::sema::Ty::UInt)
+            ),
+        }
     }
 
     /// Map struct type `{ [CAP x K], [CAP x V], i64 len }`.
@@ -4134,6 +4208,11 @@ impl<'ctx> Codegen<'ctx> {
         if is_string {
             self.string_vars.insert(name.clone());
         }
+        if opt_ty.as_ref().is_some_and(Self::ast_ty_is_unsigned)
+            || param_sema_ty.as_ref().is_some_and(|t| Self::sema_ty_is_unsigned(t))
+        {
+            self.unsigned_vars.insert(name.clone());
+        }
         if let Some(class_name) = match opt_ty {
             Some(t) => self.dtor_name_for_ast_ty(t),
             None => None,
@@ -4884,6 +4963,7 @@ impl<'ctx> Codegen<'ctx> {
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
+                        self.track_unsigned_var(&param.name, &param.ty);
                     // Track `own` params for destruction at function exit.
                     self.track_own_param(alloca, &param.ty);
                     // Track params needing destructors (user dtors,
@@ -5167,6 +5247,7 @@ impl<'ctx> Codegen<'ctx> {
             }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
+                        self.track_unsigned_var(&param.name, &param.ty);
         }
         let always_returns = self.codegen_block(&method.body)?;
         if !always_returns && self.builder.get_insert_block().unwrap().get_terminator().is_none() {
@@ -5245,6 +5326,7 @@ impl<'ctx> Codegen<'ctx> {
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
+                        self.track_unsigned_var(&param.name, &param.ty);
         }
         // `initialize` sugar: this.field = param for each param matching a field
         // EBNF §22: initialize is sugar for this.field = field
@@ -6061,6 +6143,7 @@ impl<'ctx> Codegen<'ctx> {
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
+                        self.track_unsigned_var(&param.name, &param.ty);
             let _ = self.codegen_block(body)?;
             if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
                 self.builder.build_return(None).unwrap();
@@ -6106,6 +6189,7 @@ impl<'ctx> Codegen<'ctx> {
                         if matches!(&param.ty, Type::Vec { .. }) { self.vec_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::Map { .. }) { self.map_vars.insert(param.name.clone()); }
                         if matches!(&param.ty, Type::String(_)) { self.string_vars.insert(param.name.clone()); }
+                        self.track_unsigned_var(&param.name, &param.ty);
         }
         let _ = self.codegen_block(&op.body)?;
         if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
@@ -6368,6 +6452,7 @@ impl<'ctx> Codegen<'ctx> {
                 if matches!(&d.ty, Type::String(_)) {
                     self.string_vars.insert(d.name.clone());
                 }
+                self.track_unsigned_var(&d.name, &d.ty);
                 // Track `task<T>` handles for `await` result typing (Async-6).
                 if let Type::Task(el, _) = &d.ty {
                     self.task_vars.insert(d.name.clone(), crate::sema::Ty::Task(Box::new((el.as_ref()).into())));
@@ -6665,6 +6750,9 @@ impl<'ctx> Codegen<'ctx> {
                 }
                 if matches!(c.ty, Some(Type::String(_))) {
                     self.string_vars.insert(c.name.clone());
+                }
+                if c.ty.as_ref().is_some_and(Self::ast_ty_is_unsigned) {
+                    self.unsigned_vars.insert(c.name.clone());
                 }
                 // Vector const with literal initializer: per-element buffer fill.
                 if let (Some(Type::Vec { .. }), ExprKind::ArrayLit(elems)) =
@@ -7710,7 +7798,23 @@ impl<'ctx> Codegen<'ctx> {
                     BinOp::BitOr => self.builder.build_or(l.into_int_value(), r.into_int_value(), "bitor").unwrap().into(),
                     BinOp::BitXor => self.builder.build_xor(l.into_int_value(), r.into_int_value(), "bitxor").unwrap().into(),
                     BinOp::Shl => self.builder.build_left_shift(l.into_int_value(), r.into_int_value(), "shl").unwrap().into(),
-                    BinOp::Shr => self.builder.build_right_shift(l.into_int_value(), r.into_int_value(), false, "shr").unwrap().into(),
+                    // `>>` is LOGICAL (zero-fill) for unsigned operands:
+                    // `u64`/`uN` (stdlib types skill) are unsigned, and a
+                    // sign-propagating shift would corrupt random/PRNG code
+                    // whose values legitimately have the high bit set.
+                    // Signed int-like types keep the arithmetic shift.
+                    BinOp::Shr => {
+                        // inkwell's `is_signed` means "emit an arithmetic
+                        // (sign-propagating) shift": true for signed int-
+                        // likes, false for unsigned (logical, zero-fill).
+                        // `u64`/`uN`/`uint` must be logical — PRNG-style
+                        // code relies on the high bit being a data bit.
+                        // Signedness comes from decl-site tracking: LLVM
+                        // ints carry none, so `infer_expr_ty` alone
+                        // reports every int local as `Ty::Int`.
+                        let unsigned = self.is_unsigned_expr(lhs);
+                        self.builder.build_right_shift(l.into_int_value(), r.into_int_value(), !unsigned, "shr").unwrap().into()
+                    }
                     BinOp::NullCoalesce => {
                         // `a ?? b`: `a` is an Optional `{value, present}`
                         // struct (or legacy int/pointer zero-check).

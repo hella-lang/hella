@@ -1,0 +1,45 @@
+import std::io
+import std::rand
+
+// stdlib_rand.hll — regression for std::rand (golden-tested against the
+// reference xoshiro256** + splitmix64 construction: seed(42) must produce
+// exactly this sequence, byte-for-byte, on every platform).
+
+int main() do
+    seed(42)
+    int a = intRange(1, 6)
+    int b = intRange(1, 6)
+    int d = intBelow(10)
+    bool f = flip()
+    // next() returns u64; printed/compared through `int` (same bits).
+    int raw = next()
+    int raw2 = next()
+
+    assert a is 1
+    assert b is 1
+    assert d is 1
+    assert f is true
+    assert raw is -151191095644234140
+    assert raw2 is -4247557243643801032
+
+    // Determinism: reseeding replays the sequence exactly.
+    seed(42)
+    assert intRange(1, 6) is 1
+    assert intRange(1, 6) is 1
+
+    // chance edges are deterministic regardless of the stream.
+    assert chance(0) is false
+    assert chance(100) is true
+
+    // Entropy-seeded draws only need to be in range (content varies).
+    seedRandom()
+    int r = intBelow(100)
+    assert r >= 0
+    assert r < 100
+    int t = bitsBelow(8)
+    assert t >= 0
+    assert t < 256
+
+    println("rand ok")
+    return 0
+end
