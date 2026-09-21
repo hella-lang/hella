@@ -527,7 +527,13 @@ unary-operator =
     | "+"
     | "-"
     | "~"
+    | "&"
+    | "*"
     | "not" ;
+    (* C1 systems: prefix `&x` is address-of (yields `T*`), prefix `*p`
+       is dereference (loads through `T*`; `*p = v` stores). In prefix
+       position both are unambiguous (`&` is only infix at the
+       bitwise-and level, `*` only at the multiplicative level). *)
 
 
 postfix-expression =

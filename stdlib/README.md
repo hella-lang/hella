@@ -37,11 +37,14 @@ without its `import` is a sema error (`undefined function`) by design.
   - `splitNext(s, sep, ref cursor)` — initialize cursor to 0; call while it is
     nonnegative. Returns one field, updates cursor, sets -1 after the last field.
     Preserves leading/adjacent/trailing empty fields. Empty separator returns s
-    once. This streaming API avoids Hella's current 16-element vector limit.
+    once. This streaming API avoids collecting into fixed-capacity vectors
+    (currently 256 elements; split stays streaming regardless).
   - `replaceAll(s, needle, replacement)` — left-to-right non-overlapping matches;
     empty needle is a no-op (unlike Go), replacement text is never searched.
   - `allocateString(size)` — low-level zero-filled, NUL-terminated allocation;
     asserts on invalid size or allocation failure. Used by composition helpers.
+  - `concat(a, b)` — exact-size fresh allocation of `a` + `b` (no
+    interpolation buffer); the safe builder for unbounded text.
 - `std::num` — `stdlib/std/num.hll`
   - `bool parseInt(string s, ref int value)` — strict whole-string signed decimal
     parsing for Hella's current 64-bit int. Optional leading `+`/`-`, leading zeros
@@ -128,6 +131,28 @@ without its `import` is a sema error (`undefined function`) by design.
     exposed until scope cancellation semantics settle).
   - Honest scope: these are cooperative primitives. `sleepMs` parks one
     task; nothing here turns blocking libc I/O into non-blocking I/O.
+    `sleepMs`/`yieldNow` link from sync programs too (sync runtime);
+    `cancelled()` needs an async context (async runtime).
+- `std::sync` — `stdlib/std/sync.hll` (B1)
+  - `mutexCreate`/`mutexLock`/`mutexUnlock`/`mutexDestroy` over
+    `runtime/hella_sync.c` (opaque `any` handles, pthread/Win32).
+    Non-recursive; guard `std::rand` globals or any state shared across
+    `spawn`ed tasks. Linked only when imported.
+- `std::chan` — `stdlib/std/chan.hll` (B1)
+  - Bounded blocking FIFOs: `chanCreateInt`/`chanCreatePtr`,
+    `chanSendInt`/`chanRecvInt` (`out` value + bool ok),
+    `chanSendPtr`/`chanRecvPtr` (pointer queued, not copied),
+    `chanClose`/`chanDestroy`/`chanLen`. Full senders block; `recv`
+    returns `ok=false` when closed and drained. See `examples/sync_chan.hll`.
+- `std::time` — `stdlib/std/time.hll` (B2)
+  - `wallMs`/`wallMicros` (Unix epoch, via `hella_wall_micros`),
+    `deadlineMs`/`expiredMs` helpers. Wall clock, not monotonic.
+- `std::net` — `stdlib/std/net.hll` (B2)
+  - Blocking IPv4 TCP: `tcpConnect`/`tcpListen`/`tcpAccept`/
+    `tcpSend`/`tcpRecv`/`tcpClose` (`int` fds, -1 on error, `recv` 0 on
+    peer close). IP literals only (no DNS); caller-owned string buffers.
+    Blocking parks the task thread — serve each fd on its own task
+    (see `examples/net_echo.hll`). Evented I/O is future work.
 - `std::terminal::ansi` — `stdlib/std/terminal/ansi.hll`
   - Plain `const string` values, no functions, no FFI: SGR styles
     (`RESET BOLD DIM ITALIC UNDERLINE ...`), standard + bright foreground

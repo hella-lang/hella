@@ -2887,6 +2887,21 @@ impl Checker {
                         }
                         t
                     }
+                    // C1 systems: `&x` yields `T*`; `*p` loads through `T*`.
+                    UnaryOp::AddrOf => Ty::Pointer(Box::new(t)),
+                    UnaryOp::Deref => match t {
+                        Ty::Pointer(inner) => *inner,
+                        Ty::Own(inner) => *inner,
+                        other => {
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "cannot dereference `{other}` (need `T*`)"
+                                ),
+                                span: expr.span,
+                            });
+                            Ty::Int
+                        }
+                    },
                 }
             }
             ExprKind::Postfix { op, expr: inner } => {
@@ -5226,10 +5241,29 @@ impl Checker {
                     }
                 }
             }
+            ExprKind::Unary { op: UnaryOp::Deref, expr: inner } => {
+                self.check_deref_lvalue(inner, expr.span)
+            }
             _ => {
                 self.errors.push(SemError {
                     message: "invalid assignment target".into(),
                     span: expr.span,
+                });
+                Ty::Int
+            }
+        }
+    }
+
+    /// Lvalue through a pointer dereference (`*p = v`, C1 systems).
+    fn check_deref_lvalue(&mut self, inner: &Expr, span: Span) -> Ty {
+        let t = self.check_expr(inner);
+        match t {
+            Ty::Pointer(pointee) => *pointee,
+            Ty::Own(pointee) => *pointee,
+            other => {
+                self.errors.push(SemError {
+                    message: format!("cannot assign through `{other}` (need `T*`)"),
+                    span,
                 });
                 Ty::Int
             }

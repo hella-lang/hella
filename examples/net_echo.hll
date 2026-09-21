@@ -1,10 +1,10 @@
 // net_echo — blocking TCP echo server + client (B2).
 // The server accepts one connection, echoes one message, exits 0.
 // Run: ./net_echo server & ./net_echo client; exit code is bytes echoed.
-
 import std::io
 import std::str
 import std::net
+
 
 int runServer(int port) do
     int listener = tcpListen(port)
@@ -19,7 +19,7 @@ int runServer(int port) do
         return 1
     end
     string buf = allocateString(256)
-    int n = tcpRecv(conn, buf, 255)
+    int    n   = tcpRecv(conn, buf, 255)
     if n <= 0 do
         eprintln("recv failed")
         tcpClose(conn)
@@ -41,16 +41,16 @@ int runClient(string ip, int port) do
         eprintln("connect failed")
         return 1
     end
-    string msg = "hello hella"
-    int n = len(msg)
-    int sent = tcpSend(fd, msg, n)
+    string msg  = "hello hella"
+    int    n    = len(msg)
+    int    sent = tcpSend(fd, msg, n)
     if sent is not n do
         eprintln("send failed")
         tcpClose(fd)
         return 1
     end
     string buf = allocateString(256)
-    int got = tcpRecv(fd, buf, 255)
+    int    got = tcpRecv(fd, buf, 255)
     tcpClose(fd)
     if got is n do
         println(buf)

@@ -123,6 +123,9 @@ cargo run -p hella -- build -f examples/basics.hll && ./examples/basics; echo $?
 | `own_heap.hll` | Heap ownership (`own`, `new`, `delete`, moves, trait upcasts) |
 | `trait_objects.hll` | Trait objects and dynamic dispatch |
 | `async_basic.hll` | Structured concurrency: `async` functions, `task<T>`, `spawn`, `await`, `scope do ... end`, `yield` |
+| `sync_chan.hll` | Mutex + bounded channels: producer/consumer across tasks (`std::sync`, `std::chan`) |
+| `net_echo.hll` | Blocking TCP echo server + client (`std::net`, `std::time`) |
+| `systems_ptr.hll` | Raw pointers: `&x` address-of, `*p` load/store (`--target` selects the LLVM triple) |
 | `cfg_platform.hll` | Conditional compilation: `@cfg(os = "...")`, `@cfg(debug)` |
 | `types_ints.hll` / `types_arr.hll` / `types_vec.hll` / `types_map.hll` / `types_methods.hll` | Integer widths, fixed arrays (incl. slicing), vectors, maps, methods |
 | `stdlib_*.hll` (`string`, `num`, `math`, `env`, `fs`, `path`, `collections`, `fmt`, `io`, `rand`) | Standard-library tours: strings, parsing/conversion, math, environment, files, paths, vectors/maps, text composition, terminal IO, random generation (see `stdlib/README.md` for the module index) |

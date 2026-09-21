@@ -754,6 +754,8 @@ pub enum UnaryOp {
     BitNot, // ~
     Inc, // ++ prefix/postfix
     Dec, // -- prefix/postfix
+    AddrOf, // &x (C1 systems: address-of, yields T*)
+    Deref, // *p (C1 systems: load through T*)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

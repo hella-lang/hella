@@ -2517,7 +2517,8 @@ impl Parser {
         if !is_assign {
             return Ok(lhs);
         }
-        // Allow Ident, MemberAccess, Index, NullableMemberAccess as lvalue
+        // Allow Ident, MemberAccess, Index, NullableMemberAccess, and
+        // pointer dereference (`*p`) as lvalues (C1 systems).
         let is_lvalue = matches!(
             lhs.kind,
             ExprKind::Ident(_)
@@ -2525,6 +2526,7 @@ impl Parser {
                 | ExprKind::NullableMemberAccess { .. }
                 | ExprKind::Index { .. }
                 | ExprKind::Paren(_)
+                | ExprKind::Unary { op: UnaryOp::Deref, .. }
         );
         if !is_lvalue {
             return Err(ParseError {
@@ -2899,6 +2901,33 @@ impl Parser {
             return Ok(Expr {
                 kind: ExprKind::Unary {
                     op: UnaryOp::Dec,
+                    expr: Box::new(expr),
+                },
+                span,
+            });
+        }
+        // C1 systems: `&x` address-of and `*p` dereference. In prefix
+        // position both are unambiguous (`&` is only infix at the
+        // bitwise-and level, `*` only at the multiplicative level).
+        if self.peek_token() == Some(&Token::Ampersand) {
+            let start = self.advance().unwrap().span.start;
+            let expr = self.parse_unary()?;
+            let span = Span::new(start, expr.span.end);
+            return Ok(Expr {
+                kind: ExprKind::Unary {
+                    op: UnaryOp::AddrOf,
+                    expr: Box::new(expr),
+                },
+                span,
+            });
+        }
+        if self.peek_token() == Some(&Token::Star) {
+            let start = self.advance().unwrap().span.start;
+            let expr = self.parse_unary()?;
+            let span = Span::new(start, expr.span.end);
+            return Ok(Expr {
+                kind: ExprKind::Unary {
+                    op: UnaryOp::Deref,
                     expr: Box::new(expr),
                 },
                 span,

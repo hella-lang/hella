@@ -2391,6 +2391,8 @@ fn unary_prefix(op: UnaryOp) -> &'static str {
         UnaryOp::BitNot => "~",
         UnaryOp::Inc => "++",
         UnaryOp::Dec => "--",
+        UnaryOp::AddrOf => "&",
+        UnaryOp::Deref => "*",
     }
 }
 

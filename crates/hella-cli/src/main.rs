@@ -193,6 +193,13 @@ struct BuildArgs {
     /// Error instead of resolving or updating hella.lock (CI reproducibility)
     #[arg(long, default_value_t = false)]
     frozen: bool,
+
+    /// LLVM target triple to emit for (C2 systems, e.g.
+    /// `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`). Default: host.
+    /// Only `x86_64`/`aarch64` families are built in; the final link also
+    /// passes `--target=` to the C driver (which must know the target).
+    #[arg(long, value_name = "TRIPLE")]
+    target: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -237,6 +244,13 @@ struct RunArgs {
     /// Error instead of resolving or updating hella.lock (CI reproducibility)
     #[arg(long, default_value_t = false)]
     frozen: bool,
+
+    /// LLVM target triple to emit for (C2 systems, e.g.
+    /// `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`). Default: host.
+    /// Only `x86_64`/`aarch64` families are built in; the final link also
+    /// passes `--target=` to the C driver (which must know the target).
+    #[arg(long, value_name = "TRIPLE")]
+    target: Option<String>,
 
     /// Arguments forwarded to the program (use `--` to separate them)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -370,6 +384,8 @@ struct CompileOptions<'a> {
     /// are entry-less by design — same rule as the LSP).
     require_main: bool,
     force: bool,
+    /// Explicit LLVM target triple (`--target`, C2). `None` = host.
+    target: Option<String>,
 }
 
 fn main() -> miette::Result<()> {
@@ -834,6 +850,7 @@ fn run_install(args: InstallArgs) -> miette::Result<()> {
             check_only: false,
             require_main: true,
             force: true,
+            target: None,
         };
         let _ = compile(opts)?;
         Ok(())
@@ -1078,6 +1095,7 @@ fn run_build(args: BuildArgs) -> miette::Result<()> {
         check_only: false,
         require_main: true,
         force: args.force,
+        target: args.target,
     };
     let _ = compile(opts)?;
     Ok(())
@@ -1101,6 +1119,7 @@ fn run_check(args: CheckArgs) -> miette::Result<()> {
         check_only: true,
         require_main,
         force: false,
+        target: None,
     };
     let _ = compile(opts)?;
     Ok(())
@@ -1162,6 +1181,7 @@ fn run_run(args: RunArgs) -> miette::Result<()> {
         check_only: false,
         require_main: true,
         force: args.force,
+        target: args.target,
     };
     let built = compile(opts)?;
     let exe = match built {
@@ -1475,7 +1495,7 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // (entry + resolved imports) and the build stamp still matches this
     // profile and toolchain version. `run` relies on this: its binary
     // persists between invocations and only rebuilds on change.
-    if !opts.force && is_fresh(&exe_path, &source_files, opts.release, needs_async, needs_sync) {
+    if !opts.force && is_fresh(&exe_path, &source_files, opts.release, needs_async, needs_sync, opts.target.as_deref()) {
         pb.finish_with_message("Finished");
         status(
             &pb,
@@ -1495,9 +1515,14 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         &format!("{} ({build_kind})", gpath(&obj_path)),
     );
     let t_cg = Instant::now();
-    if let Err(e) =
-        codegen_to_object(&program, &obj_path, &filename, &source, opt)
-    {
+    if let Err(e) = codegen_to_object(
+        &program,
+        &obj_path,
+        &filename,
+        &source,
+        opt,
+        opts.target.as_deref(),
+    ) {
         pb.abandon();
         return Err(e);
     }
@@ -1519,6 +1544,12 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         e
     })?;
     let mut link = Command::new(&linker);
+    // C2 systems: explicit `--target` goes to the final link and every
+    // runtime-TU compile below (async/sync/shim) so all objects agree.
+    // The C driver must know the target (clang does; a bare `cc` may not).
+    if let Some(triple) = opts.target.as_deref() {
+        link.arg(format!("--target={triple}"));
+    }
     // Windows: the MSVC C runtime lacks the POSIX `setenv`/`unsetenv` names the
     // `std::env` module declares, so compile the embedded
     // `runtime/hella_rt.c` shim and link it along.
@@ -1538,11 +1569,12 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         }
         extra_paths.push(rt_src.clone());
         extra_paths.push(rt_obj.clone());
-        let cc_status = Command::new(&linker)
-            .arg("-c")
-            .arg(&rt_src)
-            .arg("-o")
-            .arg(&rt_obj)
+        let mut rt_cc = Command::new(&linker);
+        rt_cc.arg("-c").arg(&rt_src).arg("-o").arg(&rt_obj);
+        if let Some(triple) = opts.target.as_deref() {
+            rt_cc.arg(format!("--target={triple}"));
+        }
+        let cc_status = rt_cc
             .status()
             .map_err(|e| {
                 pb.abandon();
@@ -1581,6 +1613,9 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         extra_paths.push(a_obj.clone());
         let mut cc = Command::new(&linker);
         cc.arg("-c").arg(&a_src).arg("-o").arg(&a_obj);
+        if let Some(triple) = opts.target.as_deref() {
+            cc.arg(format!("--target={triple}"));
+        }
         if !cfg!(windows) {
             cc.arg("-pthread");
         }
@@ -1621,6 +1656,9 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         extra_paths.push(s_obj.clone());
         let mut cc = Command::new(&linker);
         cc.arg("-c").arg(&s_src).arg("-o").arg(&s_obj);
+        if let Some(triple) = opts.target.as_deref() {
+            cc.arg(format!("--target={triple}"));
+        }
         if !cfg!(windows) {
             cc.arg("-pthread");
         }
@@ -1704,7 +1742,7 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // Record what produced this binary so a later invocation can prove
     // freshness without recompiling (profile + toolchain version; sources
     // are compared by mtime against the binary itself).
-    write_build_stamp(&exe_path, opts.release, needs_async, needs_sync);
+    write_build_stamp(&exe_path, opts.release, needs_async, needs_sync, opts.target.as_deref());
 
     pb.finish_with_message("Finished");
     status(
@@ -1834,33 +1872,34 @@ fn stamp_path(exe: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
-fn stamp_contents(release: bool, needs_async: bool, needs_sync: bool) -> String {
+fn stamp_contents(release: bool, needs_async: bool, needs_sync: bool, target: Option<&str>) -> String {
     format!(
-        "profile={}\ntoolchain=hella {}\nasync={}\nsync={}\n",
+        "profile={}\ntoolchain=hella {}\nasync={}\nsync={}\ntarget={}\n",
         if release { "release" } else { "debug" },
         env!("CARGO_PKG_VERSION"),
         // Async-9: the linked runtime set is part of what produced the
         // binary, so a sync<->async transition must rebuild even when no
-        // source mtime changed. Same for the B1 sync runtime.
+        // source mtime changed. Same for the B1 sync runtime and C2 target.
         if needs_async { "runtime" } else { "none" },
         if needs_sync { "runtime" } else { "none" },
+        target.unwrap_or("host"),
     )
 }
 
-fn write_build_stamp(exe: &Path, release: bool, needs_async: bool, needs_sync: bool) {
-    let _ = fs::write(stamp_path(exe), stamp_contents(release, needs_async, needs_sync));
+fn write_build_stamp(exe: &Path, release: bool, needs_async: bool, needs_sync: bool, target: Option<&str>) {
+    let _ = fs::write(stamp_path(exe), stamp_contents(release, needs_async, needs_sync, target));
 }
 
 /// True when `exe` exists, is newer than every source file, and its stamp
 /// matches this profile + toolchain version. Anything else (missing binary
 /// or stamp, profile/version switch, touched source) means rebuild.
-fn is_fresh(exe: &Path, sources: &[PathBuf], release: bool, needs_async: bool, needs_sync: bool) -> bool {
+fn is_fresh(exe: &Path, sources: &[PathBuf], release: bool, needs_async: bool, needs_sync: bool, target: Option<&str>) -> bool {
     let exe_mtime = match fs::metadata(exe).and_then(|m| m.modified()) {
         Ok(t) => t,
         Err(_) => return false,
     };
     match fs::read_to_string(stamp_path(exe)) {
-        Ok(contents) if contents == stamp_contents(release, needs_async, needs_sync) => {}
+        Ok(contents) if contents == stamp_contents(release, needs_async, needs_sync, target) => {}
         _ => return false,
     }
     sources.iter().all(|s| {
@@ -1904,10 +1943,11 @@ fn codegen_to_object(
     filename: &str,
     source: &str,
     opt: hella_compiler::codegen::OptLevel,
+    target: Option<&str>,
 ) -> miette::Result<()> {
-    if let Err(msg) =
-        hella_compiler::codegen::compile_to_object(program, obj_path, opt)
-    {
+    if let Err(msg) = hella_compiler::codegen::compile_to_object_for(
+        program, obj_path, opt, target,
+    ) {
         let diag = hella_compiler::error::SingleDiagnostic::new(
             filename.to_string(),
             source.to_string(),

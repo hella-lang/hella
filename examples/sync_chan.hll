@@ -1,10 +1,10 @@
 // sync_chan — mutex + bounded channels (B1 working primitives).
 // Producer/consumer across `spawn`ed tasks in a `scope`; the main task
 // drains and joins. Exit code is the number of values received.
-
 import std::io
 import std::sync
 import std::chan
+
 
 int produce(any ch, int n) async do
     int i = 0
@@ -17,12 +17,12 @@ int produce(any ch, int n) async do
 end
 
 void main() async do
-    any ch = chanCreateInt(8)
+    any ch    = chanCreateInt(8)
     int total = 0
     scope do
-        task<int> p = spawn produce(ch, 5)
-        int v = 0
-        bool ok = true
+        task<int> p  = spawn produce(ch, 5)
+        int       v  = 0
+        bool      ok = true
         while ok do
             ok = chanRecvInt(ch, out v)
             if ok do
