@@ -3848,6 +3848,18 @@ impl<'ctx> Codegen<'ctx> {
         let fn_ty = self.context.i32_type().fn_type(&[ptr_ty.into(), ptr_ty.into()], true);
         self.module.add_function("sprintf", fn_ty, None)
     }
+    fn get_or_declare_snprintf(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("snprintf") { return f; }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = self.context.i32_type().fn_type(&[ptr_ty.into(), self.context.i64_type().into(), ptr_ty.into()], true);
+        self.module.add_function("snprintf", fn_ty, None)
+    }
+    fn get_or_declare_strncat(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("strncat") { return f; }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), self.context.i64_type().into()], false);
+        self.module.add_function("strncat", fn_ty, None)
+    }
     fn get_or_declare_strdup(&self) -> FunctionValue<'ctx> {
         if let Some(f) = self.module.get_function("strdup") { return f; }
         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -8957,16 +8969,42 @@ impl<'ctx> Codegen<'ctx> {
             }
             ExprKind::Match(m) => self.codegen_match(m, expr.span),
             ExprKind::InterpolatedString(parts, _) => {
-                let buffer = self.builder.build_alloca(self.context.i8_type().array_type(512), "interp.buf").unwrap();
+                // A3: bounded interpolation. 4KiB stack buffer, every append
+                // via strncat with remaining-space computed from strlen, int/
+                // float temps via snprintf. Overlong text truncates instead
+                // of smashing the stack; exact-size building belongs in
+                // std::fmt (checked allocs). 64-bit ints use %lld (portable).
+                const INTERP_CAP: u64 = 4096;
+                let arr_ty = self.context.i8_type().array_type(INTERP_CAP as u32);
+                let buffer = self.builder.build_alloca(arr_ty, "interp.buf").unwrap();
                 let buf_ptr = self.builder.build_bit_cast(buffer.as_basic_value_enum(), self.context.ptr_type(inkwell::AddressSpace::default()), "interp.ptr").unwrap().into_pointer_value();
-                let first = unsafe { self.builder.build_gep(self.context.i8_type().array_type(512), buffer, &[self.context.i32_type().const_int(0,false), self.context.i32_type().const_int(0,false)], "first").unwrap() };
+                let first = unsafe { self.builder.build_gep(arr_ty, buffer, &[self.context.i32_type().const_int(0,false), self.context.i32_type().const_int(0,false)], "first").unwrap() };
                 self.builder.build_store(first, self.context.i8_type().const_int(0,false)).unwrap();
+                // Append helper: strncat(buf, part, CAP-1-strlen(buf)).
+                // When remaining <= 0 the append is skipped (truncation).
+                let append_bounded = |me: &Self, part_ptr: inkwell::values::PointerValue<'ctx>| {
+                    let strlen = me.get_or_declare_strlen();
+                    let strncat = me.get_or_declare_strncat();
+                    let cur_len = me.builder.build_call(strlen, &[buf_ptr.into()], "interp.len").unwrap().try_as_basic_value().basic().unwrap().into_int_value();
+                    let cur64 = me.builder.build_int_z_extend_or_bit_cast(cur_len, me.context.i64_type(), "interp.len64").unwrap();
+                    let cap = me.context.i64_type().const_int(INTERP_CAP - 1, false);
+                    let rem = me.builder.build_int_sub(cap, cur64, "interp.rem").unwrap();
+                    let cur_block = me.builder.get_insert_block().unwrap();
+                    let cur_fn = cur_block.get_parent().unwrap();
+                    let do_cat = me.context.append_basic_block(cur_fn, "interp.cat");
+                    let done = me.context.append_basic_block(cur_fn, "interp.done");
+                    let positive = me.builder.build_int_compare(inkwell::IntPredicate::SGT, rem, me.context.i64_type().const_zero(), "interp.has").unwrap();
+                    me.builder.build_conditional_branch(positive, do_cat, done).unwrap();
+                    me.builder.position_at_end(do_cat);
+                    me.builder.build_call(strncat, &[buf_ptr.into(), part_ptr.into(), rem.into()], "strncat").unwrap();
+                    me.builder.build_unconditional_branch(done).unwrap();
+                    me.builder.position_at_end(done);
+                };
                 for part in parts {
                     match part {
                         InterpolatedPart::Literal(s) => {
                             let lit_ptr = self.builder.build_global_string_ptr(s, "interp.lit").unwrap();
-                            let strcat = self.get_or_declare_strcat();
-                            self.builder.build_call(strcat, &[buf_ptr.into(), lit_ptr.as_pointer_value().into()], "strcat").unwrap();
+                            append_bounded(self, lit_ptr.as_pointer_value());
                         }
                         InterpolatedPart::Expr(e) => {
                             let val = self.codegen_expr(e)?;
@@ -8974,21 +9012,20 @@ impl<'ctx> Codegen<'ctx> {
                                 let int_buf = self.builder.build_alloca(self.context.i8_type().array_type(64), "intbuf").unwrap();
                                 let int_ptr = self.builder.build_bit_cast(int_buf.as_basic_value_enum(), self.context.ptr_type(inkwell::AddressSpace::default()), "intptr").unwrap().into_pointer_value();
                                 let fmt = self.builder.build_global_string_ptr("%lld", "fmt.int").unwrap();
-                                let sprintf = self.get_or_declare_sprintf();
-                                self.builder.build_call(sprintf, &[int_ptr.into(), fmt.as_pointer_value().into(), val.into()], "sprintf").unwrap();
-                                let strcat = self.get_or_declare_strcat();
-                                self.builder.build_call(strcat, &[buf_ptr.into(), int_ptr.into()], "strcat").unwrap();
+                                let snprintf = self.get_or_declare_snprintf();
+                                let sz = self.context.i64_type().const_int(64, false);
+                                self.builder.build_call(snprintf, &[int_ptr.into(), sz.into(), fmt.as_pointer_value().into(), val.into()], "snprintf").unwrap();
+                                append_bounded(self, int_ptr);
                             } else if val.is_pointer_value() {
-                                let strcat = self.get_or_declare_strcat();
-                                self.builder.build_call(strcat, &[buf_ptr.into(), val.into()], "strcat").unwrap();
+                                append_bounded(self, val.into_pointer_value());
                             } else if val.is_float_value() {
                                 let flt_buf = self.builder.build_alloca(self.context.i8_type().array_type(64), "fltbuf").unwrap();
                                 let flt_ptr = self.builder.build_bit_cast(flt_buf.as_basic_value_enum(), self.context.ptr_type(inkwell::AddressSpace::default()), "fltptr").unwrap().into_pointer_value();
                                 let fmt = self.builder.build_global_string_ptr("%f", "fmt.flt").unwrap();
-                                let sprintf = self.get_or_declare_sprintf();
-                                self.builder.build_call(sprintf, &[flt_ptr.into(), fmt.as_pointer_value().into(), val.into()], "sprintf").unwrap();
-                                let strcat = self.get_or_declare_strcat();
-                                self.builder.build_call(strcat, &[buf_ptr.into(), flt_ptr.into()], "strcat").unwrap();
+                                let snprintf = self.get_or_declare_snprintf();
+                                let sz = self.context.i64_type().const_int(64, false);
+                                self.builder.build_call(snprintf, &[flt_ptr.into(), sz.into(), fmt.as_pointer_value().into(), val.into()], "snprintf").unwrap();
+                                append_bounded(self, flt_ptr);
                             }
                         }
                     }

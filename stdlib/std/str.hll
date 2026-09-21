@@ -115,6 +115,28 @@ string allocateString(int size) do
     return result
 end
 
+/// Concatenates `a` and `b` into a freshly allocated string (exact-size,
+/// no interpolation buffer). A3 builder primitive for unbounded text:
+/// `concat(concat(a, b), c)` instead of `"{a}{b}{c}"` for large inputs.
+/// Returns a new heap buffer; see README before freeing.
+string concat(string a, string b) do
+    int la = len(a)
+    int lb = len(b)
+    assert la <= 9223372036854775806 - lb
+    string res = allocateString(la + lb)
+    int i = 0
+    while i < la do
+        res[i] = a[i]
+        i = i + 1
+    end
+    int j = 0
+    while j < lb do
+        res[la + j] = b[j]
+        j = j + 1
+    end
+    return res
+end
+
 /// Finds needle at/after start; returns a byte offset or -1.
 /// Negative start clamps to zero; start > len(hay) fails even for empty needle.
 int indexOfFrom(string hay, string needle, int start) do
