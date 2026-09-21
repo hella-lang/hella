@@ -107,6 +107,10 @@ pub struct Codegen<'ctx> {
     /// e.g. `strcmp` (see `compare`), which only surfaced on libc
     /// implementations that don't return full-width negatives.
     extern_int32_rets: HashSet<String>,
+    /// Extern functions declared with an unsigned 32-bit return (`u32`)
+    /// that lower to C `uint32_t` (i32). Call results are zero-extended to
+    /// Hella width at the call site (sext would corrupt values >= 2^31).
+    extern_uint32_rets: HashSet<String>,
     /// Trait names declared in the program (for trait-object lowering).
     trait_names: HashSet<String>,
     /// `{data ptr, type tag}` pair struct type per named type that can
@@ -215,6 +219,7 @@ impl<'ctx> Codegen<'ctx> {
             unsigned_vars: HashSet::new(),
             task_vars: HashMap::new(),
             extern_int32_rets: HashSet::new(),
+            extern_uint32_rets: HashSet::new(),
             trait_names: HashSet::new(),
             pair_types: HashMap::new(),
             class_tags: HashMap::new(),
@@ -1446,6 +1451,18 @@ impl<'ctx> Codegen<'ctx> {
                         crate::sema::Ty::Void => self.context.void_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::Int if wide_int_ret => self.context.i64_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::Int => self.context.i32_type().fn_type(&param_llvm, is_c_varargs),
+                        crate::sema::Ty::UInt => self.context.i64_type().fn_type(&param_llvm, is_c_varargs),
+                        crate::sema::Ty::SizedInt { bits, signed } => {
+                            // Fixed-width extern returns lower to their natural C width
+                            // (A4: previously fell through to void). 32-bit signed
+                            // still needs sext tracking; 32-bit unsigned needs zext.
+                            if bits == 32 && signed {
+                                self.extern_int32_rets.insert(name.clone());
+                            } else if bits == 32 && !signed {
+                                self.extern_uint32_rets.insert(name.clone());
+                            }
+                            self.llvm_int_for_bits(bits).fn_type(&param_llvm, is_c_varargs)
+                        }
                         crate::sema::Ty::Bool => self.context.bool_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::Char => self.context.i32_type().fn_type(&param_llvm, is_c_varargs),
                         crate::sema::Ty::String => self.context.ptr_type(inkwell::AddressSpace::default()).fn_type(&param_llvm, is_c_varargs),
@@ -2244,16 +2261,20 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
-    /// Coerce an integer value to a destination LLVM type via trunc/sext.
+    /// Coerce an integer value to a destination LLVM type via trunc/sext/zext.
     /// Non-integer or same-type values pass through unchanged. Used so that
     /// `i32 x = 5` (i64 literal → i32 slot) emits valid IR with opaque ptrs
     /// (the verifier cannot catch width mismatches on `ptr` stores).
     /// Also converts int↔pointer (via inttoptr/ptrtoint) for undetermined
     /// (`any`) vector slots, which are i64 and may hold string pointers.
-    fn coerce_to_ty(
+    /// `unsigned_src` selects zero-extend (instead of sign-extend) when
+    /// widening — required for `u8..u128`/`uint` values (A4 ABI fix; LLVM
+    /// ints are signless so the Hella signedness must pick sext vs zext).
+    fn coerce_to_ty_with_unsigned(
         &self,
         val: BasicValueEnum<'ctx>,
         dest: BasicTypeEnum<'ctx>,
+        unsigned_src: bool,
     ) -> BasicValueEnum<'ctx> {
         let src = val.get_type();
         if src == dest {
@@ -2267,8 +2288,11 @@ impl<'ctx> Codegen<'ctx> {
                 if sw > dw {
                     self.builder.build_int_truncate(iv, d, "trunc").unwrap().into()
                 } else if sw < dw {
-                    // Signed extend (MVP: all ints sext; unsigned zext deferred).
-                    self.builder.build_int_s_extend(iv, d, "sext").unwrap().into()
+                    if unsigned_src {
+                        self.builder.build_int_z_extend(iv, d, "zext").unwrap().into()
+                    } else {
+                        self.builder.build_int_s_extend(iv, d, "sext").unwrap().into()
+                    }
                 } else {
                     val
                 }
@@ -2308,12 +2332,23 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
-    /// Unify two integer operands to the wider width (sext the narrower).
-    /// Non-integer pairs pass through unchanged.
-    fn unify_int_operands(
+    fn coerce_to_ty(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        dest: BasicTypeEnum<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        self.coerce_to_ty_with_unsigned(val, dest, false)
+    }
+
+    /// Unify two integer operands to the wider width (sext/zext the narrower).
+    /// Non-integer pairs pass through unchanged. `either_unsigned` selects
+    /// zero-extend when widening — callers pass true when either side is a
+    /// `u8..u128`/`uint` value (A4 ABI fix).
+    fn unify_int_operands_with_unsigned(
         &self,
         l: BasicValueEnum<'ctx>,
         r: BasicValueEnum<'ctx>,
+        either_unsigned: bool,
     ) -> (BasicValueEnum<'ctx>, BasicValueEnum<'ctx>) {
         match (l.get_type(), r.get_type()) {
             (BasicTypeEnum::IntType(lt), BasicTypeEnum::IntType(rt)) => {
@@ -2322,13 +2357,21 @@ impl<'ctx> Codegen<'ctx> {
                 if lw == rw {
                     (l, r)
                 } else if lw < rw {
-                    (self.coerce_to_ty(l, r.get_type()), r)
+                    (self.coerce_to_ty_with_unsigned(l, r.get_type(), either_unsigned), r)
                 } else {
-                    (l, self.coerce_to_ty(r, l.get_type()))
+                    (l, self.coerce_to_ty_with_unsigned(r, l.get_type(), either_unsigned))
                 }
             }
             _ => (l, r),
         }
+    }
+
+    fn unify_int_operands(
+        &self,
+        l: BasicValueEnum<'ctx>,
+        r: BasicValueEnum<'ctx>,
+    ) -> (BasicValueEnum<'ctx>, BasicValueEnum<'ctx>) {
+        self.unify_int_operands_with_unsigned(l, r, false)
     }
 
     /// Max elements in a vector buffer (MVP fixed capacity; `push` past it
@@ -6800,7 +6843,9 @@ impl<'ctx> Codegen<'ctx> {
                 };
                 let alloca = self.create_entry_block_alloca(&c.name, actual_ty);
                 self.vars.last_mut().unwrap().insert(c.name.clone(), (alloca, actual_ty));
-                let stored = self.coerce_to_ty(init_val, actual_ty);
+                let unsigned_dest = c.ty.as_ref().is_some_and(Self::ast_ty_is_unsigned)
+                    || self.is_unsigned_expr(&c.init);
+                let stored = self.coerce_to_ty_with_unsigned(init_val, actual_ty, unsigned_dest);
                 self.builder.build_store(alloca, stored).unwrap();
                 Ok(false)
             }
@@ -6855,7 +6900,7 @@ impl<'ctx> Codegen<'ctx> {
                         self.builder.build_call(puts, &[msg_val.into()], "puts_assert").unwrap();
                     } else {
                         // for non-string message, try to print as int?
-                        let fmt = self.builder.build_global_string_ptr("assertion failed: %ld\n", "assert_fmt").unwrap();
+                        let fmt = self.builder.build_global_string_ptr("assertion failed: %lld\n", "assert_fmt").unwrap();
                         let printf = self.get_or_declare_printf();
                         self.builder.build_call(printf, &[fmt.as_pointer_value().into(), msg_val.into()], "printf_assert").unwrap();
                     }
@@ -7647,7 +7692,8 @@ impl<'ctx> Codegen<'ctx> {
                 }
                 let l = self.codegen_expr(lhs)?;
                 let r = self.codegen_expr(rhs)?;
-                let (l, r) = self.unify_int_operands(l, r);
+                let either_unsigned = self.is_unsigned_expr(lhs) || self.is_unsigned_expr(rhs);
+                let (l, r) = self.unify_int_operands_with_unsigned(l, r, either_unsigned);
                 Ok(match op {
                     BinOp::Add => self
                         .builder
@@ -8420,10 +8466,18 @@ impl<'ctx> Codegen<'ctx> {
                         // Extern C `int` returns lower as i32; Hella `int`
                         // is i64, so sign-extend (not zero-extend: the sign
                         // of e.g. strcmp/scanf results must survive).
+                        // Unsigned `u32` returns zero-extend instead (A4).
                         if self.extern_int32_rets.contains(callee) {
                             if let BasicValueEnum::IntValue(iv) = v {
                                 if iv.get_type().get_bit_width() == 32 {
                                     return Ok(self.builder.build_int_s_extend(iv, self.context.i64_type(), "extern.sext").unwrap().into());
+                                }
+                            }
+                        }
+                        if self.extern_uint32_rets.contains(callee) {
+                            if let BasicValueEnum::IntValue(iv) = v {
+                                if iv.get_type().get_bit_width() == 32 {
+                                    return Ok(self.builder.build_int_z_extend(iv, self.context.i64_type(), "extern.zext").unwrap().into());
                                 }
                             }
                         }
@@ -8918,7 +8972,7 @@ impl<'ctx> Codegen<'ctx> {
                             if val.is_int_value() {
                                 let int_buf = self.builder.build_alloca(self.context.i8_type().array_type(64), "intbuf").unwrap();
                                 let int_ptr = self.builder.build_bit_cast(int_buf.as_basic_value_enum(), self.context.ptr_type(inkwell::AddressSpace::default()), "intptr").unwrap().into_pointer_value();
-                                let fmt = self.builder.build_global_string_ptr("%ld", "fmt.int").unwrap();
+                                let fmt = self.builder.build_global_string_ptr("%lld", "fmt.int").unwrap();
                                 let sprintf = self.get_or_declare_sprintf();
                                 self.builder.build_call(sprintf, &[int_ptr.into(), fmt.as_pointer_value().into(), val.into()], "sprintf").unwrap();
                                 let strcat = self.get_or_declare_strcat();
