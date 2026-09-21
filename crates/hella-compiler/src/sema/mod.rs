@@ -3424,6 +3424,20 @@ impl Checker {
             } => {
                 let obj_ty = self.check_expr(object);
                 let effective_ty = self.deref_ty(&obj_ty);
+                // A1: `Box<string>` field access — substitute generic params.
+                if let Ty::Generic(base, args) = &effective_ty {
+                    if let Some(sinfo) = self.structs.get(base).cloned() {
+                        if sinfo.generic_params.len() == args.len() {
+                            if let Some((_, fty_raw)) = sinfo.field_map.get(field) {
+                                let map: HashMap<String, Ty> = sinfo.generic_params.iter().map(|gp| gp.name.clone()).zip(args.iter().cloned()).collect();
+                                return Self::subst_generic_ty(fty_raw, &map);
+                            }
+                        }
+                        if let Some((_, fty)) = sinfo.field_map.get(field) {
+                            return fty.clone();
+                        }
+                    }
+                }
                 if let Ty::Struct(ref sname) = effective_ty {
                     if let Some(sinfo) = self.structs.get(sname).cloned() {
                         if let Some((_, fty)) = sinfo.field_map.get(field) {
@@ -3480,6 +3494,31 @@ impl Checker {
             }
             ExprKind::StructLit { ty, fields } => {
                 let lit_ty = self.resolve_type(ty);
+                // A1: `Box<string> has ... end` — substitute generic params.
+                if let Ty::Generic(base, args) = &lit_ty {
+                    if let Some(sinfo) = self.structs.get(base).cloned() {
+                        if sinfo.generic_params.len() == args.len() {
+                            let map: HashMap<String, Ty> = sinfo.generic_params.iter().map(|gp| gp.name.clone()).zip(args.iter().cloned()).collect();
+                            let mut seen = HashSet::new();
+                            for (fname, fspan, fexpr) in fields {
+                                if !seen.insert(fname) {
+                                    self.errors.push(SemError { message: format!("duplicate field `{fname}` in struct literal"), span: *fspan });
+                                }
+                                if let Some((_, expected_raw)) = sinfo.field_map.get(fname) {
+                                    let expected_ty = Self::subst_generic_ty(expected_raw, &map);
+                                    let got = self.check_expr(fexpr);
+                                    if &got != &expected_ty {
+                                        self.errors.push(SemError{message: format!("field `{fname}`: expected `{expected_ty}`, found `{got}`"), span: fexpr.span});
+                                    }
+                                } else {
+                                    self.errors.push(SemError { message: format!("unknown field `{fname}` for struct `{base}`"), span: *fspan });
+                                    let _ = self.check_expr(fexpr);
+                                }
+                            }
+                            return lit_ty;
+                        }
+                    }
+                }
                 let sname = match lit_ty {
                     Ty::Struct(ref n) => n.clone(),
                     _ => {

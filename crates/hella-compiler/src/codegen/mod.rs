@@ -140,6 +140,11 @@ pub struct Codegen<'ctx> {
     /// Global initializers too complex to const-fold, evaluated at program
     /// start (in `main`, after the user `init` block): `(name, init)`.
     pending_global_inits: Vec<(String, Expr)>,
+    /// Generic struct definitions (`struct Box<T> ...`) for A1 true
+    /// monomorphization: base name -> decl. Specializations
+    /// (`Box<int>`, `Box<string>`) are generated on demand in the declare
+    /// phase with substituted field types, instead of erasing `T` to i64.
+    generic_struct_defs: HashMap<String, StructDecl>,
 }
 
 /// One program-end destruction entry: a single slot, or a fixed array slot
@@ -231,6 +236,7 @@ impl<'ctx> Codegen<'ctx> {
             global_owns: Vec::new(),
             global_dtors: Vec::new(),
             pending_global_inits: Vec::new(),
+            generic_struct_defs: HashMap::new(),
         }
     }
 
@@ -314,6 +320,9 @@ impl<'ctx> Codegen<'ctx> {
         }
         // Dynamic-type tags for trait objects (needs all classes declared).
         self.assign_class_tags();
+        // A1: specialize generic structs with concrete args before emission
+        // so `Box<string>` layouts carry ptr fields (not erased i64).
+        self.monomorph_generic_structs(prog);
         for item in &prog.items {
             let it: &Item = match item {
                 Item::Attributed{attrs: _, item} => item.as_ref(),
@@ -597,6 +606,11 @@ impl<'ctx> Codegen<'ctx> {
                 span: s.name_span,
             });
         }
+        // A1: remember generic definitions for on-demand specialization.
+        // The erased base is still declared (compat for unparameterized use).
+        if !s.generic_params.is_empty() {
+            self.generic_struct_defs.insert(s.name.clone(), s.clone());
+        }
         let opaque = self.context.opaque_struct_type(&s.name);
         // Insert early to allow self-reference (not needed Phase 2) and duplicate check
         self.struct_types.insert(s.name.clone(), opaque);
@@ -617,6 +631,126 @@ impl<'ctx> Codegen<'ctx> {
         self.struct_fields.insert(s.name.clone(), field_map);
         self.struct_field_defaults.insert(s.name.clone(), field_defaults);
         Ok(())
+    }
+
+    /// Substitute generic params in an AST type (A1 monomorphization).
+    fn subst_ast_ty(ty: &Type, map: &HashMap<String, Type>) -> Type {
+        match ty {
+            Type::Named(n, sp) => {
+                if let Some(rep) = map.get(n) { rep.clone() } else { ty.clone() }
+            }
+            Type::Generic(n, args, sp) => {
+                if map.contains_key(n) && args.is_empty() {
+                    map[n].clone()
+                } else {
+                    Type::Generic(n.clone(), args.iter().map(|a| Self::subst_ast_ty(a, map)).collect(), *sp)
+                }
+            }
+            Type::Array(el, sp) => Type::Array(Box::new(Self::subst_ast_ty(el, map)), *sp),
+            Type::FixedArray { elem, size, span } => Type::FixedArray { elem: Box::new(Self::subst_ast_ty(elem, map)), size: *size, span: *span },
+            Type::Vec { elem, span } => Type::Vec { elem: Box::new(Self::subst_ast_ty(elem, map)), span: *span },
+            Type::Map { key, value, span } => Type::Map { key: Box::new(Self::subst_ast_ty(key, map)), value: Box::new(Self::subst_ast_ty(value, map)), span: *span },
+            Type::Pointer(el, sp) => Type::Pointer(Box::new(Self::subst_ast_ty(el, map)), *sp),
+            Type::Optional(el, sp) => Type::Optional(Box::new(Self::subst_ast_ty(el, map)), *sp),
+            Type::Own(el, sp) => Type::Own(Box::new(Self::subst_ast_ty(el, map)), *sp),
+            Type::Task(el, sp) => Type::Task(Box::new(Self::subst_ast_ty(el, map)), *sp),
+            Type::Tuple(tys, sp) => Type::Tuple(tys.iter().map(|t| Self::subst_ast_ty(t, map)).collect(), *sp),
+            Type::FunctionType(ret, args, sp) => Type::FunctionType(Box::new(Self::subst_ast_ty(ret, map)), args.iter().map(|a| Self::subst_ast_ty(a, map)).collect(), *sp),
+            _ => ty.clone(),
+        }
+    }
+
+    /// Ensure a `Base<args>` specialization exists; returns its key.
+    /// Concrete-only: any arg still naming a generic param is skipped
+    /// (erasure fallback). Idempotent via `struct_types` cache.
+    fn ensure_generic_struct(&mut self, base: &str, args: &[Type]) -> Option<String> {
+        let key = format!("{}<{}>", base, args.iter().map(|a| a.name()).collect::<Vec<_>>().join(","));
+        if self.struct_types.contains_key(&key) {
+            return Some(key);
+        }
+        // Skip when args still contain bare generic params.
+        let is_bare_param = |t: &Type| matches!(t, Type::Named(n, _) if n.len() == 1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false));
+        if args.iter().any(is_bare_param) {
+            return None;
+        }
+        let def = self.generic_struct_defs.get(base)?.clone();
+        if def.generic_params.len() != args.len() {
+            return None;
+        }
+        let map: HashMap<String, Type> = def.generic_params.iter().map(|gp| gp.name.clone()).zip(args.iter().cloned()).collect();
+        let opaque = self.context.opaque_struct_type(&key);
+        self.struct_types.insert(key.clone(), opaque);
+        self.declare_pair_type(&key);
+        let mut field_map = HashMap::new();
+        let mut field_tys = Vec::new();
+        let mut field_defaults = HashMap::new();
+        for (idx, f) in def.fields.iter().enumerate() {
+            let sub = Self::subst_ast_ty(&f.ty, &map);
+            let lty = self.llvm_ty_for(&sub);
+            field_map.insert(f.name.clone(), idx as u32);
+            field_tys.push(lty);
+            if let Some(d) = &f.default {
+                field_defaults.insert(f.name.clone(), d.clone());
+            }
+        }
+        opaque.set_body(&field_tys, false);
+        self.struct_fields.insert(key.clone(), field_map);
+        self.struct_field_defaults.insert(key.clone(), field_defaults);
+        Some(key)
+    }
+
+    /// Pre-pass: walk top-level items for `Generic(base, args)` uses with
+    /// concrete args and specialize each struct. Runs in the declare phase
+    /// (`&mut`) so `llvm_ty_for` (`&self`) finds keys later.
+    fn monomorph_generic_structs(&mut self, program: &Program) {
+        fn collect_ty(t: &Type, out: &mut Vec<(String, Vec<Type>)>) {
+            match t {
+                Type::Generic(n, args, _) => {
+                    out.push((n.clone(), args.clone()));
+                    for a in args { collect_ty(a, out); }
+                }
+                Type::Array(el, _) | Type::Pointer(el, _) | Type::Optional(el, _)
+                | Type::Own(el, _) | Type::Task(el, _) => collect_ty(el, out),
+                Type::FixedArray { elem, .. } | Type::Vec { elem, .. } => collect_ty(elem, out),
+                Type::Map { key, value, .. } => { collect_ty(key, out); collect_ty(value, out); }
+                Type::Tuple(tys, _) => { for x in tys { collect_ty(x, out); } }
+                Type::FunctionType(ret, args, _) => { collect_ty(ret, out); for x in args { collect_ty(x, out); } }
+                _ => {}
+            }
+        }
+        let mut uses: Vec<(String, Vec<Type>)> = Vec::new();
+        for item in &program.items {
+            let it: &Item = match item {
+                Item::Attributed { item, .. } => item.as_ref(),
+                other => other,
+            };
+            match it {
+                Item::Struct(s) => { for f in &s.fields { collect_ty(&f.ty, &mut uses); } }
+                Item::Function(f) => {
+                    collect_ty(&f.ret_ty, &mut uses);
+                    for p in &f.params { collect_ty(&p.ty, &mut uses); }
+                }
+                Item::Class(c) => {
+                    for f in &c.fields { collect_ty(&f.ty, &mut uses); }
+                    for m in &c.methods { collect_ty(&m.ret_ty, &mut uses); for p in &m.params { collect_ty(&p.ty, &mut uses); } }
+                }
+                Item::Var(v) => { collect_ty(&v.ty, &mut uses); }
+                Item::Const(c) => { if let Some(t) = &c.ty { collect_ty(t, &mut uses); } }
+                Item::Enum(_) | Item::Trait(_) | Item::Typedef(_) | Item::Distinct(_)
+                | Item::Extension(_) | Item::Import(_) | Item::Extern(_) | Item::Init(_)
+                | Item::Attributed { .. } => {}
+            }
+        }
+        // Also scan function bodies for `let T x = ...` annotations? Top-level
+        // + signatures cover struct-field cases; body-local generic struct
+        // vars lower through the same key once declared here when named at
+        // top level. Body-only uses fall back to erasure (compat).
+        for (base, args) in uses {
+            let lookup = base.rsplit("::").next().unwrap_or(&base).to_string();
+            if self.generic_struct_defs.contains_key(&lookup) {
+                self.ensure_generic_struct(&lookup, &args);
+            }
+        }
     }
 
     fn declare_class(&mut self, c: &ClassDecl) -> Result<(), CodegenError> {
@@ -3315,17 +3449,16 @@ impl<'ctx> Codegen<'ctx> {
             }
             Type::Generic(n, args, _) => {
                 let lookup = n.rsplit("::").next().unwrap_or(n);
-                if let Some(st) = self.struct_types.get(lookup) {
+                // A1: specialized key first (`Box<string>`), erased base as fallback.
+                let key = format!("{}<{}>", lookup, args.iter().map(|a| a.name()).collect::<Vec<_>>().join(","));
+                if let Some(st) = self.struct_types.get(&key) {
+                    st.as_basic_type_enum().into()
+                } else if let Some(st) = self.struct_types.get(lookup) {
                     st.as_basic_type_enum().into()
                 } else if let Some(et) = self.enum_types.get(lookup) {
                     et.as_basic_type_enum().into()
                 } else {
-                    let key = format!("{}<{}>", lookup, args.iter().map(|a| a.name()).collect::<Vec<_>>().join(","));
-                    if let Some(st) = self.struct_types.get(&key) {
-                        st.as_basic_type_enum().into()
-                    } else {
-                        panic!("unknown generic type {n}")
-                    }
+                    panic!("unknown generic type {n}")
                 }
             }
             Type::FunctionType(_, _, _) => self.context.ptr_type(inkwell::AddressSpace::default()).into(),
@@ -6433,6 +6566,12 @@ impl<'ctx> Codegen<'ctx> {
     fn codegen_stmt(&mut self, stmt: &Stmt) -> Result<bool, CodegenError> {
         match stmt {
             Stmt::VarDecl(d) => {
+                // A1: ensure `Box<string>` specialization for body-local vars
+                // (declare-phase pre-pass only sees top-level items).
+                if let Type::Generic(n, args, _) = &d.ty {
+                    let base = n.rsplit("::").next().unwrap_or(n).to_string();
+                    self.ensure_generic_struct(&base, args);
+                }
                 // Fixed arrays with an array-literal initializer allocate the
                 // exact length: inferred `int arr x = [...]` uses the init
                 // length; explicit `int arr[N] x = [...]` uses N (sema has
@@ -8564,10 +8703,19 @@ impl<'ctx> Codegen<'ctx> {
                 // rvalue field load: need field pointer then load
                 let field_ptr = self.codegen_field_ptr(object, field)?;
                 let obj_ty2 = self.infer_expr_ty(object)?;
-                if let crate::sema::Ty::Struct(ref sname) = obj_ty2 {
-                    let fields = self.struct_fields.get(sname).unwrap();
+                // A1: map `Box<string>` to its specialized key.
+                let sname_owned: Option<String> = match &obj_ty2 {
+                    crate::sema::Ty::Struct(n) => Some(n.clone()),
+                    crate::sema::Ty::Generic(base, args) => {
+                        let key = format!("{}<{}>", base, args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(","));
+                        if self.struct_types.contains_key(&key) { Some(key) } else { Some(base.clone()) }
+                    }
+                    _ => None,
+                };
+                if let Some(sname) = sname_owned {
+                    let fields = self.struct_fields.get(&sname).unwrap();
                     let idx = *fields.get(field).unwrap();
-                    let st = self.struct_types.get(sname).unwrap();
+                    let st = self.struct_types.get(&sname).unwrap();
                     let field_ty = st.get_field_type_at_index(idx).unwrap();
                     Ok(self
                         .builder
@@ -8842,8 +8990,19 @@ impl<'ctx> Codegen<'ctx> {
                 Ok(self.context.i32_type().const_int(*ch as u64, false).into())
             }
             ExprKind::StructLit { ty, fields } => {
+                // A1: `Box<string> has ... end` uses the specialized struct.
                 let sname = match ty {
-                    Type::Named(n, _) => n.clone(),
+                    Type::Named(n, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
+                    Type::Generic(n, args, _) => {
+                        let base = n.rsplit("::").next().unwrap_or(n).to_string();
+                        if let Some(key) = self.ensure_generic_struct(&base, args) {
+                            key
+                        } else if self.struct_types.contains_key(&base) {
+                            base
+                        } else {
+                            return Err(CodegenError { message: "struct literal requires named type".into(), span: expr.span });
+                        }
+                    }
                     _ => {
                         return Err(CodegenError {
                             message: "struct literal requires named type"
@@ -10143,6 +10302,15 @@ impl<'ctx> Codegen<'ctx> {
             }
             ExprKind::MemberAccess { object, field, .. } => {
                 let obj_ty = self.infer_expr_ty(object)?;
+                // A1: `Box<string>` — look up the specialized key first.
+                if let crate::sema::Ty::Generic(base, args) = &obj_ty {
+                    let key = format!("{}<{}>", base, args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(","));
+                    if let (Some(fields), Some(st)) = (self.struct_fields.get(&key), self.struct_types.get(&key)) {
+                        let idx = fields.get(field).ok_or(CodegenError{message: format!("struct `{key}` has no field `{field}`"), span: expr.span})?;
+                        let fty = st.get_field_type_at_index(*idx).unwrap();
+                        return self.llvm_field_to_sema(fty, expr.span);
+                    }
+                }
                 if let crate::sema::Ty::Struct(ref sname) = obj_ty {
                     // Trait-typed receiver: field type from the first
                     // implementor (sema validated agreement across all).
