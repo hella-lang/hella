@@ -343,6 +343,14 @@ struct Ctx {
     errors: Vec<ImportError>,
     /// `@cfg(debug)` truthiness for this expansion (see [`crate::cfg`]).
     debug_mode: bool,
+    /// Bare names already inlined from previous imports (first wins). When
+    /// two imported modules expose the same symbol, only the first
+    /// definition is emitted — no duplicate LLVM symbols, no sema
+    /// "duplicate function" error. Bare uses are then diagnosed as ambiguous
+    /// (§34) while qualified `alias::sym` resolves to the single kept
+    /// declaration. `extern` blocks are exempt (linkage, always kept).
+    /// Entry-file definitions bypass this set so shadowing still errors.
+    seen_imported: HashSet<String>,
 }
 
 /// Inline `import` items recursively (textual inclusion before sema).
@@ -361,14 +369,59 @@ pub fn expand_imports(program: Program, importer: &Path) -> Expanded {
 /// (the CLI passes `true` only for debug link profiles; `check`/LSP and
 /// `--release` pass `false`, so analysis never depends on the link mode).
 pub fn expand_imports_with_cfg(program: Program, importer: &Path, debug_mode: bool) -> Expanded {
+    let bases = search_bases(importer);
+    // Entry-level namespaces first (before `program.items` is consumed):
+    // each `import a::b` introduces alias `b` (and full `a::b`) so that
+    // `b::sym` / `a::b::sym` resolve to the same declaration as bare `sym`.
+    let entry_imports: Vec<ResolvedImport> = program
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Import(imp) => {
+                let alias = imp.path.last().cloned().unwrap_or_default();
+                let full = imp.path.join("::");
+                let requested: Option<Vec<String>> =
+                    imp.symbols.as_ref().map(|v| v.iter().map(|(s, _)| s.clone()).collect());
+                let provided = match resolve_import(&imp.path, &bases) {
+                    Some(path) => collect_provided_names(&path, debug_mode)
+                        .map(|mut names| {
+                            if let Some(req) = &requested {
+                                let want: HashSet<String> = req.iter().cloned().collect();
+                                names.retain(|n| want.contains(n));
+                                // Keep requested names even if the target file
+                                // does not define them (sema reports unknown);
+                                // this preserves ambiguity info for typos.
+                                for r in req {
+                                    if !names.contains(r) {
+                                        names.push(r.clone());
+                                    }
+                                }
+                            }
+                            names
+                        })
+                        .unwrap_or_else(|| requested.clone().unwrap_or_default()),
+                    None => requested.clone().unwrap_or_default(),
+                };
+                Some(ResolvedImport {
+                    path: imp.path.clone(),
+                    alias,
+                    full,
+                    provided,
+                    symbols: requested,
+                })
+            }
+            _ => None,
+        })
+        .collect();
     let mut ctx = Ctx {
-        bases: search_bases(importer),
+        bases,
         visited: HashSet::new(),
         errors: Vec::new(),
         debug_mode,
+        seen_imported: HashSet::new(),
     };
     let span = program.span;
-    let mut items = expand_items(program.items, importer, &mut ctx);
+    let mut items = expand_items(program.items, importer, &mut ctx, true);
     // Entry file's own `@cfg(...)` items (imports above already filtered
     // the imported files' item lists).
     crate::cfg::apply_cfg(&mut items, ctx.debug_mode);
@@ -379,7 +432,52 @@ pub fn expand_imports_with_cfg(program: Program, importer: &Path, debug_mode: bo
         program: Program { items, span },
         errors: ctx.errors,
         files,
+        imports: entry_imports,
     }
+}
+
+/// Top-level declared names in the file at `path` (after `@cfg` filtering),
+/// for namespace / ambiguity bookkeeping. Empty on any I/O/lex/parse error
+/// (the import error itself is reported through the normal path).
+fn collect_provided_names(path: &Path, debug_mode: bool) -> Option<Vec<String>> {
+    let src = std::fs::read_to_string(path).ok()?;
+    let toks = crate::lexer::lex(&src);
+    if !toks.errors.is_empty() {
+        return None;
+    }
+    let mut sub = crate::parse::parse(toks.tokens, src).ok()?;
+    crate::cfg::apply_cfg(&mut sub.items, debug_mode);
+    let mut names = Vec::new();
+    for it in &sub.items {
+        // Skip nested imports: only real declarations provide symbols.
+        if matches!(unwrap_item(it), Item::Import(_)) {
+            continue;
+        }
+        if let Some(n) = item_name(it) {
+            if !names.contains(&n.to_string()) {
+                names.push(n.to_string());
+            }
+        }
+    }
+    Some(names)
+}
+
+/// One entry-level import that produced a usable module namespace.
+///
+/// `alias` is the last segment (`std::io` → `io`,
+/// `std::terminal::ansi` → `ansi`); `full` is the whole path
+/// (`std::io`, `std::terminal::ansi`). `provided` lists the top-level
+/// value/type names the module defines (functions, consts, structs,
+/// classes, enums, traits, typedefs, vars) — used for qualified
+/// resolution (`io::println`) and ambiguity diagnostics.
+#[derive(Debug, Clone)]
+pub struct ResolvedImport {
+    pub path: Vec<String>,
+    pub alias: String,
+    pub full: String,
+    pub provided: Vec<String>,
+    /// Explicit symbol list for `import m::{a, b}`; `None` = whole module.
+    pub symbols: Option<Vec<String>>,
 }
 
 /// Output of [`expand_imports`].
@@ -388,6 +486,8 @@ pub struct Expanded {
     pub errors: Vec<ImportError>,
     /// Entry file + all resolved imports (sorted, deduplicated).
     pub files: Vec<PathBuf>,
+    /// Entry-level imports in source order (namespace aliases).
+    pub imports: Vec<ResolvedImport>,
 }
 
 /// Unwrap `@cfg`-surviving attributes for name matching and linkage
@@ -399,6 +499,19 @@ fn unwrap_item(item: &Item) -> &Item {
         Item::Attributed { item, .. } => unwrap_item(item),
         other => other,
     }
+}
+
+/// Push an imported (non-entry, non-extern) item with first-wins dedup by
+/// bare name. Returns true when pushed. Extern blocks must not go through
+/// here (they are linkage requirements, always kept).
+fn push_imported(out_items: &mut Vec<Item>, ctx: &mut Ctx, it: Item) -> bool {
+    if let Some(n) = item_name(&it) {
+        if !ctx.seen_imported.insert(n.to_string()) {
+            return false;
+        }
+    }
+    out_items.push(it);
+    true
 }
 
 /// Declared name of a top-level item, if it has one.
@@ -421,7 +534,35 @@ fn expand_items(
     items: Vec<Item>,
     importer: &Path,
     ctx: &mut Ctx,
+    // True only for the entry file's own item list. Dedup (first import
+    // wins) applies here so two imported modules exposing the same symbol
+    // yield one definition (§34: bare use is ambiguous, qualified works).
+    // Nested frames pass false so selective-closure computation sees
+    // complete symbol sets; marking seen there would drop helpers that the
+    // parent's selective filter still needs.
+    is_entry: bool,
 ) -> Vec<Item> {
+    /// Push an imported item, applying first-wins dedup at the entry level.
+    /// Extern blocks always ride along (linkage, never deduped).
+    fn push_nested(
+        out_items: &mut Vec<Item>,
+        ctx: &mut Ctx,
+        is_entry: bool,
+        it: Item,
+    ) {
+        if is_entry {
+            if matches!(unwrap_item(&it), Item::Extern(_)) {
+                out_items.push(it);
+            } else {
+                push_imported(out_items, ctx, it);
+            }
+        } else if matches!(unwrap_item(&it), Item::Extern(_)) {
+            out_items.push(it);
+        } else {
+            // Nested frame: no dedup (see `is_entry` docs).
+            out_items.push(it);
+        }
+    }
     let mut out_items: Vec<Item> = Vec::new();
     for item in items {
         let Item::Import(imp) = item else {
@@ -480,7 +621,7 @@ fn expand_items(
                 continue;
             }
         };
-        let mut sub_items = expand_items(sub.items, &path, ctx);
+        let mut sub_items = expand_items(sub.items, &path, ctx, false);
         // `@cfg(...)`: drop conditionally-absent items before sema, so no
         // conditional declaration reaches analysis or codegen.
         crate::cfg::apply_cfg(&mut sub_items, ctx.debug_mode);
@@ -546,14 +687,21 @@ fn expand_items(
                 match unwrap_item(&it) {
                     Item::Extern(_) => out_items.push(it),
                     _ if item_name(&it).is_some_and(|n| keep.contains(n)) => {
-                        out_items.push(it);
+                        push_nested(&mut out_items, ctx, is_entry, it);
                     }
                     _ => {}
                 }
             }
         } else {
             for it in sub_items.into_iter().filter(|i| !matches!(i, Item::Import(_))) {
-                out_items.push(it);
+                // Extern blocks always ride along (linkage); named declarations
+                // dedup by bare name at the entry level (first import wins —
+                // §34 ambiguity + single codegen symbol).
+                if matches!(unwrap_item(&it), Item::Extern(_)) {
+                    out_items.push(it);
+                } else {
+                    push_nested(&mut out_items, ctx, is_entry, it);
+                }
             }
         }
     }

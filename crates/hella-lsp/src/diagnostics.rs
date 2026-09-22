@@ -71,9 +71,11 @@ pub fn diagnostics(source: &str, path: Option<&Path>) -> Vec<Diagnostic> {
                 program: prog,
                 errors: Vec::new(),
                 files: Vec::new(),
+                imports: Vec::new(),
             },
         };
         let import_errors = expanded.errors;
+        let sema_imports = expanded.imports;
         let expanded = expanded.program;
         // Surface only failures from the open document itself: nested
         // failures belong to the imported file and appear when it is opened.
@@ -82,9 +84,10 @@ pub fn diagnostics(source: &str, path: Option<&Path>) -> Vec<Diagnostic> {
                 out.push(diag(source, e.span.start, e.span.end, e.message.clone()));
             }
         }
-        for e in sema::check_with_options(
+        for e in sema::check_with_options_and_imports(
             &expanded,
             sema::CheckOptions { require_main },
+            &sema_imports,
         ) {
             out.push(diag(source, e.span.start, e.span.end, e.message));
         }

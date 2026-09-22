@@ -1343,12 +1343,12 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     let cfg_debug = !opts.release && !opts.check_only;
     let expanded =
         hella_compiler::modules::expand_imports_with_cfg(program, file, cfg_debug);
-    if let Some(first) = expanded.errors.into_iter().next() {
+    if let Some(first) = expanded.errors.first() {
         let diag = hella_compiler::error::SingleDiagnostic::new(
             filename.clone(),
             source.clone(),
             first.span,
-            first.message,
+            first.message.clone(),
         );
         pb.abandon();
         fail(Report::new(diag));
@@ -1356,6 +1356,7 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // Complete source set the build depends on (entry + resolved imports):
     // a rebuild is skipped when the binary is newer than all of these.
     let source_files = expanded.files;
+    let sema_imports = expanded.imports;
     let program = expanded.program;
     let program = {
         pb.inc(1);
@@ -1381,11 +1382,14 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     pb.set_message("Checking");
     status(&pb, quiet, "Checking", &filename);
     let t_check = Instant::now();
-    let sema_errors = hella_compiler::sema::check_with_options(
+    // Module namespaces (§34): qualified `io::println` resolves via the
+    // entry-level imports recorded during expansion.
+    let sema_errors = hella_compiler::sema::check_with_options_and_imports(
         &program,
         hella_compiler::sema::CheckOptions {
             require_main: opts.require_main,
         },
+        &sema_imports,
     );
     pb.inc(1);
     if !sema_errors.is_empty() {

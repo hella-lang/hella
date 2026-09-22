@@ -329,6 +329,14 @@ pub struct Checker {
     /// the LSP only requires it for files named `main` (library modules
     /// next to `main.hll` are checked without an entry point).
     require_main: bool,
+    /// Module namespaces from entry-level imports (§34): alias → full path
+    /// (`io` → `std::io`), plus the set of full paths.
+    import_aliases: HashMap<String, String>,
+    import_fulls: HashSet<String>,
+    /// Bare symbol → importing aliases that provide it. Used for qualified
+    /// resolution (`io::println` → `println`) and for ambiguity diagnostics
+    /// when two imported modules expose the same bare name.
+    symbol_providers: HashMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -369,6 +377,74 @@ impl Checker {
             scope_depth: 0,
             pending_tasks: Vec::new(),
             require_main: true,
+            import_aliases: HashMap::new(),
+            import_fulls: HashSet::new(),
+            symbol_providers: HashMap::new(),
+        }
+    }
+
+    /// Register entry-level import namespaces (§34-35). Both the short alias
+    /// (`io`) and the full path (`std::io`) address the same module; both
+    /// refer to the same (single, non-duplicated) declarations.
+    pub fn set_imports(&mut self, imports: &[crate::modules::ResolvedImport]) {
+        for imp in imports {
+            self.import_aliases.insert(imp.alias.clone(), imp.full.clone());
+            self.import_fulls.insert(imp.full.clone());
+            for sym in &imp.provided {
+                let entry = self.symbol_providers.entry(sym.clone()).or_default();
+                // One entry per importing alias (dedup); order = import order.
+                if !entry.contains(&imp.alias) {
+                    entry.push(imp.alias.clone());
+                }
+            }
+        }
+    }
+
+    /// Split `prefix::base` when `prefix` names an imported module (alias or
+    /// full path). Returns the bare symbol name. `None` when the prefix is
+    /// not a known module (e.g. an enum name like `Color`).
+    fn module_qualified_base(&self, qname: &str) -> Option<String> {
+        let (prefix, base) = qname.rsplit_once("::")?;
+        if base.is_empty() {
+            return None;
+        }
+        if self.import_aliases.contains_key(prefix) || self.import_fulls.contains(prefix) {
+            return Some(base.to_string());
+        }
+        // `a::b::sym` where the import is `a::b`: prefix itself contains
+        // `::` and equals a full path (handled above). Anything else whose
+        // trailing segment is a known alias also counts, so nested paths
+        // like `std::io` used as a prefix work even when only the alias
+        // was registered under a different full path spelling.
+        if let Some(last) = prefix.rsplit("::").next() {
+            if self.import_aliases.contains_key(last) {
+                // Only treat as module-qualified when the full prefix ends
+                // with a known alias path element; enum paths like
+                // `Option::Some` never match an import alias.
+                return Some(base.to_string());
+            }
+        }
+        None
+    }
+
+    /// Bare name with providers from 2+ distinct imported modules → ambiguous.
+    /// Local shadowing (a `let`/param/own declaration) always wins and is
+    /// checked by callers via `lookup_var` before calling this.
+    fn ambiguity_error(&self, bare: &str) -> Option<String> {
+        match self.symbol_providers.get(bare) {
+            Some(providers) if providers.len() > 1 => Some(format!(
+                "ambiguous `{bare}` (provided by {} — use a qualified name like `{}::{bare}`)",
+                providers
+                    .iter()
+                    .map(|a| format!(
+                        "`{}`",
+                        self.import_aliases.get(a).map(|f| f.as_str()).unwrap_or(a)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                providers[0],
+            )),
+            _ => None,
         }
     }
 
@@ -2806,6 +2882,35 @@ impl Checker {
             ExprKind::BoolLit(_) => Ty::Bool,
             ExprKind::Ident(name) => {
                 let lookup = name.rsplit("::").next().unwrap_or(name);
+                // Qualified module access (§34): `io::x` / `std::io::x` refer
+                // to the same declaration as bare `x`. No duplication: both
+                // spellings resolve to the single inlined symbol.
+                if let Some(base) = self.module_qualified_base(name) {
+                    if let Some(ty) = self.lookup_var(&base) {
+                        if (matches!(ty, Ty::Own(_)) || self.ty_has_own(&ty))
+                            && self.is_poisoned(&base)
+                        {
+                            self.errors.push(SemError {
+                                message: format!("use of moved or deleted value `{name}`"),
+                                span: expr.span,
+                            });
+                        }
+                        return ty;
+                    }
+                    if self.enums.contains_key(&base) {
+                        return Ty::Enum(base.clone());
+                    }
+                    if self.structs.contains_key(&base) || self.classes.contains_key(&base) {
+                        return Ty::Struct(base.clone());
+                    }
+                    // Module-qualified but unknown symbol: precise diagnostic.
+                    let prefix = name.rsplit_once("::").map(|(p, _)| p).unwrap_or(name);
+                    self.errors.push(SemError {
+                        message: format!("unknown symbol `{base}` in module `{prefix}`"),
+                        span: expr.span,
+                    });
+                    return Ty::Int;
+                }
                 if let Some(ty) = self.lookup_var(name).or_else(|| self.lookup_var(lookup)) {
                     // Reading a moved/deleted owned slot is an error: `own`
                     // directly, or structs with transitive `own` fields.
@@ -2818,6 +2923,15 @@ impl Checker {
                             message: format!("use of moved or deleted value `{name}`"),
                             span: expr.span,
                         });
+                    }
+                    // Ambiguous bare use from two imported modules (§34):
+                    // locals/params already returned above via lookup_var, so
+                    // reaching here with an ambiguity means no local shadows.
+                    // Only diagnose when the name is not a local at all.
+                    if name == lookup && self.scope_index_of(name).is_none() {
+                        if let Some(msg) = self.ambiguity_error(name) {
+                            self.errors.push(SemError { message: msg, span: expr.span });
+                        }
                     }
                     ty
                 } else {
@@ -3129,9 +3243,51 @@ impl Checker {
                 args,
                 type_args,
             } => {
+                // Qualified module call (§34): `io::println(..)` resolves to
+                // the same declaration as bare `println(..)` — no duplication.
+                // `callee_key` is the bare name used for all table lookups;
+                // diagnostics keep the original `callee` spelling.
+                let callee_key: String = self
+                    .module_qualified_base(callee)
+                    .unwrap_or_else(|| callee.clone());
+                let is_qualified = callee_key != *callee;
+                if is_qualified
+                    && !self.funcs.contains_key(&callee_key)
+                    && !self.classes.contains_key(&callee_key)
+                    && self.lookup_var(&callee_key).is_none()
+                {
+                    let prefix = callee.rsplit_once("::").map(|(p, _)| p).unwrap_or(callee);
+                    // Enum-qualified calls (`Color.Red(..)`?) fall through to
+                    // the normal undefined-function path below.
+                    if self.import_aliases.contains_key(prefix)
+                        || self.import_fulls.contains(prefix)
+                        || prefix
+                            .rsplit("::")
+                            .next()
+                            .is_some_and(|l| self.import_aliases.contains_key(l))
+                    {
+                        self.errors.push(SemError {
+                            message: format!("unknown symbol `{callee_key}` in module `{prefix}`"),
+                            span: *callee_span,
+                        });
+                        for arg in args {
+                            let _ = self.check_call_arg(arg);
+                        }
+                        return Ty::Int;
+                    }
+                }
+                if !is_qualified
+                    && !callee.contains("::")
+                    && self.lookup_var(callee).is_none()
+                    && self.classes.get(callee).is_none()
+                {
+                    if let Some(msg) = self.ambiguity_error(callee) {
+                        self.errors.push(SemError { message: msg, span: *callee_span });
+                    }
+                }
                 // Handle generic function calls: substitute type args and check where bounds
                 // Also handle inference when type_args is empty.
-                if let Some(func) = self.funcs.get(callee).cloned() {
+                if let Some(func) = self.funcs.get(&callee_key).cloned() {
                     if !func.generic_params.is_empty() {
                         if !type_args.is_empty() {
                             self.check_generic_bounds(&func.generic_params, &func.where_clause, type_args, *callee_span);
@@ -3250,7 +3406,7 @@ impl Checker {
                     }
                 }
                 // Check for class constructor call: ClassName(args)
-                if let Some(cls) = self.classes.get(callee).cloned() {
+                if let Some(cls) = self.classes.get(&callee_key).cloned() {
                     // Need class decl to find constructors; retrieve from prog? For now check if any ctor matches arity
                     // We stored class info but not ctor sigs directly; we need to lookup via prog? Simpler: check if class has any constructors via scanning prog? Instead use class info fields?
                     // For now, try to find matching ctor via class's constructors stored in checker? We have not stored ctor sigs separately, but we can treat ctor as function with same name.
@@ -3264,9 +3420,9 @@ impl Checker {
                     // As quick fix: if class exists, treat call as constructor: check each arg is int? For test it's int, int -> ok.
                     // Let's attempt to find ctor via class's constructors collected earlier: we stored them but not as sigs. We'll handle via generic: if class has property ctor, we validate via prog scan.
                     // For now simply: if callee class exists, return struct type, and type-check args as if they were field types or ctor params? We'll look up class struct fields and match.
-                    let struct_ty = Ty::Struct(callee.clone());
+                    let struct_ty = Ty::Struct(callee_key.clone());
                     // If class has explicit constructors, check against them (visibility: Default is public for ctors)
-                    if let Some(cinfo) = self.classes.get(callee).cloned() {
+                    if let Some(cinfo) = self.classes.get(&callee_key).cloned() {
                         if !cinfo.constructors.is_empty() {
                             let mut matched: Option<(FuncSig, crate::ast::Visibility)> = None;
                             for (sig, vis) in &cinfo.constructors {
@@ -3277,7 +3433,7 @@ impl Checker {
                                 }
                             }
                             if let Some((sig, vis)) = matched {
-                                if vis == crate::ast::Visibility::Private && self.cur_class.as_deref() != Some(callee.as_str()) {
+                                if vis == crate::ast::Visibility::Private && self.cur_class.as_deref() != Some(callee_key.as_str()) {
                                     self.errors.push(SemError{message: format!("constructor for `{callee}` is private"), span: *callee_span});
                                 }
                                 for (i, arg) in args.iter().enumerate() {
@@ -3300,7 +3456,7 @@ impl Checker {
                         }
                     }
                     // No explicit ctor: check against fields (struct literal via call)
-                    let field_tys: Vec<Ty> = self.structs.get(callee).map(|s| s.fields.iter().map(|(_,ty)| ty.clone()).collect()).unwrap_or_default();
+                    let field_tys: Vec<Ty> = self.structs.get(&callee_key).map(|s| s.fields.iter().map(|(_,ty)| ty.clone()).collect()).unwrap_or_default();
                     if !field_tys.is_empty() && args.len() == field_tys.len() {
                         for (i, arg) in args.iter().enumerate() {
                             let aty = self.check_call_arg(arg);
@@ -3318,7 +3474,7 @@ impl Checker {
                 // NOTE (real stdlib): no builtin IO shortcut. `print`/`println`/
                 // `printInt`/`putChar` are ordinary functions from `std::io`;
                 // without `import std::io` they are undefined names by design.
-                let sig = self.funcs.get(callee).cloned();
+                let sig = self.funcs.get(&callee_key).cloned();
                 if let Some(sig) = sig {
                     // Async-1/Async-5: only an `async` body may create a
                     // task. A sync caller would receive a `task<T>` it can
@@ -3402,7 +3558,7 @@ impl Checker {
                     } else {
                         sig.ret
                     }
-                } else if let Some(var_ty) = self.lookup_var(callee) {
+                } else if let Some(var_ty) = self.lookup_var(&callee_key).or_else(|| self.lookup_var(callee)) {
                     // variable call (closure / function pointer)
                     if let Ty::Function(ret, params) = var_ty {
                         if params.len() != args.len() {
@@ -5278,8 +5434,21 @@ pub fn check(prog: &Program) -> Vec<SemError> {
 /// Sema entry point with options (used by the LSP, which expands imports
 /// itself and only requires `main` for files named `main`).
 pub fn check_with_options(prog: &Program, opts: CheckOptions) -> Vec<SemError> {
+    check_with_options_and_imports(prog, opts, &[])
+}
+
+/// Same as [`check_with_options`] plus entry-level import namespaces for
+/// qualified resolution (`io::println`) and ambiguity diagnostics (§34-35).
+/// `imports` comes from `modules::Expanded::imports`; empty means "no module
+/// namespaces" (legacy tests without imports keep working).
+pub fn check_with_options_and_imports(
+    prog: &Program,
+    opts: CheckOptions,
+    imports: &[crate::modules::ResolvedImport],
+) -> Vec<SemError> {
     let mut c = Checker::new();
     c.set_require_main(opts.require_main);
+    c.set_imports(imports);
     c.check_program(prog)
 }
 

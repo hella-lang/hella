@@ -8592,8 +8592,16 @@ impl<'ctx> Codegen<'ctx> {
                     let loaded = self.builder.build_load(st.as_basic_type_enum(), tmp, "ctor.load").unwrap();
                     return Ok(loaded);
                 }
-                // Try direct function, extern, or variable function pointer
-                if let Some((func, info)) = self.funcs.get(callee).cloned() {
+                // Try direct function, extern, or variable function pointer.
+                // Qualified `io::println` lowers to the same declaration as
+                // bare `println` (single LLVM function, no duplication).
+                let callee_base: &str = callee.rsplit("::").next().unwrap_or(callee);
+                if let Some((func, info)) = self
+                    .funcs
+                    .get(callee)
+                    .or_else(|| self.funcs.get(callee_base))
+                    .cloned()
+                {
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                     let variadic_idx = info.param_is_variadic.iter().position(|&v| v);
                     let is_c_varargs = info.param_is_variadic.iter().enumerate().any(|(i, &v)| v && info.param_names.get(i).map(|n| n.is_empty()).unwrap_or(false));
@@ -8710,7 +8718,11 @@ impl<'ctx> Codegen<'ctx> {
                     let vk = call.try_as_basic_value();
                     if vk.is_basic() { return Ok(vk.basic().unwrap()); } else { return Ok(self.context.i64_type().const_int(0,false).into()); }
                 }
-                if let Some(f) = self.module.get_function(callee) {
+                if let Some(f) = self
+                    .module
+                    .get_function(callee)
+                    .or_else(|| self.module.get_function(callee_base))
+                {
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                     for a in args {
                         // No signature context (matches sema's `any`
@@ -8744,7 +8756,10 @@ impl<'ctx> Codegen<'ctx> {
                         return Ok(v);
                     } else { return Ok(self.context.i64_type().const_int(0,false).into()); }
                 }
-                if let Some((ptr, ty)) = self.lookup_var(callee) {
+                if let Some((ptr, ty)) = self
+                    .lookup_var(callee)
+                    .or_else(|| self.lookup_var(callee_base))
+                {
                     let loaded = self.builder.build_load(ty, ptr, "func.load").unwrap();
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                     let mut param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> = Vec::new();
