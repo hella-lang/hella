@@ -3182,11 +3182,11 @@ impl Checker {
                 }
                 let rhs_ty = self.check_expr(value);
                 let is_null = matches!(value.kind, ExprKind::Null);
-                // Byte-slot narrowing: an `int` stored through indexing
+                // Byte-slot narrowing: any integer stored through indexing
                 // (`buf[i] = v`) into a `char` slot takes the low byte
-                // (mirrors C; codegen truncates). General `int` → `char`
+                // (mirrors C; codegen truncates). General integer → `char`
                 // bindings stay rejected — truncation must be explicit.
-                let truncating_byte_store = matches!(&rhs_ty, Ty::Int)
+                let truncating_byte_store = rhs_ty.is_int_like()
                     && matches!(&lhs_ty, Ty::Char)
                     && matches!(&lhs.kind, ExprKind::Index { .. });
                 if !is_null && !truncating_byte_store && !self.ty_assignable(&rhs_ty, &lhs_ty) {
