@@ -1,0 +1,41 @@
+// std::terminal — terminal detection for Hella.
+// Import via: import std::terminal
+// (constants live in `std::terminal::ansi`; this module is behavior).
+//
+// TTY detection gates ANSI styling: `std::terminal::ansi` bytes are raw
+// output either way, so programs that style text should check these
+// first and emit plain text when not attached to a terminal.
+
+@cfg(unix)
+extern "c" from "libc" do
+    int isatty(int fd)
+end
+
+/// True when stdout (fd 1) is a terminal. Unix: `isatty(1)`.
+/// Windows: not yet implemented — conservative false (plain output),
+/// so styled programs degrade safely until the console API lands.
+@cfg(unix)
+bool isStdoutTerminal() do
+    return isatty(1) is 1
+end
+
+/// True when stderr (fd 2) is a terminal (same platform notes as
+/// `isStdoutTerminal`).
+@cfg(unix)
+bool isStderrTerminal() do
+    return isatty(2) is 1
+end
+
+/// Windows stub: terminal detection is not implemented yet.
+/// Returns false so callers emit plain text (documented in the module
+/// header; the `@cfg(unix)` above carries the real implementation).
+@cfg(windows)
+bool isStdoutTerminal() do
+    return false
+end
+
+/// Windows stub (see `isStdoutTerminal`).
+@cfg(windows)
+bool isStderrTerminal() do
+    return false
+end

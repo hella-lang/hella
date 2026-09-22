@@ -1,0 +1,26 @@
+// stdlib_terminal.hll — regression for std::terminal
+//
+// TTY state is ambient (true under a terminal, false under redirection),
+// so nothing here asserts a value — the build, link, and clean run are
+// the regression coverage (binding exists, correct ABI, no crash).
+// Pair with std::terminal::ansi: style only when attached.
+
+import std::terminal
+import std::terminal::ansi
+import std::io
+import std::str
+
+int main() do
+    bool outTTY = isStdoutTerminal()
+    bool errTTY = isStderrTerminal()
+    if outTTY do
+        println("{GREEN}stdout is a terminal{RESET}")
+    end else do
+        println("stdout is not a terminal")
+    end
+    if errTTY do
+        eprintln("stderr is a terminal")
+    end
+    println("terminal ok")
+    return 0
+end
