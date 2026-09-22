@@ -8,6 +8,18 @@ void reject(string s) do
     assert value is 0
 end
 
+void rejectDouble(string s) do
+    double value = 123.5
+    assert parseDouble(s, ref value) is false
+    assert value is 0.0
+end
+
+void rejectBool(string s) do
+    bool value = true
+    assert parseBool(s, ref value) is false
+    assert value is false
+end
+
 int main() do
     int value = 0
     assert parseInt("0", ref value)
@@ -46,6 +58,55 @@ int main() do
     // toString output round-trips through the strict parser
     assert parseInt(toString(-12345), ref value)
     assert value is -12345
+    double dval = 0.0
+    assert parseDouble("0", ref dval)
+    assert dval is 0.0
+    assert parseDouble("-0", ref dval)
+    assert dval is 0.0
+    assert parseDouble("+3.14", ref dval)
+    assert dval is 3.14
+    assert parseDouble("-2.5", ref dval)
+    assert dval is not 2.5
+    assert dval is not 0.0
+    assert parseDouble(".5", ref dval)
+    assert dval is 0.5
+    assert parseDouble("5.", ref dval)
+    assert dval is 5.0
+    assert parseDouble("1e3", ref dval)
+    assert dval is 1000.0
+    assert parseDouble("2.5e-3", ref dval)
+    assert dval is 0.0025
+    assert parseDouble("inf", ref dval)
+    assert parseDouble("nan", ref dval)
+    assert parseDouble("1e999", ref dval)
+    rejectDouble("")
+    rejectDouble("+")
+    rejectDouble("-")
+    rejectDouble(".")
+    rejectDouble(" 1")
+    rejectDouble("1 ")
+    rejectDouble("1\n")
+    rejectDouble("12x")
+    rejectDouble("1_000")
+    rejectDouble("0x10")
+    rejectDouble("-0x1p3")
+    rejectDouble("0X1P3")
+    rejectDouble("++1")
+    rejectDouble("e5")
+    rejectDouble("é")
+    bool bval = false
+    assert parseBool("true", ref bval)
+    assert bval is true
+    assert parseBool("false", ref bval)
+    assert bval is false
+    rejectBool("")
+    rejectBool("True")
+    rejectBool("TRUE")
+    rejectBool("1")
+    rejectBool("0")
+    rejectBool("yes")
+    rejectBool(" true")
+    rejectBool("true ")
     println("num ok")
     return 0
 end

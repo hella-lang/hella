@@ -2,7 +2,8 @@
 import std::str
 
 extern "c" from "libc" do
-    i32 snprintf(string buf, int size, string fmt, ...)
+    int snprintf(string buf, int size, string fmt, ...)
+    int sscanf(string s, string fmt, ...)
 end
 
 /// Parses an entire decimal signed 64-bit int. Optional leading + or -.
@@ -71,4 +72,67 @@ string toString(int v) do
     string buf = allocateString(20)
     snprintf(buf, 21, "%lld", v)
     return buf
+end
+
+/// Parses a whole-string decimal float into `value` (C99 `sscanf` `%lf`
+/// syntax: optional sign, digits with optional fraction, optional exponent;
+/// the `inf`/`nan` spellings convert like Go's `ParseFloat`). Strict about
+/// surrounding text like `parseInt`: rejects empty input, whitespace,
+/// hexadecimal floats (`0x…`, which Hella has no syntax for), and trailing
+/// junk, and returns false **and resets value to 0.0** unless the entire
+/// string converted (`%n` must reach the end).
+/// Overflow yields ±inf with true (Rust `parse` parity), not failure.
+bool parseDouble(string s, ref double value) do
+    value = 0.0
+    int size = len(s)
+    if size is 0 do
+        return false
+    end
+    // `%lf` skips leading whitespace itself; reject it for strictness.
+    if isAsciiSpace(s[0]) do
+        return false
+    end
+    // `%lf` also accepts hexadecimal floats; Hella has no hex float
+    // syntax (and `parseInt` rejects `0x` too), so guard the prefix.
+    // Nested guards (no `and` chains) stay in bounds even without
+    // short-circuit evaluation.
+    int k = 0
+    if s[0] is '+' or s[0] is '-' do
+        k = 1
+    end
+    if k < size do
+        if s[k] is '0' do
+            if k + 1 < size do
+                if s[k + 1] is 'x' or s[k + 1] is 'X' do
+                    return false
+                end
+            end
+        end
+    end
+    int n = 0
+    double v = 0.0
+    int r = sscanf(s, "%lf%n", ref v, ref n)
+    if r is not 1 do
+        return false
+    end
+    if n is not size do
+        return false
+    end
+    value = v
+    return true
+end
+
+/// Parses exactly `"true"` or `"false"` into `value` (case-sensitive;
+/// no `1`/`0`/`yes` shorthands, matching `parseInt` strictness).
+/// Returns false **and resets value to false** on any other input.
+bool parseBool(string s, ref bool value) do
+    value = false
+    if equals(s, "true") do
+        value = true
+        return true
+    end
+    if equals(s, "false") do
+        return true
+    end
+    return false
 end

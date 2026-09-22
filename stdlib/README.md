@@ -64,6 +64,15 @@ without its `import` is a sema error (`undefined function`) by design.
     allowed; rejects whitespace, empty/sign-only input, prefixes, separators,
     trailing junk and overflow. Returns false **and resets value to 0** on failure.
     Checks before multiply/subtract, including -9223372036854775808; no libc parser.
+  - `bool parseDouble(string s, ref double value)` — strict whole-string
+    decimal float via `sscanf` `%lf` + `%n` (optional sign/fraction/exponent;
+    `inf`/`nan` convert like Go's `ParseFloat`). Rejects empty input,
+    whitespace, hex floats (`0x…`, which Hella has no syntax for) and
+    trailing junk. Returns false **and resets value to 0.0** unless the
+    entire string converted. Overflow yields ±inf with true (Rust parity).
+  - `bool parseBool(string s, ref bool value)` — exactly `"true"`/`"false"`
+    (case-sensitive, no `1`/`0` shorthands). Returns false **and resets
+    value to false** on any other input.
   - `string toString(int v)` — exact decimal text for every 64-bit int
     (bounded `%lld` `snprintf` into a 21-byte buffer; `%lld` is 64-bit on
     every platform, unlike interpolation's `%ld`).
