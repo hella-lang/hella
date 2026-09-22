@@ -22,7 +22,11 @@
 //!    stdlib-owned — third-party sources never go there).
 //!
 //! Resolution is textual inlining before sema (see `expand_imports`).
-//! Cycles (`a` ↔ `b`) are cut by tracking visited files.
+//! True import cycles (`a` ↔ `b`) are cut by tracking the files on the
+//! current expansion stack. Diamonds (two modules sharing a dependency)
+//! instead merge a fresh copy of the shared file's items, so selective
+//! closures and whole-module pushes see complete symbol sets regardless
+//! of entry import order.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -351,6 +355,11 @@ struct Ctx {
     /// declaration. `extern` blocks are exempt (linkage, always kept).
     /// Entry-file definitions bypass this set so shadowing still errors.
     seen_imported: HashSet<String>,
+    /// Files on the current expansion stack, innermost last. A resolved
+    /// import found here is a true cycle and is cut. A resolved import
+    /// that is merely `visited` (expanded before, off-stack) is a diamond:
+    /// its items merge fresh (see `expand_items`) instead of vanishing.
+    stack: Vec<PathBuf>,
 }
 
 /// Inline `import` items recursively (textual inclusion before sema).
@@ -419,6 +428,7 @@ pub fn expand_imports_with_cfg(program: Program, importer: &Path, debug_mode: bo
         errors: Vec::new(),
         debug_mode,
         seen_imported: HashSet::new(),
+        stack: Vec::new(),
     };
     let span = program.span;
     let mut items = expand_items(program.items, importer, &mut ctx, true);
@@ -564,6 +574,7 @@ fn expand_items(
         }
     }
     let mut out_items: Vec<Item> = Vec::new();
+    ctx.stack.push(importer.to_path_buf());
     for item in items {
         let Item::Import(imp) = item else {
             out_items.push(item);
@@ -586,8 +597,21 @@ fn expand_items(
             });
             continue;
         };
-        // Cycle guard: same file reached twice (directly or transitively).
+        // True cycle (`a` ↔ `b` via the current stack): cut silently.
+        if ctx.stack.contains(&path) {
+            continue;
+        }
+        // Diamond (expanded before, off the stack): merge a fresh copy of
+        // its items so closures and pushes see complete symbol sets no
+        // matter the entry import order. Extern blocks are skipped here —
+        // the first expansion already pushed them all (linkage always
+        // rides along). Dedup still applies at push time.
         if !ctx.visited.insert(path.clone()) {
+            for it in fresh_expand_for_merge(&path, ctx).unwrap_or_default() {
+                if !matches!(unwrap_item(&it), Item::Extern(_)) {
+                    push_nested(&mut out_items, ctx, is_entry, it);
+                }
+            }
             continue;
         }
         let src = match std::fs::read_to_string(&path) {
@@ -629,10 +653,11 @@ fn expand_items(
             let wanted: HashSet<String> =
                 syms.iter().map(|(s, _)| s.clone()).collect();
             // Selective imports keep the wanted symbols plus everything
-            // they reference, so `import std::str::{trim}` still brings
-            // `substring`/`allocateString`, `import std::rand::{flip}`
-            // still brings the generator globals, and
-            // `import std::terminal::ansi::{RED}` finds the const at all.
+            // they reference — values AND types — so `import std::str::{trim}`
+            // still brings `substring`/`allocateString`,
+            // `import std::rand::{flip}` still brings the generator globals,
+            // `import std::terminal::ansi::{RED}` finds the const at all, and
+            // `import std::time::{dateUtc}` still brings `struct Tm`.
             // `extern` blocks are linkage requirements, not selectable
             // symbols: they always ride along.
             let mut by_name: std::collections::HashMap<&str, usize> =
@@ -675,7 +700,15 @@ fn expand_items(
                     }
                     _ => {}
                 }
-                for r in refs {
+                // Named types referenced by the kept item (signatures, local
+                // decls, struct fields, enum payloads, aliases) ride along
+                // too — the worklist makes this transitive.
+                let mut tnames: Vec<String> = Vec::new();
+                crate::lint::walk::item_named_types(
+                    unwrap_item(&sub_items[idx]),
+                    &mut |n| tnames.push(n.to_string()),
+                );
+                for r in refs.into_iter().chain(tnames) {
                     if by_name.contains_key(r.as_str())
                         && keep.insert(r.clone())
                     {
@@ -705,7 +738,35 @@ fn expand_items(
             }
         }
     }
+    ctx.stack.pop();
     out_items
+}
+
+/// Re-expand an already-visited file for diamond merging (see the import
+/// guard in `expand_items`). Parses and expands with a side-effect-free
+/// child context: cloned `visited` (nested imports skip exactly as the
+/// parent would) and the shared `stack` (true cycles still cut), a
+/// throwaway error sink (the file parsed cleanly before), and no
+/// `seen_imported` (dedup happens at the caller's push time, not here).
+/// Returns `None` when the file no longer reads/parses.
+fn fresh_expand_for_merge(path: &Path, ctx: &Ctx) -> Option<Vec<Item>> {
+    let src = std::fs::read_to_string(path).ok()?;
+    let toks = crate::lexer::lex(&src);
+    if !toks.errors.is_empty() {
+        return None;
+    }
+    let mut sub = crate::parse::parse(toks.tokens, src).ok()?;
+    let mut child = Ctx {
+        bases: ctx.bases.clone(),
+        visited: ctx.visited.clone(),
+        errors: Vec::new(),
+        debug_mode: ctx.debug_mode,
+        seen_imported: HashSet::new(),
+        stack: ctx.stack.clone(),
+    };
+    let mut items = expand_items(sub.items, path, &mut child, false);
+    crate::cfg::apply_cfg(&mut items, ctx.debug_mode);
+    Some(items)
 }
 
 #[cfg(test)]

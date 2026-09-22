@@ -23,6 +23,192 @@ pub(crate) fn block_exprs(b: &Block, v: &mut impl FnMut(&Expr)) {
 pub(crate) fn exprs(e: &Expr, v: &mut impl FnMut(&Expr)) {
     expr(e, v);
 }
+
+/// Crate-visible: visit every *named type* in an item (used by the
+/// selective-import dependency closure, modules.rs, which must keep
+/// user-defined types a kept symbol references — e.g. a `Tm` local
+/// inside an imported function). Pushes base names (`a::B` → `B`);
+/// single-uppercase generic params never match item names downstream.
+/// Skips `where`-clause bounds (no stdlib case needs them yet).
+pub(crate) fn item_named_types(i: &Item, v: &mut impl FnMut(&str)) {
+    item_types(i, v);
+}
+fn ty(t: &Type, v: &mut impl FnMut(&str)) {
+    match t {
+        Type::Named(n, _) => v(n.rsplit("::").next().unwrap_or(n)),
+        Type::Generic(b, args, _) => {
+            v(b.rsplit("::").next().unwrap_or(b));
+            for a in args {
+                ty(a, v);
+            }
+        }
+        Type::FunctionType(r, ps, _) => {
+            ty(r, v);
+            for p in ps {
+                ty(p, v);
+            }
+        }
+        Type::Tuple(ts, _) => {
+            for t in ts {
+                ty(t, v);
+            }
+        }
+        Type::Array(e, _)
+        | Type::Vec { elem: e, .. }
+        | Type::Pointer(e, _)
+        | Type::Optional(e, _)
+        | Type::Own(e, _)
+        | Type::Task(e, _) => ty(e, v),
+        Type::FixedArray { elem: e, .. } => ty(e, v),
+        Type::Map { key: k, value: val, .. } => {
+            ty(k, v);
+            ty(val, v);
+        }
+        Type::Int(_)
+        | Type::Bool(_)
+        | Type::Void(_)
+        | Type::String(_)
+        | Type::Char(_)
+        | Type::Float(_)
+        | Type::Double(_)
+        | Type::Any(_) => {}
+    }
+}
+fn params_types(ps: &[Param], v: &mut impl FnMut(&str)) {
+    for p in ps {
+        ty(&p.ty, v);
+    }
+}
+fn function_types(f: &Function, v: &mut impl FnMut(&str)) {
+    ty(&f.ret_ty, v);
+    params_types(&f.params, v);
+    block_types(&f.body, v);
+}
+fn block_types(b: &Block, v: &mut impl FnMut(&str)) {
+    for s in &b.stmts {
+        match s {
+            Stmt::VarDecl(d) => ty(&d.ty, v),
+            Stmt::Const(d) => {
+                if let Some(t) = &d.ty {
+                    ty(t, v);
+                }
+            }
+            Stmt::Block(b) => block_types(b, v),
+            Stmt::If(i) => {
+                block_types(&i.then_block, v);
+                if let Some(b) = &i.else_block {
+                    block_types(b, v);
+                }
+            }
+            Stmt::While(w) => block_types(&w.body, v),
+            Stmt::Loop(l) => block_types(&l.body, v),
+            Stmt::For(f) => block_types(&f.body, v),
+            Stmt::Defer(d) => match &d.inner {
+                DeferInner::Block(b) => block_types(b, v),
+                DeferInner::Expr(_) => {}
+            },
+            Stmt::Scope(b) => block_types(b, v),
+            Stmt::Destructure(_)
+            | Stmt::Expr(_)
+            | Stmt::Return(_)
+            | Stmt::Delete(_)
+            | Stmt::Assert(_)
+            | Stmt::Yield(_)
+            | Stmt::Break(_)
+            | Stmt::Continue(_) => {}
+        }
+    }
+}
+fn property_types(p: &PropertyDecl, v: &mut impl FnMut(&str)) {
+    if let Some(t) = &p.ty {
+        ty(t, v);
+    }
+    if let Some(b) = &p.getter {
+        block_types(b, v);
+    }
+    if let Some((pm, b)) = &p.setter {
+        ty(&pm.ty, v);
+        block_types(b, v);
+    }
+}
+fn fields_types(fs: &[StructField], v: &mut impl FnMut(&str)) {
+    for f in fs {
+        ty(&f.ty, v);
+    }
+}
+fn item_types(i: &Item, v: &mut impl FnMut(&str)) {
+    match i {
+        Item::Function(f) => function_types(f, v),
+        Item::Init(b) => block_types(b, v),
+        Item::Var(d) => ty(&d.ty, v),
+        Item::Const(d) => {
+            if let Some(t) = &d.ty {
+                ty(t, v);
+            }
+        }
+        Item::Attributed { item: i, .. } => item_types(i, v),
+        Item::Struct(s) => fields_types(&s.fields, v),
+        Item::Class(c) => {
+            fields_types(&c.fields, v);
+            for f in &c.methods {
+                function_types(f, v);
+            }
+            for c in &c.constructors {
+                params_types(&c.params, v);
+                if let Some(b) = &c.body {
+                    block_types(b, v);
+                }
+            }
+            for d in &c.destructors {
+                block_types(&d.body, v);
+            }
+            for p in &c.properties {
+                property_types(p, v);
+            }
+            for o in &c.operators {
+                params_types(&o.params, v);
+                block_types(&o.body, v);
+            }
+            for c in &c.conversions {
+                ty(&c.from_ty, v);
+                ty(&c.to_ty, v);
+                block_types(&c.body, v);
+            }
+        }
+        Item::Extension(e) => {
+            for m in &e.members {
+                match m {
+                    ExtensionMember::Function(f) => function_types(f, v),
+                    ExtensionMember::Field(f) => ty(&f.ty, v),
+                    ExtensionMember::Property(p) => property_types(p, v),
+                    ExtensionMember::Operator(o) => {
+                        params_types(&o.params, v);
+                        block_types(&o.body, v);
+                    }
+                    ExtensionMember::Conversion(c) => {
+                        ty(&c.from_ty, v);
+                        ty(&c.to_ty, v);
+                        block_types(&c.body, v);
+                    }
+                }
+            }
+        }
+        Item::Enum(e) => {
+            for a in &e.variants {
+                params_types(&a.payload_params, v);
+            }
+        }
+        Item::Trait(t) => {
+            for m in &t.methods {
+                ty(&m.ret_ty, v);
+                params_types(&m.params, v);
+            }
+        }
+        Item::Typedef(t) => ty(&t.ty, v),
+        Item::Distinct(d) => ty(&d.ty, v),
+        Item::Import(_) | Item::Extern(_) => {}
+    }
+}
 fn params(ps: &[Param], v: &mut impl FnMut(&Expr)) {
     for p in ps {
         if let Some(e) = &p.default {
