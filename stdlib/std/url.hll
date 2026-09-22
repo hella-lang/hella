@@ -1,0 +1,314 @@
+// std::url — URL parsing and building for Hella (pure Hella).
+// Import via: import std::url
+//
+// Byte-oriented over ASCII: components are split, never normalized.
+// No case folding (compare hosts with `equalsIgnoreCase`), no
+// percent-normalization, no IDNA — what you parse is what was there.
+// Empty query/fragment normalize away on `buildUrl` (no `ForceQuery`).
+// A URL is never just "any string" here: `parseUrl` validates structure
+// and reports `valid`, and `buildUrl` only ever emits the parsed parts.
+//
+// Grammar covered (RFC 3986 split, Go `net/url` behavior where noted):
+// `[scheme:] [// [userinfo@] host [:port]] path [?query] [#fragment]`
+// Divergences from Go are documented on each function.
+
+import std::str
+import std::encoding
+
+/// Parsed URL. `valid` is false when structure checks fail; the other
+/// fields still hold whatever was split before the failure.
+struct Url has
+    string scheme = ""
+    string userinfo = ""
+    string host = ""
+    string port = ""
+    string path = ""
+    string query = ""
+    string fragment = ""
+    bool hasAuthority = false
+    bool valid = false
+end
+
+/// True for ASCII whitespace, DEL, or C0 controls — bytes that can never
+/// appear in a URL. `parseUrl` rejects inputs containing any of these.
+bool hasUrlControl(string s) do
+    string controls = "\x01\x02\x03\x04\x05\x06\x07\x08\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x7f"
+    int n = len(s)
+    int i = 0
+    while i < n do
+        char c = s[i]
+        if isAsciiSpace(c) do
+            return true
+        end
+        int k = 0
+        while k < 27 do
+            if controls[k] is c do
+                return true
+            end
+            k = k + 1
+        end
+        i = i + 1
+    end
+    return false
+end
+
+/// True for RFC 3986 unreserved bytes (`A`-`Z` `a`-`z` `0`-`9` `-` `_`
+/// `.` `~`) given as an `int` byte value. Building block for custom
+/// percent-encoders (used by `percentEncode`).
+bool isUrlUnreserved(int b) do
+    string alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"
+    int i = 0
+    while i < 66 do
+        int t = alpha[i]
+        if t is b do
+            return true
+        end
+        i = i + 1
+    end
+    return false
+end
+
+/// Percent-encodes every byte outside the unreserved set (uppercase hex,
+/// the normalization-canonical form per RFC 3986 §6.2.2.1). Exact-size
+/// output; never emits `+` for space (no form encoding here).
+string percentEncode(string s) do
+    string upper = "0123456789ABCDEF"
+    int n = len(s)
+    assert n <= 3074457345618258601
+    string res = allocateString(n * 3)
+    int o = 0
+    int i = 0
+    while i < n do
+        int b = s[i]
+        b = b & 255
+        if isUrlUnreserved(b) do
+            res[o] = b
+            o = o + 1
+        end else do
+            res[o] = '%'
+            res[o + 1] = upper[b >> 4]
+            res[o + 2] = upper[b & 15]
+            o = o + 3
+        end
+        i = i + 1
+    end
+    return substring(res, 0, o)
+end
+
+/// Inverse of `percentEncode` into `value`: `%XX` runs become bytes,
+/// other bytes pass through. Returns false **and resets value to `""`**
+/// on truncated (`"ab%"`, `"ab%2"`) or non-hex (`"ab%zz"`) sequences.
+bool percentDecode(string s, ref string value) do
+    value = ""
+    int n = len(s)
+    string res = allocateString(n)
+    int i = 0
+    int o = 0
+    while i < n do
+        int b = s[i]
+        b = b & 255
+        // 37 is '%'
+        if b is 37 do
+            if i + 2 >= n do
+                return false
+            end
+            int hi = hexValue(s[i + 1])
+            int lo = hexValue(s[i + 2])
+            if hi < 0 or lo < 0 do
+                return false
+            end
+            res[o] = hi * 16 + lo
+            o = o + 1
+            i = i + 3
+        end else do
+            res[o] = b
+            o = o + 1
+            i = i + 1
+        end
+    end
+    value = substring(res, 0, o)
+    return true
+end
+
+/// True for a leading scheme character (ASCII letter).
+bool isSchemeStart(char c) do
+    return isAlpha(c)
+end
+
+/// True for non-leading scheme characters (letters, digits, `+`, `-`, `.`).
+bool isSchemeRest(char c) do
+    if isAlpha(c) or isDigit(c) do
+        return true
+    end
+    return c is '+' or c is '-' or c is '.'
+end
+
+/// Parses `s` into its components. Empty input is invalid (stricter than
+/// Go, matching the `parseInt` family). A leading `segment:colon` is
+/// `scheme:` exactly like Go — including bare `host:port`, which both
+/// accept with the tail as an opaque-ish path (`localhost:8080` gives
+/// scheme `localhost`, path `8080`). Ports are digits-only with no range
+/// check (Go parity). Bracketed IPv6 (`[::1]:8080`) keeps its brackets
+/// in `host` (Go parity). No case folding is applied, and there is no
+/// opaque-part field: `mailto:a@b.c`-style tails land in `path`.
+Url parseUrl(string s) do
+    Url u = Url has
+    end
+    if isEmpty(s) do
+        return u
+    end
+    if hasUrlControl(s) do
+        return u
+    end
+    string rest = s
+    // Fragment first: '#' ends everything before it.
+    int hash = indexOf(rest, "#")
+    if hash >= 0 do
+        u.fragment = substring(rest, hash + 1, len(rest))
+        rest = substring(rest, 0, hash)
+    end
+    // Scheme: a ':' preceding any '/?#' starts `scheme:`.
+    int colon = indexOf(rest, ":")
+    int slash = indexOf(rest, "/")
+    int ques = indexOf(rest, "?")
+    if colon >= 0 do
+        if slash is -1 or colon < slash do
+            if ques is -1 or colon < ques do
+                string cand = substring(rest, 0, colon)
+                if isEmpty(cand) do
+                    return u
+                end
+                if not isSchemeStart(cand[0]) do
+                    return u
+                end
+                int k = 1
+                int cn = len(cand)
+                while k < cn do
+                    if not isSchemeRest(cand[k]) do
+                        return u
+                    end
+                    k = k + 1
+                end
+                u.scheme = cand
+                rest = substring(rest, colon + 1, len(rest))
+            end
+        end
+    end
+    // Authority: only after '//', ending at the first '/?' like Go
+    // (so `http://u?x@h/p` has host `u`, query `x@h/p` — the '@' never
+    // belongs to userinfo there; userinfo therefore cannot hold '/?#'
+    // by construction and needs no further validation).
+    if startsWith(rest, "//") do
+        u.hasAuthority = true
+        rest = substring(rest, 2, len(rest))
+        int authEnd = indexOf(rest, "/")
+        int qpos = indexOf(rest, "?")
+        if qpos >= 0 do
+            if authEnd is -1 do
+                authEnd = qpos
+            end else do
+                if qpos < authEnd do
+                    authEnd = qpos
+                end
+            end
+        end
+        string auth = rest
+        if authEnd >= 0 do
+            auth = substring(rest, 0, authEnd)
+            rest = substring(rest, authEnd, len(rest))
+        end else do
+            rest = ""
+        end
+        // Userinfo ends at the last '@'.
+        int at = lastIndexOf(auth, "@")
+        string hostport = auth
+        if at >= 0 do
+            u.userinfo = substring(auth, 0, at)
+            hostport = substring(auth, at + 1, len(auth))
+        end
+        if startsWith(hostport, "[") do
+            int close = indexOf(hostport, "]")
+            if close < 0 do
+                return u
+            end
+            u.host = substring(hostport, 0, close + 1)
+            string tail = substring(hostport, close + 1, len(hostport))
+            if not isEmpty(tail) do
+                if not startsWith(tail, ":") do
+                    return u
+                end
+                u.port = substring(tail, 1, len(tail))
+            end
+        end else do
+            if contains(hostport, "[") or contains(hostport, "]") do
+                return u
+            end
+            if count(hostport, ":") > 1 do
+                return u
+            end
+            int pc = indexOf(hostport, ":")
+            if pc >= 0 do
+                u.host = substring(hostport, 0, pc)
+                u.port = substring(hostport, pc + 1, len(hostport))
+            end else do
+                u.host = hostport
+            end
+        end
+        if not isEmpty(u.port) do
+            // NOTE: struct fields cannot index directly (only plain
+            // variable indexing is supported), so the port binds locally.
+            string portStr = u.port
+            int p = 0
+            int pn = len(portStr)
+            while p < pn do
+                if not isDigit(portStr[p]) do
+                    return u
+                end
+                p = p + 1
+            end
+        end
+    end
+    // Path and query split at the first '?'.
+    int qm = indexOf(rest, "?")
+    if qm >= 0 do
+        u.path = substring(rest, 0, qm)
+        u.query = substring(rest, qm + 1, len(rest))
+    end else do
+        u.path = rest
+    end
+    u.valid = true
+    return u
+end
+
+/// Recomposes `u` (`scheme:`, `//` + authority when `hasAuthority`,
+/// path, `?query`, `#fragment`). Empty query/fragment normalize away —
+/// `parseUrl("http://h/p?")` rebuilds as `"http://h/p"`.
+string buildUrl(Url u) do
+    string s = ""
+    if not isEmpty(u.scheme) do
+        s = concat(s, u.scheme)
+        s = concat(s, ":")
+    end
+    if u.hasAuthority do
+        s = concat(s, "//")
+        if not isEmpty(u.userinfo) do
+            s = concat(s, u.userinfo)
+            s = concat(s, "@")
+        end
+        s = concat(s, u.host)
+        if not isEmpty(u.port) do
+            s = concat(s, ":")
+            s = concat(s, u.port)
+        end
+    end
+    s = concat(s, u.path)
+    if not isEmpty(u.query) do
+        s = concat(s, "?")
+        s = concat(s, u.query)
+    end
+    if not isEmpty(u.fragment) do
+        s = concat(s, "#")
+        s = concat(s, u.fragment)
+    end
+    return s
+end

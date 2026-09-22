@@ -129,7 +129,7 @@ cargo run -p hella -- build -f examples/basics.hll && ./examples/basics; echo $?
 | `systems_ptr.hll` | Raw pointers: `&x` address-of, `*p` load/store (`--target` selects the LLVM triple) |
 | `cfg_platform.hll` | Conditional compilation: `@cfg(os = "...")`, `@cfg(debug)` |
 | `types_ints.hll` / `types_arr.hll` / `types_vec.hll` / `types_map.hll` / `types_methods.hll` | Integer widths, fixed arrays (incl. slicing), vectors, maps, methods |
-| `stdlib_*.hll` (`string`, `num`, `math`, `env`, `fs`, `path`, `collections`, `fmt`, `io`, `rand`, `log`, `encoding`, `hash`) | Standard-library tours: strings, parsing/conversion, math, environment, files, paths, vectors/maps, text composition, terminal IO, random generation, logging, hex/base64, hashing (see `stdlib/README.md` for the module index) |
+| `stdlib_*.hll` (`string`, `num`, `math`, `env`, `fs`, `path`, `collections`, `fmt`, `io`, `rand`, `log`, `encoding`, `hash`, `url`) | Standard-library tours: strings, parsing/conversion, math, environment, files, paths, vectors/maps, text composition, terminal IO, random generation, logging, hex/base64, hashing, URLs (see `stdlib/README.md` for the module index) |
 
 The exit code of each example is its answer; `basics` exits with `230`, `abstraction` with `233`, and so on.
 

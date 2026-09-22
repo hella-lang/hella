@@ -230,6 +230,19 @@ without its `import` is a sema error (`undefined function`) by design.
     Loop over a vec of non-blocking fds in one task instead of parking
     a thread per connection (see `examples/net_poll.hll`). True
     multi-fd/one-syscall poll and io_uring/kqueue backends are future.
+- `std::url` — `stdlib/std/url.hll` (pure Hella over `std::str` + `std::encoding`)
+  - `Url parseUrl(s)` into `scheme`/`userinfo`/`host`/`port`/`path`/`query`/
+    `fragment` + `hasAuthority`/`valid`. Split, never normalized: no case
+    folding, no percent-normalization, no IDNA; empty query/fragment
+    normalize away on rebuild. Empty input invalid (stricter than Go);
+    bare `host:port` parses as `scheme:path` like Go; ports digits-only
+    without range check; bracketed IPv6 keeps brackets; authority ends at
+    `/?` so `@` there belongs to path/query, never userinfo.
+  - `buildUrl(u)` recomposes (the `hasAuthority` flag round-trips
+    `http:///empty` faithfully); `percentEncode(s)` (uppercase hex,
+    never `+` for space) / `percentDecode(s, ref value)` (false + reset
+    on truncated/non-hex `%`); `hasUrlControl`/`isUrlUnreserved`/
+    `isSchemeStart`/`isSchemeRest` building blocks.
 - `std::terminal::ansi` — `stdlib/std/terminal/ansi.hll`
   - Plain `const string` values, no functions, no FFI: SGR styles
     (`RESET BOLD DIM ITALIC UNDERLINE ...`), standard + bright foreground

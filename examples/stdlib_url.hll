@@ -1,0 +1,124 @@
+// stdlib_url.hll — regression for std::url
+// Structural vectors cross-checked against Python urllib (ASCII only;
+// documented divergences: "" invalid, bare host:port invalid, no folding).
+
+import std::url
+import std::io
+import std::str
+
+void rejectUrl(string s) do
+    Url u = parseUrl(s)
+    assert u.valid is false
+end
+
+void checkFull() do
+    Url u = parseUrl("http://user:pass@example.com:8080/p?q=1#f")
+    assert u.valid is true
+    assert u.hasAuthority is true
+    assert equals(u.scheme, "http") is true
+    assert equals(u.userinfo, "user:pass") is true
+    assert equals(u.host, "example.com") is true
+    assert equals(u.port, "8080") is true
+    assert equals(u.path, "/p") is true
+    assert equals(u.query, "q=1") is true
+    assert equals(u.fragment, "f") is true
+    assert equals(buildUrl(u), "http://user:pass@example.com:8080/p?q=1#f") is true
+end
+
+int main() do
+    checkFull()
+    Url a = parseUrl("https://example.com")
+    assert a.valid is true
+    assert equals(a.scheme, "https") is true
+    assert equals(a.host, "example.com") is true
+    assert equals(a.path, "") is true
+    assert equals(buildUrl(a), "https://example.com") is true
+    Url b = parseUrl("https://example.com/")
+    assert equals(b.path, "/") is true
+    assert equals(buildUrl(b), "https://example.com/") is true
+    Url c = parseUrl("http://[::1]:8080/x")
+    assert c.valid is true
+    assert equals(c.host, "[::1]") is true
+    assert equals(c.port, "8080") is true
+    assert equals(buildUrl(c), "http://[::1]:8080/x") is true
+    Url d = parseUrl("//host/path")
+    assert d.valid is true
+    assert equals(d.scheme, "") is true
+    assert equals(d.host, "host") is true
+    assert equals(buildUrl(d), "//host/path") is true
+    Url e = parseUrl("/rel/path?q")
+    assert e.valid is true
+    assert e.hasAuthority is false
+    assert equals(e.path, "/rel/path") is true
+    assert equals(e.query, "q") is true
+    Url f = parseUrl("mailto:a@b.c")
+    assert f.valid is true
+    assert equals(f.scheme, "mailto") is true
+    assert equals(f.path, "a@b.c") is true
+    assert equals(buildUrl(f), "mailto:a@b.c") is true
+    Url g = parseUrl("http:///empty-host")
+    assert g.valid is true
+    assert equals(g.host, "") is true
+    assert equals(buildUrl(g), "http:///empty-host") is true
+    Url h = parseUrl("ftp://h:21/")
+    assert equals(h.port, "21") is true
+    assert equals(buildUrl(h), "ftp://h:21/") is true
+    Url i = parseUrl("a:b")
+    assert i.valid is true
+    assert equals(i.scheme, "a") is true
+    assert equals(i.path, "b") is true
+    // Bare host:port parses as scheme:path like Go (no authority).
+    Url j = parseUrl("localhost:8080")
+    assert j.valid is true
+    assert equals(j.scheme, "localhost") is true
+    assert equals(j.path, "8080") is true
+    // '@' in the path is ordinary text, not userinfo.
+    Url k = parseUrl("http://a/b@c/d")
+    assert k.valid is true
+    assert equals(k.host, "a") is true
+    assert equals(k.path, "/b@c/d") is true
+    // Authority ends at '/?', so the '@' here lives in the query.
+    Url m = parseUrl("http://u?x@h/p")
+    assert m.valid is true
+    assert equals(m.host, "u") is true
+    assert equals(m.query, "x@h/p") is true
+    rejectUrl("")
+    rejectUrl("1http://x")
+    rejectUrl("http://x:ab/")
+    rejectUrl("http://[::1/x")
+    rejectUrl("http://a b/")
+    rejectUrl("http://x/y z")
+    rejectUrl("ht tp://x")
+    rejectUrl("http://[::1]junk/x")
+    rejectUrl("http://h:12:34/")
+    assert equals(percentEncode("ABCxyz019-_.~"), "ABCxyz019-_.~") is true
+    assert equals(percentEncode(""), "") is true
+    assert equals(percentEncode("a b/c?d"), "a%20b%2Fc%3Fd") is true
+    assert equals(percentEncode("é"), "%C3%A9") is true
+    string pd = ""
+    assert percentDecode("%41%42", ref pd)
+    assert equals(pd, "AB") is true
+    assert percentDecode("a+b", ref pd)
+    assert equals(pd, "a+b") is true
+    assert percentDecode("", ref pd)
+    assert isEmpty(pd) is true
+    assert percentDecode("%C3%A9", ref pd)
+    assert equals(pd, "é") is true
+    string bad = "sentinel"
+    assert percentDecode("ab%", ref bad) is false
+    assert isEmpty(bad) is true
+    assert percentDecode("ab%2", ref bad) is false
+    assert percentDecode("ab%zz", ref bad) is false
+    assert percentDecode("%2G", ref bad) is false
+    assert hasUrlControl("a b") is true
+    assert hasUrlControl("a\tb") is true
+    assert hasUrlControl("ab") is false
+    assert isUrlUnreserved(65) is true
+    assert isUrlUnreserved(32) is false
+    assert isSchemeStart('h') is true
+    assert isSchemeStart('1') is false
+    assert isSchemeRest('+') is true
+    assert isSchemeRest('/') is false
+    println("url ok")
+    return 0
+end
