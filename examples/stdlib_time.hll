@@ -1,0 +1,27 @@
+// stdlib_time.hll — regression for std::time
+//
+// Clocks are ambient (wall time; CPU usage), so asserts only check
+// ordering/sanity, never exact values.
+
+import std::time
+import std::io
+import std::str
+
+int main() do
+    int w1 = wallMs()
+    int u1 = wallMicros()
+    assert w1 > 0
+    assert u1 > 0
+    int w2 = wallMs()
+    assert w2 >= w1
+    int c1 = cpuMs()
+    assert c1 >= 0
+    int c2 = cpuMs()
+    assert c2 >= c1
+    int d = deadlineMs(w2, 10000)
+    assert d is w2 + 10000
+    assert expiredMs(w2) is true
+    assert expiredMs(d) is false
+    println("time ok")
+    return 0
+end

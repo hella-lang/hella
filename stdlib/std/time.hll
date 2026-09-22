@@ -11,6 +11,10 @@ extern "c" from "hella_sync" do
     int hella_wall_micros()
 end
 
+extern "c" from "libc" do
+    int clock()
+end
+
 /// Milliseconds since the Unix epoch (wall clock, NOT monotonic — for
 /// timestamps, timeouts and deadlines, not short-interval benchmarks).
 int wallMs() do
@@ -30,4 +34,23 @@ end
 /// True when `wallMs()` has passed `deadline`.
 bool expiredMs(int deadline) do
     return wallMs() >= deadline
+end
+
+/// Processor milliseconds consumed by this process (ISO C `clock()`).
+/// Monotonic while the process runs, but it is CPU time, NOT wall time:
+/// sleeping, waiting on I/O, or parked tasks do not advance it. Use it
+/// for benchmarking CPU-bound work and short-interval CPU durations —
+/// never for wall timeouts or time-of-day (that is `wallMs`). Wraps
+/// (rarely) on very long runs.
+@cfg(unix)
+int cpuMs() do
+    // POSIX CLOCKS_PER_SEC is 1000000.
+    return clock() / 1000
+end
+
+/// Windows half of `cpuMs` (see above): UCRT CLOCKS_PER_SEC is 1000,
+/// so `clock()` already ticks in milliseconds — no division.
+@cfg(windows)
+int cpuMs() do
+    return clock()
 end
