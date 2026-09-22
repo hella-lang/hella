@@ -107,6 +107,14 @@ int main() do
     rejectBool("yes")
     rejectBool(" true")
     rejectBool("true ")
+    assert equals(doubleToString(0.0), "0") is true
+    assert equals(doubleToString(3.14), "3.14") is true
+    assert equals(doubleToString(100.0), "100") is true
+    assert equals(doubleToString(0.5), "0.5") is true
+    // No negative double literals exist: parse one, then format it back.
+    double neg = 0.0
+    assert parseDouble("-2.5", ref neg)
+    assert equals(doubleToString(neg), "-2.5") is true
     println("num ok")
     return 0
 end

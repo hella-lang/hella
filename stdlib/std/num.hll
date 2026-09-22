@@ -136,3 +136,14 @@ bool parseBool(string s, ref bool value) do
     end
     return false
 end
+
+/// Formats `v` with `%g` (6 significant digits) into a 32-byte buffer —
+/// always big enough (`%g` never runs away like `%f` on large magnitudes).
+/// Display-grade only: shortest round-trip is NOT guaranteed (use integers
+/// or fixed-point strings when the text must parse back exactly).
+/// `nan`/`inf` render as libc spells them.
+string doubleToString(double v) do
+    string buf = allocateString(31)
+    snprintf(buf, 32, "%g", v)
+    return buf
+end

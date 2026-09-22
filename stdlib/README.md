@@ -78,6 +78,9 @@ without its `import` is a sema error (`undefined function`) by design.
   - `string toString(int v)` — exact decimal text for every 64-bit int
     (bounded `%lld` `snprintf` into a 21-byte buffer; `%lld` is 64-bit on
     every platform, unlike interpolation's `%ld`).
+  - `string doubleToString(double v)` — `%g` display text (6 significant
+    digits) in a 32-byte buffer, always big enough. Display-grade only:
+    shortest round-trip is not guaranteed.
 - `std::env` — `stdlib/std/env.hll`
   - `string getEnv(string name)` (getenv + "" on miss, `string is null` now allowed), `bool hasEnv`, `void setEnv`/`unsetEnv` (setenv/unsetenv), `string cwd()` (getcwd + calloc)
   - `string homeDir()` — `HOME`, else `USERPROFILE` (Windows), else `""`.
@@ -224,6 +227,10 @@ without its `import` is a sema error (`undefined function`) by design.
 - `std::time` — `stdlib/std/time.hll` (B2)
   - `wallMs`/`wallMicros` (Unix epoch, via `hella_wall_micros`),
     `deadlineMs`/`expiredMs` helpers. Wall clock, not monotonic.
+  - `cpuMs()` — processor milliseconds (ISO C `clock()`). Monotonic
+    while running, but CPU time, not wall: sleeping and parked tasks do
+    not advance it. For CPU benchmarks, never wall timeouts. POSIX
+    divides by 1000000, Windows returns millis directly (`@cfg` split).
 - `std::net` — `stdlib/std/net.hll` (B2)
   - Blocking IPv4 TCP: `tcpConnect`/`tcpListen`/`tcpAccept`/
     `tcpSend`/`tcpRecv`/`tcpClose` (`int` fds, -1 on error, `recv` 0 on
@@ -249,6 +256,10 @@ without its `import` is a sema error (`undefined function`) by design.
     never `+` for space) / `percentDecode(s, ref value)` (false + reset
     on truncated/non-hex `%`); `hasUrlControl`/`isUrlUnreserved`/
     `isSchemeStart`/`isSchemeRest` building blocks.
+- `std::terminal` — `stdlib/std/terminal/mod.hll`
+  - `isStdoutTerminal()` / `isStderrTerminal()` (`isatty` on Unix).
+    Windows: not yet implemented — conservative false so styled programs
+    degrade to plain text. Gate `std::terminal::ansi` styling on these.
 - `std::terminal::ansi` — `stdlib/std/terminal/ansi.hll`
   - Plain `const string` values, no functions, no FFI: SGR styles
     (`RESET BOLD DIM ITALIC UNDERLINE ...`), standard + bright foreground

@@ -134,6 +134,8 @@ fn stdlib_compiles_links_and_runs_debug_and_release() {
             ("encoding", "encoding ok\n"),
             ("hash", "hash ok\n"),
             ("url", "url ok\n"),
+            ("terminal", "stdout is not a terminal\nterminal ok\n"),
+            ("time", "time ok\n"),
         ] {
             let source = fs::read_to_string(
                 root.join(format!("examples/stdlib_{name}.hll")),
