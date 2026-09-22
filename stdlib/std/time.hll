@@ -17,6 +17,10 @@ end
 
 // Calendar layout shared by every platform backend below (C `struct tm`
 // order with 32-bit fields; Hella `int` would be 64-bit and misalign).
+// Includes the POSIX extensions (`tm_gmtoff`, `tm_zone`): glibc and macOS
+// `gmtime_r` write all 56 bytes, so a 9-field alloca would let the call
+// overflow its stack slot. Windows `struct tm` is 36 bytes — the extra
+// fields simply stay zero there.
 extern "c" from "libc" do
     struct Tm has
         i32 sec
@@ -28,6 +32,8 @@ extern "c" from "libc" do
         i32 wday
         i32 yday
         i32 isdst
+        int gmtoff
+        string zone
     end
 end
 
