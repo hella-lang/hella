@@ -1,0 +1,227 @@
+// std::encoding — hex and base64 text encodings for Hella (pure Hella).
+// Import via: import std::encoding
+//
+// Byte-oriented: inputs are arbitrary bytes. Byte values ride `char`
+// slots into `int` locals via the widening conversion (`int b = s[i]`,
+// masked `& 255` so high bytes behave regardless of char extension);
+// computed bytes land via truncating index stores (`res[i] = v` keeps
+// the low byte). No `char` arithmetic exists — nibbles/sextets come
+// from shifts and masks on the `int` copies, and output characters
+// from alphabet tables.
+//
+// Allocations are exact-size via `allocateString`; see stdlib/README.md
+// on ownership. Naive per-character table scans are O(n) with a small
+// alphabet constant, matching the documented cost style of `std::str`.
+
+import std::str
+
+/// Hex digit value (0-15) for `0`-`9`/`a`-`f`/`A`-`F`, else -1.
+/// Building block for hex parsing anywhere (used by `hexDecode`).
+int hexValue(char c) do
+    string digits = "0123456789abcdefABCDEF"
+    int i = 0
+    while i < 22 do
+        if digits[i] is c do
+            if i < 16 do
+                return i
+            end
+            return i - 6
+        end
+        i = i + 1
+    end
+    return -1
+end
+
+/// Lowercase hex of every byte (`hexEncode("foobar")` is `"666f6f626172"`).
+/// Empty input yields `""`. Output size is exactly `2 * len(s)`.
+string hexEncode(string s) do
+    string digits = "0123456789abcdef"
+    int n = len(s)
+    assert n <= 4611686018427387903
+    string res = allocateString(n * 2)
+    int i = 0
+    while i < n do
+        int b = s[i]
+        b = b & 255
+        res[i * 2] = digits[b >> 4]
+        res[i * 2 + 1] = digits[b & 15]
+        i = i + 1
+    end
+    return res
+end
+
+/// Inverse of `hexEncode`: even-length hex (either case) into `value`.
+/// Returns false **and resets value to `""`** on odd length or any
+/// non-hex character (checked before writing, so failures leave no
+/// partial output behind).
+bool hexDecode(string s, ref string value) do
+    value = ""
+    int n = len(s)
+    if n % 2 is 1 do
+        return false
+    end
+    string res = allocateString(n / 2)
+    int i = 0
+    while i < n do
+        int hi = hexValue(s[i])
+        int lo = hexValue(s[i + 1])
+        if hi < 0 or lo < 0 do
+            return false
+        end
+        res[i / 2] = hi * 16 + lo
+        i = i + 2
+    end
+    value = res
+    return true
+end
+
+/// Base64 value (0-63) for the standard alphabet, else -1.
+/// `=` (padding) is not a value — placement is validated by `base64Decode`.
+int base64Value(char c) do
+    string alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    int i = 0
+    while i < 64 do
+        if alpha[i] is c do
+            return i
+        end
+        i = i + 1
+    end
+    return -1
+end
+
+/// Standard base64 with `=` padding (`base64Encode("foobar")` is
+/// `"Zm9vYmFy"`). Empty input yields `""`. Output size is exactly
+/// `4 * ceil(len(s) / 3)`.
+string base64Encode(string s) do
+    string alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    int n = len(s)
+    assert n <= 4611686018427387903
+    int full = n / 3
+    int rem = n % 3
+    int total = full * 4
+    if rem > 0 do
+        total = total + 4
+    end
+    string res = allocateString(total)
+    int i = 0
+    int o = 0
+    while i < full * 3 do
+        int b0 = s[i]
+        b0 = b0 & 255
+        int b1 = s[i + 1]
+        b1 = b1 & 255
+        int b2 = s[i + 2]
+        b2 = b2 & 255
+        res[o] = alpha[b0 >> 2]
+        res[o + 1] = alpha[((b0 & 3) << 4) | (b1 >> 4)]
+        res[o + 2] = alpha[((b1 & 15) << 2) | (b2 >> 6)]
+        res[o + 3] = alpha[b2 & 63]
+        i = i + 3
+        o = o + 4
+    end
+    if rem is 1 do
+        int b0 = s[i]
+        b0 = b0 & 255
+        res[o] = alpha[b0 >> 2]
+        res[o + 1] = alpha[(b0 & 3) << 4]
+        res[o + 2] = '='
+        res[o + 3] = '='
+    end else do
+        if rem is 2 do
+            int b0 = s[i]
+            b0 = b0 & 255
+            int b1 = s[i + 1]
+            b1 = b1 & 255
+            res[o] = alpha[b0 >> 2]
+            res[o + 1] = alpha[((b0 & 3) << 4) | (b1 >> 4)]
+            res[o + 2] = alpha[(b1 & 15) << 2]
+            res[o + 3] = '='
+        end
+    end
+    return res
+end
+
+/// Inverse of `base64Encode` into `value`. Strict: length must be a
+/// multiple of 4, `=` only as the last one or two characters, and every
+/// other character must be in the alphabet. Returns false **and resets
+/// value to `""`** on any violation.
+bool base64Decode(string s, ref string value) do
+    value = ""
+    int n = len(s)
+    if n % 4 is not 0 do
+        return false
+    end
+    // Padding census: 0, 1, or 2 trailing '=' (nested guards stay in
+    // bounds; `=` anywhere else is caught below).
+    int pad = 0
+    if n > 0 do
+        if s[n - 1] is '=' do
+            pad = 1
+            if n > 1 do
+                if s[n - 2] is '=' do
+                    pad = 2
+                end
+            end
+        end
+    end
+    // '=' may only occupy the final `pad` slots.
+    int j = 0
+    while j < n - pad do
+        if s[j] is '=' do
+            return false
+        end
+        j = j + 1
+    end
+    while j < n do
+        if s[j] is not '=' do
+            return false
+        end
+        j = j + 1
+    end
+    int total = n / 4 * 3
+    if pad > 0 do
+        total = total - pad
+    end
+    string res = allocateString(total)
+    int quads = n / 4
+    int q = 0
+    int i = 0
+    int o = 0
+    while q < quads do
+        int v0 = base64Value(s[i])
+        int v1 = base64Value(s[i + 1])
+        int v2 = base64Value(s[i + 2])
+        int v3 = base64Value(s[i + 3])
+        if v0 < 0 or v1 < 0 do
+            return false
+        end
+        res[o] = (v0 << 2) | (v1 >> 4)
+        o = o + 1
+        if v2 >= 0 do
+            res[o] = ((v1 & 15) << 4) | (v2 >> 2)
+            o = o + 1
+            if v3 >= 0 do
+                res[o] = ((v2 & 3) << 6) | v3
+                o = o + 1
+            end else do
+                if s[i + 3] is not '=' do
+                    return false
+                end
+            end
+        end else do
+            if s[i + 2] is not '=' do
+                return false
+            end
+            if v3 >= 0 do
+                return false
+            end
+            if s[i + 3] is not '=' do
+                return false
+            end
+        end
+        i = i + 4
+        q = q + 1
+    end
+    value = res
+    return true
+end

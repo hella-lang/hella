@@ -1,0 +1,78 @@
+// stdlib_encoding.hll — regression for std::encoding (RFC 4648 vectors)
+
+import std::encoding
+import std::io
+import std::str
+
+void rejectHex(string s) do
+    string value = "sentinel"
+    assert hexDecode(s, ref value) is false
+    assert isEmpty(value) is true
+end
+
+void rejectB64(string s) do
+    string value = "sentinel"
+    assert base64Decode(s, ref value) is false
+    assert isEmpty(value) is true
+end
+
+int main() do
+    assert hexValue('0') is 0
+    assert hexValue('9') is 9
+    assert hexValue('a') is 10
+    assert hexValue('f') is 15
+    assert hexValue('A') is 10
+    assert hexValue('F') is 15
+    assert hexValue('g') is -1
+    assert equals(hexEncode(""), "") is true
+    assert equals(hexEncode("foobar"), "666f6f626172") is true
+    assert equals(hexEncode("f"), "66") is true
+    string hv = ""
+    assert hexDecode("666f6f626172", ref hv)
+    assert equals(hv, "foobar") is true
+    assert hexDecode("666F6F", ref hv)
+    assert equals(hv, "foo") is true
+    assert hexDecode("", ref hv)
+    assert isEmpty(hv) is true
+    rejectHex("abc")
+    rejectHex("zz")
+    rejectHex("0g")
+    rejectHex("0x10")
+    assert base64Value('A') is 0
+    assert base64Value('z') is 51
+    assert base64Value('0') is 52
+    assert base64Value('+') is 62
+    assert base64Value('/') is 63
+    assert base64Value('=') is -1
+    assert equals(base64Encode(""), "") is true
+    assert equals(base64Encode("f"), "Zg==") is true
+    assert equals(base64Encode("fo"), "Zm8=") is true
+    assert equals(base64Encode("foo"), "Zm9v") is true
+    assert equals(base64Encode("foob"), "Zm9vYg==") is true
+    assert equals(base64Encode("fooba"), "Zm9vYmE=") is true
+    assert equals(base64Encode("foobar"), "Zm9vYmFy") is true
+    string bv = ""
+    assert base64Decode("Zm9vYmFy", ref bv)
+    assert equals(bv, "foobar") is true
+    assert base64Decode("Zg==", ref bv)
+    assert equals(bv, "f") is true
+    assert base64Decode("Zm8=", ref bv)
+    assert equals(bv, "fo") is true
+    assert base64Decode("", ref bv)
+    assert isEmpty(bv) is true
+    rejectB64("abc")
+    rejectB64("abcde")
+    rejectB64("!!!!")
+    rejectB64("AB=C")
+    rejectB64("A===")
+    rejectB64("A==B")
+    rejectB64("====")
+    // round-trips through both codecs
+    string rt = ""
+    assert hexDecode(hexEncode("hello, world!"), ref rt)
+    assert equals(rt, "hello, world!") is true
+    assert base64Decode(base64Encode("hello, world!"), ref rt)
+    assert equals(rt, "hello, world!") is true
+    println("encoding ok")
+    return 0
+end

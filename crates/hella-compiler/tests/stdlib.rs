@@ -131,6 +131,7 @@ fn stdlib_compiles_links_and_runs_debug_and_release() {
             ("fs", "fs ok\n"),
             ("path", "path ok\n"),
             ("io", "io: ok\n42\nA\nname? hello Ada\nage? 42\n"),
+            ("encoding", "encoding ok\n"),
         ] {
             let source = fs::read_to_string(
                 root.join(format!("examples/stdlib_{name}.hll")),

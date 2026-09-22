@@ -141,6 +141,16 @@ without its `import` is a sema error (`undefined function`) by design.
     silences everything.
   - Lines use exact-size `concat`, never the interpolation buffer, so
     unbounded messages stay safe.
+- `std::encoding` — `stdlib/std/encoding.hll` (pure Hella over `std::str`)
+  - `hexEncode(s)` (lowercase, exact `2n` output), `hexDecode(s, ref value)`
+    (either case; false + reset on odd length or non-hex input),
+    `hexValue(c)` digit helper (`-1` on miss)
+  - `base64Encode(s)` (standard alphabet, `=` padding, exact output),
+    `base64Decode(s, ref value)` (strict length/`=`-placement/alphabet;
+    false + reset on violation), `base64Value(c)` helper (`-1`, incl. `=`)
+  - Possible because `char` widens to `int` at bindings and `int` narrows
+    into `char` index stores (low byte); bytes are masked `& 255` after
+    widening so high bytes behave regardless of char extension
 - `std::fmt` — `stdlib/std/fmt.hll`
   - `join(sep, parts)` (via `sJoin`), `repeat(s, n)`, `padStart(s, width)`,
     `padEnd(s, width)`, `padCenter(s, width)` (extra space goes right) —
@@ -331,3 +341,6 @@ and `clang` (or `HELLA_LINKER`).
 - [Rust i64 parsing](https://doc.rust-lang.org/std/primitive.i64.html#method.from_str_radix):
   strict signed parsing and explicit invalid/overflow failure. Hella uses bool +
   ref output rather than claiming generic Result support.
+- [RFC 4648](https://datatracker.ietf.org/doc/html/rfc4648): test vectors
+  (`f`/`fo`/`foo`/`foob`/`fooba`/`foobar`) and strict `=`-placement rules.
+  Hella returns bool + ref output with reset-on-failure instead of Result.
