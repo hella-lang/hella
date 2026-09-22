@@ -1,0 +1,27 @@
+// stdlib_hash.hll — regression for std::hash
+// Golden vectors cross-checked against an independent oracle
+// (FNV spec bases plus a reference implementation; CRC32 zlib).
+
+import std::hash
+import std::io
+import std::str
+
+int main() do
+    assert equals(fnv1a64(""), "cbf29ce484222325") is true
+    assert equals(fnv1a64("f"), "af63db4c8601ead9") is true
+    assert equals(fnv1a64("fo"), "08985907b541d342") is true
+    assert equals(fnv1a64("foo"), "dcb27518fed9d577") is true
+    assert equals(fnv1a64("foobar"), "85944171f73967e8") is true
+    assert equals(fnv1a64("hello, world!"), "e60e63e648826894") is true
+    assert equals(fnv1a64("123456789"), "06d5573923c6cdfc") is true
+    assert equals(fnv1a32(""), "811c9dc5") is true
+    assert equals(fnv1a32("f"), "e30c2799") is true
+    assert equals(fnv1a32("foobar"), "bf9cf968") is true
+    assert equals(fnv1a32("hello, world!"), "8a0c8a74") is true
+    assert equals(crc32(""), "00000000") is true
+    assert equals(crc32("123456789"), "cbf43926") is true
+    assert equals(crc32("foobar"), "9ef61f95") is true
+    assert equals(crc32("hello, world!"), "58988d13") is true
+    println("hash ok")
+    return 0
+end

@@ -151,6 +151,16 @@ without its `import` is a sema error (`undefined function`) by design.
   - Possible because `char` widens to `int` at bindings and `int` narrows
     into `char` index stores (low byte); bytes are masked `& 255` after
     widening so high bytes behave regardless of char extension
+- `std::hash` — `stdlib/std/hash.hll` (pure Hella over `std::str` + `std::encoding`)
+  - `fnv1a64(s)` / `fnv1a32(s)` / `crc32(s)` (zlib/IEEE) as lowercase hex
+    strings (16/8/8 chars, leading zeros kept). Digests render nibble-direct
+    from the integer: Hella strings cannot hold NUL bytes (`len` is
+    `strlen`-based), so a digest byte of zero would truncate a byte-string
+    round-trip.
+  - Non-cryptographic (no collision/preimage resistance — never passwords,
+    tokens, or signatures; no crypto lives in the standard library).
+    Wrapping mod-2^N arithmetic like `std::rand` relies on; `u64Pair` halves
+    must be split (a 40-bit FNV prime in `lo` truncates — see module header).
 - `std::fmt` — `stdlib/std/fmt.hll`
   - `join(sep, parts)` (via `sJoin`), `repeat(s, n)`, `padStart(s, width)`,
     `padEnd(s, width)`, `padCenter(s, width)` (extra space goes right) —

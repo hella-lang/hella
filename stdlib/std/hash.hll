@@ -1,0 +1,120 @@
+// std::hash — non-cryptographic hashes and checksums (pure Hella).
+// Import via: import std::hash
+//
+// FNV-1a (32/64-bit) and CRC32 (zlib/IEEE). These are integrity and
+// data-structure hashes, NOT cryptographic: no collision resistance,
+// no preimage resistance — never use them for passwords, tokens, or
+// signatures (no crypto lives in the standard library by design).
+//
+// Digests render as lowercase hex strings (the printable form, like
+// `md5sum`): there is deliberately no raw-integer variant, since only
+// `int` prints via `std::num::toString`. Byte extraction rides the
+// conversion pair (`int` locals from `char` slots masked `& 255`,
+// truncating index stores back out); arithmetic wraps mod 2^N like the
+// `std::rand` generator relies on.
+
+import std::str
+import std::encoding
+
+// 64-bit constant builder for `int`-bounded literals — same workaround
+// as `std::rand::u64Const`, kept local so hashing never depends on the
+// PRNG module: `u64Pair(hi, lo)` = `(hi << 32) | zeroext(lo)`.
+u64 u64Pair(int hi, int lo) do
+    u64 lo64 = lo & 4294967295
+    u64 hi64 = hi & 4294967295
+    return lo64 | (hi64 << 32)
+end
+
+/// Lowercase hex of `v` (always 16 chars, leading zeros kept).
+/// Nibble-direct: Hella strings cannot hold NUL bytes (`len` is
+/// `strlen`-based), so digests must never round-trip through a byte
+/// string — bytes with value zero would truncate the rendering.
+string u64Hex(u64 v) do
+    string digits = "0123456789abcdef"
+    string res = allocateString(16)
+    int i = 0
+    while i < 16 do
+        int nib = (v >> (60 - i * 4)) & 15
+        res[i] = digits[nib]
+        i = i + 1
+    end
+    return res
+end
+
+/// Lowercase hex of `v` (always 8 chars, leading zeros kept; see `u64Hex`
+/// for why nibble-direct rendering is required).
+string u32Hex(u32 v) do
+    string digits = "0123456789abcdef"
+    string res = allocateString(8)
+    int i = 0
+    while i < 8 do
+        int nib = (v >> (28 - i * 4)) & 15
+        res[i] = digits[nib]
+        i = i + 1
+    end
+    return res
+end
+
+/// FNV-1a 64-bit digest as 16 lowercase hex chars
+/// (`fnv1a64("foobar")` is `"85944171f73967e8"`).
+string fnv1a64(string s) do
+    u64 h = u64Pair(3421674724, 2216829733)
+    // Prime 1099511628211 = 256 * 2^32 + 435: halves must be split
+    // (a full 40-bit value in `lo` would silently truncate to 435).
+    u64 prime = u64Pair(256, 435)
+    int n = len(s)
+    int i = 0
+    while i < n do
+        int b = s[i]
+        b = b & 255
+        h = (h ^ b) * prime
+        i = i + 1
+    end
+    return u64Hex(h)
+end
+
+/// FNV-1a 32-bit digest as 8 lowercase hex chars
+/// (`fnv1a32("foobar")` is `"bf9cf968"`).
+string fnv1a32(string s) do
+    u32 h = 2166136261
+    u32 prime = 16777619
+    int n = len(s)
+    int i = 0
+    while i < n do
+        int b = s[i]
+        b = b & 255
+        h = (h ^ b) * prime
+        i = i + 1
+    end
+    return u32Hex(h)
+end
+
+/// CRC32 (zlib/IEEE: reflected, poly `0xEDB88320`) as 8 lowercase hex
+/// chars (`crc32("123456789")` is `"cbf43926"`). Bitwise, no tables.
+string crc32(string s) do
+    u32 crc = 4294967295
+    u32 poly = 3988292384
+    u32 one = 1
+    int n = len(s)
+    int i = 0
+    while i < n do
+        int b = s[i]
+        b = b & 255
+        crc = crc ^ b
+        int k = 0
+        while k < 8 do
+            // NOTE: `if (crc & one) is one` does not parse (a parenthesized
+            // LHS before `is` is rejected), so the bit binds to a temp.
+            u32 bit = crc & one
+            if bit is one do
+                crc = (crc >> 1) ^ poly
+            end else do
+                crc = crc >> 1
+            end
+            k = k + 1
+        end
+        i = i + 1
+    end
+    crc = crc ^ 4294967295
+    return u32Hex(crc)
+end
