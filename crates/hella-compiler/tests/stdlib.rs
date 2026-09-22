@@ -209,11 +209,13 @@ end
 #[test]
 fn stdlib_selective_imports_keep_transitive_helpers() {
     // A selective import keeps the wanted symbols plus everything they
-    // reference: `trim` needs `substring`/`allocateString`, `toString`
-    // needs its nested `std::str` deps, `join` needs nested
+    // reference — values AND types: `trim` needs `substring`/`allocateString`,
+    // `toString` needs its nested `std::str` deps, `join` needs nested
     // `std::vector` deps, `RED` is a const (previously kept nothing),
     // `flip` needs the module-level generator globals, and `count` needs
-    // `indexOf`/`indexOfFrom` transitively.
+    // `indexOf`/`indexOfFrom` transitively. (`dateUtc`'s `struct Tm`
+    // closure has its own small test below: this giant main already
+    // nears a pre-existing debug codegen frame-size crash.)
     let scratch = Scratch::new("selective");
     for opt in [codegen::OptLevel::Debug, codegen::OptLevel::Release] {
         let exe = scratch.compile(
@@ -252,5 +254,33 @@ end
             scratch.run(&exe, "", true).0,
             "\u{1b}[31mhi\u{1b}[0m\nselective ok\n"
         );
+    }
+}
+
+#[test]
+fn stdlib_selective_imports_keep_type_deps() {
+    // Selective imports close over *types* as well as values: `dateUtc`
+    // needs `struct Tm` plus its `renderDate`/`twoDigits`/`wallMs` helpers
+    // and `concat` from the already-visited `std::str` (diamond merge).
+    // Deliberately small: folding this into the giant test above trips a
+    // pre-existing debug codegen frame-size crash (EXC_ARM_SP_ALIGN,
+    // reproducible on unmodified main — not an import bug).
+    let scratch = Scratch::new("seltypes");
+    for opt in [codegen::OptLevel::Debug, codegen::OptLevel::Release] {
+        let exe = scratch.compile(
+            r#"
+import std::io
+import std::str::{len}
+import std::time::{dateUtc}
+int main() do
+    string du = dateUtc()
+    assert len(du) is 19
+    println("selective types ok")
+    return 0
+end
+"#,
+            opt,
+        );
+        assert_eq!(scratch.run(&exe, "", true).0, "selective types ok\n");
     }
 }

@@ -4,12 +4,45 @@
 // `sleepMs`/`yieldNow` stay in `std::task` (cooperative checkpoints).
 // This module is wall-clock observation over `runtime/hella_sync.c`
 // (linked only when `std::sync`/`std::chan`/`std::time`/`std::net` is
-// imported). `bool+ref/out` errors: the clock never fails visibly
-// (fallback 0); durations are plain `int` math.
+// imported) plus libc calendar conversion. `bool+ref/out` errors: clocks
+// never fail visibly (fallback 0/`""`); durations are plain `int` math.
+
+import std::str
+import std::num
 
 extern "c" from "hella_sync" do
     int hella_wall_micros()
     int hella_monotonic_micros()
+end
+
+// Calendar layout shared by every platform backend below (C `struct tm`
+// order with 32-bit fields; Hella `int` would be 64-bit and misalign).
+extern "c" from "libc" do
+    struct Tm has
+        i32 sec
+        i32 min
+        i32 hour
+        i32 mday
+        i32 mon
+        i32 year
+        i32 wday
+        i32 yday
+        i32 isdst
+    end
+end
+
+// POSIX conversion (returns the pointer, null on failure).
+@cfg(unix)
+extern "c" from "libc" do
+    string gmtime_r(ref int t, ref Tm res)
+    string localtime_r(ref int t, ref Tm res)
+end
+
+// Windows conversion: reversed arguments, errno return (0 is success).
+@cfg(windows)
+extern "c" from "libc" do
+    int gmtime_s(ref Tm res, ref int t)
+    int localtime_s(ref Tm res, ref int t)
 end
 
 extern "c" from "libc" do
@@ -50,6 +83,82 @@ end
 /// Monotonic microseconds (same clock as `monotonicMs`).
 int monotonicMicros() do
     return hella_monotonic_micros()
+end
+
+/// Two-digit rendering (`7` → `"07"`; wider values pass through).
+string twoDigits(int v) do
+    if v < 10 do
+        return concat("0", toString(v))
+    end
+    return toString(v)
+end
+
+/// Renders calendar fields as `"YYYY-MM-DD HH:MM:SS"` (fixed 19 chars).
+/// Month is 1-based here (callers add 1 to `tm.mon`); year is full.
+string renderDate(int year, int mon, int mday, int hour, int min, int sec) do
+    string s = toString(year)
+    s = concat(s, "-")
+    s = concat(s, twoDigits(mon))
+    s = concat(s, "-")
+    s = concat(s, twoDigits(mday))
+    s = concat(s, " ")
+    s = concat(s, twoDigits(hour))
+    s = concat(s, ":")
+    s = concat(s, twoDigits(min))
+    s = concat(s, ":")
+    s = concat(s, twoDigits(sec))
+    return s
+end
+
+/// Current UTC date/time as `"YYYY-MM-DD HH:MM:SS"`, or `""` on failure.
+/// No timezone suffix is emitted (it is always UTC by construction).
+@cfg(unix)
+string dateUtc() do
+    int secs = wallMs() / 1000
+    Tm tm
+    string r = gmtime_r(ref secs, ref tm)
+    if r is null do
+        return ""
+    end
+    return renderDate(tm.year + 1900, tm.mon + 1, tm.mday, tm.hour, tm.min, tm.sec)
+end
+
+/// Current local date/time, same format and failure convention as
+/// `dateUtc` (system timezone; DST handled by libc).
+@cfg(unix)
+string dateLocal() do
+    int secs = wallMs() / 1000
+    Tm tm
+    string r = localtime_r(ref secs, ref tm)
+    if r is null do
+        return ""
+    end
+    return renderDate(tm.year + 1900, tm.mon + 1, tm.mday, tm.hour, tm.min, tm.sec)
+end
+
+/// Windows `dateUtc` (see above): `gmtime_s` takes `(tm, time)` and
+/// reports errors as errno instead of a null pointer.
+@cfg(windows)
+string dateUtc() do
+    int secs = wallMs() / 1000
+    Tm tm
+    int e = gmtime_s(ref tm, ref secs)
+    if e is not 0 do
+        return ""
+    end
+    return renderDate(tm.year + 1900, tm.mon + 1, tm.mday, tm.hour, tm.min, tm.sec)
+end
+
+/// Windows `dateLocal` (see above).
+@cfg(windows)
+string dateLocal() do
+    int secs = wallMs() / 1000
+    Tm tm
+    int e = localtime_s(ref tm, ref secs)
+    if e is not 0 do
+        return ""
+    end
+    return renderDate(tm.year + 1900, tm.mon + 1, tm.mday, tm.hour, tm.min, tm.sec)
 end
 
 /// Processor milliseconds consumed by this process (ISO C `clock()`).

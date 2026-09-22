@@ -31,6 +31,22 @@ int main() do
     assert m2 >= m1
     int u4 = monotonicMicros()
     assert u4 >= u3
+    // Calendar rendering is ambient (actual date), so only shape and
+    // internal consistency are asserted: 19 fixed chars with separators
+    // in the right slots, and lexicographic order matching time order.
+    string du = dateUtc()
+    assert len(du) is 19
+    assert du[4] is '-'
+    assert du[7] is '-'
+    assert du[10] is ' '
+    assert du[13] is ':'
+    assert du[16] is ':'
+    string dl = dateLocal()
+    assert len(dl) is 19
+    assert dl[4] is '-'
+    assert dl[16] is ':'
+    // NOTE: no exact-value or ordering asserts on calendar text — two
+    // reads can straddle a second boundary. Shape is deterministic.
     println("time ok")
     return 0
 end

@@ -233,6 +233,12 @@ without its `import` is a sema error (`undefined function`) by design.
     `CLOCK_MONOTONIC` —, Windows `QueryPerformanceCounter`). Immune to
     NTP/DST steps; use for benchmarks and durations, never time-of-day.
     Zero on backend failure.
+  - `dateUtc()`/`dateLocal()` as `"YYYY-MM-DD HH:MM:SS"` (fixed 19 chars,
+    `""` on failure) via libc `gmtime_r`/`localtime_r` (POSIX) or
+    `gmtime_s`/`localtime_s` (Windows, reversed args + errno) over an
+    extern `Tm` struct (32-bit fields matching C layout — Hella `int`
+    would misalign). No timezone suffix; selective importers take `Tm`
+    along (`import std::time::{dateUtc, Tm}` also works explicitly).
   - `cpuMs()` — processor milliseconds (ISO C `clock()`). Monotonic
     while running, but CPU time, not wall: sleeping and parked tasks do
     not advance it. For CPU benchmarks, never wall timeouts. POSIX
