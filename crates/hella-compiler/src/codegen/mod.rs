@@ -8482,10 +8482,11 @@ impl<'ctx> Codegen<'ctx> {
                                                 )
                                                 .unwrap()
                                         };
-                                        // `val` is char (i32) -> truncate to i8 for storage
+                                        // `val` is char (i32) — or int (i64) via
+                                        // byte-slot narrowing — truncate to i8.
                                         let byte = if val.is_int_value() {
                                             let iv = val.into_int_value();
-                                            if iv.get_type().get_bit_width() == 32 {
+                                            if iv.get_type() != self.context.i8_type() {
                                                 self.builder
                                                     .build_int_truncate(
                                                         iv,

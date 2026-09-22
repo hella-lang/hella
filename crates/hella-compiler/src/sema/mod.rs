@@ -94,6 +94,17 @@ impl Ty {
         if Self::int_compatible(from, to) {
             return true;
         }
+        // Byte widening: `char` flows into `int` (lossless — char is i32,
+        // int is i64; codegen sign-extends like other narrow-to-wide int
+        // flows, so mask `& 255` for raw byte values above 127).
+        // One direction only: `int` never flows into `char` implicitly
+        // (that truncates — byte slots take the low byte explicitly, see
+        // the index-store rule in the `Assign` arm). Expressions stay
+        // strict (arithmetic still requires int operands), so conversions
+        // remain visible at bindings rather than hidden in expressions.
+        if matches!((from, to), (Ty::Char, Ty::Int)) {
+            return true;
+        }
         // Fixed arrays: element-wise assignable; an inferred-size (`None`)
         // target accepts any length, an explicit target requires equal size.
         // Vectors: element-wise assignable; an `Any` element on either side
@@ -3171,7 +3182,14 @@ impl Checker {
                 }
                 let rhs_ty = self.check_expr(value);
                 let is_null = matches!(value.kind, ExprKind::Null);
-                if !is_null && !self.ty_assignable(&rhs_ty, &lhs_ty) {
+                // Byte-slot narrowing: an `int` stored through indexing
+                // (`buf[i] = v`) into a `char` slot takes the low byte
+                // (mirrors C; codegen truncates). General `int` → `char`
+                // bindings stay rejected — truncation must be explicit.
+                let truncating_byte_store = matches!(&rhs_ty, Ty::Int)
+                    && matches!(&lhs_ty, Ty::Char)
+                    && matches!(&lhs.kind, ExprKind::Index { .. });
+                if !is_null && !truncating_byte_store && !self.ty_assignable(&rhs_ty, &lhs_ty) {
                     self.errors.push(SemError{message: format!("assignment type mismatch: expected `{lhs_ty}`, found `{rhs_ty}`"), span: expr.span});
                 }
                 self.reject_null_own(is_null, &lhs_ty, expr.span);
@@ -5654,6 +5672,26 @@ mod tests {
         assert_error_contains(
             "struct S has\nprivate int secret\nend\nvoid main() do\nS s = S has\nsecret = 1\nend\nprint(\"{s.secret}\")\nend\n",
             "is private",
+        );
+    }
+
+    /// Byte conversions: `char` widens into `int` at bindings (decls,
+    /// assignments, call args), while `int` narrows into `char` only in
+    /// byte-slot index stores (low byte). General `int` → `char`
+    /// bindings stay rejected and expressions stay strict, so conversions
+    /// remain visible rather than hidden in arithmetic.
+    #[test]
+    fn byte_conversions_widen_at_bindings_truncate_in_slots() {
+        assert_clean("void main() do\nstring s = \"AB\"\nint b = s[0]\nend\n");
+        assert_clean("void main() do\nstring r = \"xy\"\nr[0] = 65\nend\n");
+        assert_clean("int f(int x) do\nreturn x\nend\nvoid main() do\nstring s = \"AB\"\nint b = f(s[0])\nend\n");
+        assert_error_contains(
+            "void main() do\nchar c = 65\nend\n",
+            "expected `char`, found `int`",
+        );
+        assert_error_contains(
+            "void main() do\nstring s = \"AB\"\nint b = s[0] + 1\nend\n",
+            "requires int types",
         );
     }
 }
