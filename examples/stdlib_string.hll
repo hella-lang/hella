@@ -89,6 +89,46 @@ int main() do
     assert equals(trimEnd("hi"), "hi")
     assert equals(trimStart(""), "")
     assert equals(trimEnd(""), "")
+    assert count("hello", "l") is 2
+    assert count("aaaaa", "aa") is 2
+    assert count("ababa", "aba") is 1
+    assert count("abc", "x") is 0
+    assert count("", "a") is 0
+    assert count("", "") is 1
+    assert count("abc", "") is 4
+    assert equalsIgnoreCase("Hello", "hELLO") is true
+    assert equalsIgnoreCase("abc", "abd") is false
+    assert equalsIgnoreCase("abc", "abcd") is false
+    assert equalsIgnoreCase("", "") is true
+    assert equalsIgnoreCase("é", "é") is true
+    assert equalsIgnoreCase("é", "É") is false
+    assert equals(trimPrefix("hello", "hell"), "o")
+    assert equals(trimPrefix("hello", "world"), "hello")
+    assert equals(trimPrefix("hello", ""), "hello")
+    assert equals(trimPrefix("", "x"), "")
+    assert equals(trimSuffix("hello", "llo"), "he")
+    assert equals(trimSuffix("hello", "hell"), "hello")
+    assert equals(trimSuffix("hello", ""), "hello")
+    assert equals(trimSuffix("", "x"), "")
+    cursor = 0
+    assert equals(splitNextSpace("  a  b\tc\nd  ", ref cursor), "a")
+    assert equals(splitNextSpace("  a  b\tc\nd  ", ref cursor), "b")
+    assert equals(splitNextSpace("  a  b\tc\nd  ", ref cursor), "c")
+    assert equals(splitNextSpace("  a  b\tc\nd  ", ref cursor), "d")
+    assert cursor is -1
+    assert equals(splitNextSpace("  a  b\tc\nd  ", ref cursor), "")
+    cursor = 0
+    assert equals(splitNextSpace("", ref cursor), "")
+    assert cursor is -1
+    cursor = 0
+    assert equals(splitNextSpace("   \t\n ", ref cursor), "")
+    assert cursor is -1
+    cursor = 0
+    assert equals(splitNextSpace("solo", ref cursor), "solo")
+    assert cursor is -1
+    cursor = 99
+    assert equals(splitNextSpace("a b", ref cursor), "")
+    assert cursor is -1
 
     println("string ok")
     return 0

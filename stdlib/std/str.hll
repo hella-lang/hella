@@ -394,3 +394,123 @@ string trimEnd(string s) do
     end
     return substring(s, start, stop)
 end
+
+/// Counts non-overlapping occurrences of `needle` in `s` (byte-based).
+/// An empty `needle` yields `len(s) + 1` (Go `strings.Count` parity).
+int count(string s, string needle) do
+    int n = len(needle)
+    if n is 0 do
+        return len(s) + 1
+    end
+    int total = 0
+    int pos = indexOf(s, needle)
+    while pos >= 0 do
+        total = total + 1
+        pos = indexOfFrom(s, needle, pos + n)
+    end
+    return total
+end
+
+/// ASCII case-insensitive equality: `A`-`Z` match `a`-`z`.
+/// Other bytes compare exactly; non-ASCII text is NOT folded.
+/// Allocates nothing (folds per byte instead of via `toLower`).
+bool equalsIgnoreCase(string a, string b) do
+    int n = len(a)
+    if len(b) is not n do
+        return false
+    end
+    string lower = "abcdefghijklmnopqrstuvwxyz"
+    string upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    int i = 0
+    while i < n do
+        char c1 = a[i]
+        char c2 = b[i]
+        if c1 is not c2 do
+            int j = 0
+            while j < 26 do
+                if upper[j] is c1 do
+                    c1 = lower[j]
+                    break
+                end
+                j = j + 1
+            end
+            j = 0
+            while j < 26 do
+                if upper[j] is c2 do
+                    c2 = lower[j]
+                    break
+                end
+                j = j + 1
+            end
+            if c1 is not c2 do
+                return false
+            end
+        end
+        i = i + 1
+    end
+    return true
+end
+
+/// Returns `s` without the leading `prefix`, or `s` unchanged when absent.
+/// No allocation on miss (returns the input pointer); a hit allocates.
+string trimPrefix(string s, string prefix) do
+    if startsWith(s, prefix) do
+        return substring(s, len(prefix), len(s))
+    end
+    return s
+end
+
+/// Returns `s` without the trailing `suffix`, or `s` unchanged when absent.
+/// No allocation on miss (returns the input pointer); a hit allocates.
+string trimSuffix(string s, string suffix) do
+    if endsWith(s, suffix) do
+        return substring(s, 0, len(s) - len(suffix))
+    end
+    return s
+end
+
+/// Streaming whitespace split: initialize cursor = 0, call while it is
+/// nonnegative. ASCII-whitespace runs collapse (no empty fields, unlike
+/// `splitNext`); leading/trailing runs produce nothing, and the last field
+/// arrives with cursor already -1 (no extra draining call). Byte-oriented.
+/// No vector capacity limit. Do not change s between calls.
+string splitNextSpace(string s, ref int cursor) do
+    int size = len(s)
+    if cursor < 0 or cursor > size do
+        cursor = -1
+        return ""
+    end
+    int start = cursor
+    while start < size do
+        if not isAsciiSpace(s[start]) do
+            break
+        end
+        start = start + 1
+    end
+    if start >= size do
+        cursor = -1
+        return ""
+    end
+    int stop = start
+    while stop < size do
+        if isAsciiSpace(s[stop]) do
+            break
+        end
+        stop = stop + 1
+    end
+    // Look past trailing whitespace so the final field is delivered with
+    // cursor -1, matching `splitNext` (callers stop without an extra call).
+    int ahead = stop
+    while ahead < size do
+        if not isAsciiSpace(s[ahead]) do
+            break
+        end
+        ahead = ahead + 1
+    end
+    if ahead >= size do
+        cursor = -1
+    end else do
+        cursor = stop
+    end
+    return substring(s, start, stop)
+end

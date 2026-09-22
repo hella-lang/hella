@@ -30,15 +30,26 @@ without its `import` is a sema error (`undefined function`) by design.
   - `indexOf(hay, needle)`, `indexOfFrom(hay, needle, start)`, `lastIndexOf`:
     byte offsets, `-1` on miss. Empty needle matches start/end. Negative search
     start clamps to 0; start beyond length returns -1, even for empty needle.
+  - `count(s, needle)` — non-overlapping occurrences (byte-based); empty
+    needle yields `len(s) + 1` (Go `strings.Count` parity).
   - `trim(s)` / `trimStart` / `trimEnd` / `isAsciiSpace(c)` — ASCII space,
     tab, LF, CR, VT, FF only.
+  - `trimPrefix(s, prefix)` / `trimSuffix(s, suffix)` — strip one affix,
+    or return `s` unchanged (no allocation) when absent. Empty affixes
+    always "match" (prefix strips nothing, suffix strips nothing).
   - `toUpper(s)` / `toLower(s)` — ASCII letters only; other bytes pass through.
+  - `equalsIgnoreCase(a, b)` — ASCII case-insensitive equality; non-ASCII
+    bytes compare exactly (no Unicode folding). Allocates nothing.
   - `isDigit(c)` / `isAlpha(c)` / `isAlphaNum(c)` — ASCII classification.
   - `splitNext(s, sep, ref cursor)` — initialize cursor to 0; call while it is
     nonnegative. Returns one field, updates cursor, sets -1 after the last field.
     Preserves leading/adjacent/trailing empty fields. Empty separator returns s
     once. This streaming API avoids collecting into fixed-capacity vectors
     (currently 256 elements; split stays streaming regardless).
+  - `splitNextSpace(s, ref cursor)` — same streaming convention, but
+    ASCII-whitespace runs collapse: no empty fields, leading/trailing runs
+    produce nothing, and the last field arrives with cursor already -1.
+    The whitespace-splitting counterpart to `splitNext`.
   - `replaceAll(s, needle, replacement)` — left-to-right non-overlapping matches;
     empty needle is a no-op (unlike Go), replacement text is never searched.
   - `allocateString(size)` — low-level zero-filled, NUL-terminated allocation;

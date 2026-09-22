@@ -175,13 +175,14 @@ fn stdlib_selective_imports_keep_transitive_helpers() {
     // reference: `trim` needs `substring`/`allocateString`, `toString`
     // needs its nested `std::str` deps, `join` needs nested
     // `std::vector` deps, `RED` is a const (previously kept nothing),
-    // and `flip` needs the module-level generator globals.
+    // `flip` needs the module-level generator globals, and `count` needs
+    // `indexOf`/`indexOfFrom` transitively.
     let scratch = Scratch::new("selective");
     for opt in [codegen::OptLevel::Debug, codegen::OptLevel::Release] {
         let exe = scratch.compile(
             r#"
 import std::io
-import std::str::{trim, equals, len}
+import std::str::{trim, equals, len, count, equalsIgnoreCase, trimPrefix, splitNextSpace}
 import std::terminal::ansi::{RED, RESET}
 import std::rand::{seed, flip}
 import std::num::{toString}
@@ -197,6 +198,13 @@ int main() do
     assert equals(toString(-42), "-42")
     string vec parts = ["a", "b"]
     assert equals(join(",", parts), "a,b")
+    assert count("aaaaa", "aa") is 2
+    assert equalsIgnoreCase("HeLLo", "hello") is true
+    assert equals(trimPrefix("hello", "hell"), "o")
+    int cursor = 0
+    assert equals(splitNextSpace("  a b ", ref cursor), "a")
+    assert equals(splitNextSpace("  a b ", ref cursor), "b")
+    assert cursor is -1
     println("selective ok")
     return 0
 end
