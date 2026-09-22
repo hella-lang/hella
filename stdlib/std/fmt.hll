@@ -3,10 +3,23 @@
 
 import std::str
 import std::vector
+import std::num
 
 /// Joins `parts` with `sep` between elements.
 string join(string sep, string vec parts) do
     return sJoin(parts, sep)
+end
+
+/// Joins int `parts` with `sep` (each via `toString`; empty yields `""`).
+string iJoin(string sep, int vec parts) do
+    string vec texts = vec[]
+    int i = 0
+    int n = iLen(parts)
+    while i < n do
+        sPush(ref texts, toString(parts[i]))
+        i = i + 1
+    end
+    return sJoin(texts, sep)
 end
 
 /// Repeats s n times; n <= 0 or empty s yields an empty string.

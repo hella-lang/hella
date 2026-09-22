@@ -49,6 +49,12 @@ int main() do
     assert equals(replaceAll("aaa", "a", "aa"), "aaaaaa")
     assert equals(replaceAll("abc", "x", "y"), "abc")
     assert equals(replaceAll("", "a", "b"), "")
+    assert equals(replaceFirst("aaaaa", "aa", "b"), "baaa")
+    assert equals(replaceFirst("abc", "", "x"), "abc")
+    assert equals(replaceFirst("abc", "x", "y"), "abc")
+    assert equals(replaceFirst("abc", "b", ""), "ac")
+    assert equals(replaceFirst("abc", "b", "xyz"), "axyzc")
+    assert equals(replaceFirst("", "a", "b"), "")
     int cursor = 0
     assert equals(splitNext(",a,,", ",", ref cursor), "")
     assert cursor is 1

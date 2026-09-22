@@ -286,6 +286,44 @@ string replaceAll(string s, string needle, string replacement) do
     return result
 end
 
+/// Replaces the first non-overlapping match only. Empty needle is a
+/// no-op. Exact-size allocation with checked arithmetic; returns `s`
+/// unchanged (same pointer) when the needle is absent.
+string replaceFirst(string s, string needle, string replacement) do
+    int size = len(s)
+    int n = len(needle)
+    int r = len(replacement)
+    if n is 0 do
+        return s
+    end
+    int pos = indexOf(s, needle)
+    if pos < 0 do
+        return s
+    end
+    int total = size - n
+    if r > 0 do
+        assert total <= 9223372036854775806 - r
+    end
+    total = total + r
+    string result = allocateString(total)
+    int i = 0
+    while i < pos do
+        result[i] = s[i]
+        i = i + 1
+    end
+    int j = 0
+    while j < r do
+        result[pos + j] = replacement[j]
+        j = j + 1
+    end
+    int tail = pos + n
+    while tail < size do
+        result[tail - n + r] = s[tail]
+        tail = tail + 1
+    end
+    return result
+end
+
 /// Upper-cases ASCII letters (`a`-`z`); other bytes pass through unchanged.
 string toUpper(string s) do
     string lower = "abcdefghijklmnopqrstuvwxyz"

@@ -54,6 +54,8 @@ without its `import` is a sema error (`undefined function`) by design.
     The whitespace-splitting counterpart to `splitNext`.
   - `replaceAll(s, needle, replacement)` — left-to-right non-overlapping matches;
     empty needle is a no-op (unlike Go), replacement text is never searched.
+  - `replaceFirst(s, needle, replacement)` — first match only, same
+    conventions (empty needle / absent needle return `s` unchanged).
   - `allocateString(size)` — low-level zero-filled, NUL-terminated allocation;
     asserts on invalid size or allocation failure. Used by composition helpers.
   - `concat(a, b)` — exact-size fresh allocation of `a` + `b` (no
@@ -128,8 +130,11 @@ without its `import` is a sema error (`undefined function`) by design.
   - `si*` (string:int), `ii*` (int:int), `ss*` (string:string):
     `Len`/`IsEmpty` (methods) + `Has`/`GetOr` (`for`-in loops — keyed
     methods and `m[k]` fail verification through by-value params)
-  - mutate with direct local calls (`m.remove(k)`); `ref`-param method
-    calls do not codegen
+  - mutate with direct local calls: subscript insert/update/read
+    (`m[k] = v`, `m[k]`), `contains`/`get_or`/`len`/`is_empty` methods,
+    `m.remove(k)`; `ref`-param method calls do not codegen. `m.clear()`
+    miscompiles (LLVM verification) — pop in a loop or rebind instead.
+    See `examples/stdlib_collections.hll` for the working pattern.
 - `std::log` — `stdlib/std/log.hll` (pure Hella over `std::io`/`str`/`num`/`time`)
   - `logDebug`/`logInfo`/`logWarn`/`logError` to stderr, each line prefixed
     with wall-clock epoch millis and the level tag (timestamps order output;
@@ -161,8 +166,9 @@ without its `import` is a sema error (`undefined function`) by design.
     tokens, or signatures; no crypto lives in the standard library).
     Wrapping mod-2^N arithmetic like `std::rand` relies on; `u64Pair` halves
     must be split (a 40-bit FNV prime in `lo` truncates — see module header).
-- `std::fmt` — `stdlib/std/fmt.hll`
-  - `join(sep, parts)` (via `sJoin`), `repeat(s, n)`, `padStart(s, width)`,
+- `std::fmt` — `stdlib/std/fmt.hll` (pure Hella over `std::str`/`vector`/`num`)
+  - `join(sep, parts)` (via `sJoin`), `iJoin(sep, parts)` (int vec via
+    `toString` each; empty yields `""`), `repeat(s, n)`, `padStart(s, width)`,
     `padEnd(s, width)`, `padCenter(s, width)` (extra space goes right) —
     checked-size allocations and pure Hella copying loops,
     no format strings or interpolation buffers. Widths are bytes; padding uses

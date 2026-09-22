@@ -12,6 +12,14 @@ int main() do
     assert equals(greeting, "hi bob!") is true
     assert equals("n={n}", "n=42") is true
     assert equals(join(",", parts), "a,b") is true
+    int vec nums = [1, -2, 30]
+    assert equals(iJoin(",", nums), "1,-2,30") is true
+    int vec emptyNums = []
+    assert equals(iJoin(",", emptyNums), "") is true
+    // NOTE: array literals convert to vecs at declarations, not at call
+    // boundaries — bind first.
+    int vec seven = [7]
+    assert equals(iJoin(":", seven), "7") is true
     assert equals(repeat("ab", 3), "ababab") is true
     assert equals(repeat("ab", 0), "") is true
     assert equals(padStart("hi", 4), "  hi") is true
