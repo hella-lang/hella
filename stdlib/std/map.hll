@@ -10,7 +10,11 @@
 // `get_or` methods, `m[k]` subscript): key-taking map operations fail
 // LLVM verification through by-value params, and `ref` params cannot
 // carry map method calls (`cannot infer type`) until codegen is fixed.
-// Mutate maps with direct method calls on locals (`m.remove(k)`).
+// Mutate maps with direct calls on locals instead — subscript
+// insert/update/read (`m[k] = v`, `m[k]`), `contains`/`get_or`/`len`/
+// `is_empty` methods, `m.remove(k)` — except `m.clear()`, which
+// miscompiles (LLVM verification): pop in a loop or rebind.
+// See `examples/stdlib_collections.hll` for the working pattern.
 // Missing-key reads yield the zero value; `*GetOr` supplies a fallback.
 
 import std::str

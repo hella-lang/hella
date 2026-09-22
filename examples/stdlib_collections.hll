@@ -58,6 +58,23 @@ int main() do
     assert ssIsEmpty(caps) is false
     assert siHas(ages, "John") is true
     assert siIsEmpty(ages) is false
+    // Direct local mutation (facades cannot carry keyed/ref calls, so no
+    // siPut exists): subscript insert/update/read, contains/get_or/len
+    // methods, remove. NOTE: m.clear() miscompiles (LLVM verification) —
+    // pop in a loop or rebind instead.
+    string:int m2 = has "x": 1 end
+    m2["y"] = 2
+    assert m2["y"] is 2
+    m2["x"] = 10
+    assert m2["x"] is 10
+    assert m2.contains("x") is true
+    assert m2.contains("z") is false
+    assert m2.get_or("x", 0) is 10
+    assert m2.get_or("z", 7) is 7
+    assert siLen(m2) is 2
+    m2.remove("x")
+    assert siHas(m2, "x") is false
+    assert siLen(m2) is 1
     total = iSum(nums) + siGetOr(ages, "Bob", 99) + iiGetOr(squares, 2, 0)
     assert total is 109
     println("collections ok")
