@@ -172,11 +172,12 @@ pub fn uses_async_runtime(prog: &Program) -> bool {
 }
 
 /// True when `prog` must link the sync runtime (`runtime/hella_sync.c`,
-/// B1 mutex + channels, B2 wall-clock + TCP + sleep/yield). Detection is
-/// declaration-based: any `extern` function named `hella_mutex_*` /
-/// `hella_chan_*` / `hella_wall_*` / `hella_tcp_*` / `hella_sleep_ms`
-/// (declared by `std::sync` / `std::chan` / `std::time` / `std::net` /
-/// `std::task`) pulls it in. Pure-Hella programs pay nothing.
+/// B1 mutex + channels, B2 wall/monotonic-clock + TCP + sleep/yield).
+/// Detection is declaration-based: any `extern` function named
+/// `hella_mutex_*` / `hella_chan_*` / `hella_wall_*` / `hella_monotonic_*` /
+/// `hella_tcp_*` / `hella_sleep_ms` (declared by `std::sync` / `std::chan` /
+/// `std::time` / `std::net` / `std::task`) pulls it in. Pure-Hella
+/// programs pay nothing.
 /// (`hella_task_self`/`hella_task_cancelled` stay async-only: `cancelled()`
 /// requires an async context; `sleepMs`/`yieldNow` work everywhere.)
 pub fn uses_sync_runtime(prog: &Program) -> bool {
@@ -188,6 +189,7 @@ pub fn uses_sync_runtime(prog: &Program) -> bool {
                     if name.starts_with("hella_mutex_")
                         || name.starts_with("hella_chan_")
                         || name.starts_with("hella_wall_")
+                        || name.starts_with("hella_monotonic_")
                         || name.starts_with("hella_tcp_")
                         || name == "hella_sleep_ms"
                     {

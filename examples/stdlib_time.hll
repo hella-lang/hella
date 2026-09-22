@@ -22,6 +22,15 @@ int main() do
     assert d is w2 + 10000
     assert expiredMs(w2) is true
     assert expiredMs(d) is false
+    int m1 = monotonicMs()
+    int u3 = monotonicMicros()
+    assert m1 > 0
+    assert u3 > 0
+    assert u3 >= m1 * 1000 - 1000
+    int m2 = monotonicMs()
+    assert m2 >= m1
+    int u4 = monotonicMicros()
+    assert u4 >= u3
     println("time ok")
     return 0
 end

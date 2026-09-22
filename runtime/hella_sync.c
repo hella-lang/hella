@@ -510,3 +510,31 @@ int64_t hella_wall_micros(void) {
     return (int64_t)tv.tv_sec * 1000000 + (int64_t)tv.tv_usec;
 #endif
 }
+
+/* ── monotonic clock ── */
+
+int64_t hella_monotonic_micros(void) {
+#ifdef _WIN32
+    /* QueryPerformanceCounter frequency is fixed per boot; cache it.
+     * kernel32 is always linked (see the CLI link step); 0 means failure. */
+    static LARGE_INTEGER freq = {0};
+    LARGE_INTEGER now;
+    if (freq.QuadPart == 0) {
+        QueryPerformanceFrequency(&freq);
+        if (freq.QuadPart == 0) return 0;
+    }
+    if (!QueryPerformanceCounter(&now)) return 0;
+    return (int64_t)(now.QuadPart * 1000000 / freq.QuadPart);
+#else
+    struct timespec ts;
+#ifdef __APPLE__
+    /* macOS rejects CLOCK_MONOTONIC for clock_gettime (EINVAL); RAW is
+     * the live hardware counter — better than adjusted time for measuring. */
+    const clockid_t clk = 4;
+#else
+    const clockid_t clk = CLOCK_MONOTONIC;
+#endif
+    if (clock_gettime(clk, &ts) != 0) return 0;
+    return (int64_t)ts.tv_sec * 1000000 + (int64_t)ts.tv_nsec / 1000;
+#endif
+}

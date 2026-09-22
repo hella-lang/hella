@@ -227,6 +227,12 @@ without its `import` is a sema error (`undefined function`) by design.
 - `std::time` — `stdlib/std/time.hll` (B2)
   - `wallMs`/`wallMicros` (Unix epoch, via `hella_wall_micros`),
     `deadlineMs`/`expiredMs` helpers. Wall clock, not monotonic.
+  - `monotonicMs()`/`monotonicMicros()` for elapsed measurement
+    (via `hella_monotonic_micros` in `runtime/hella_sync.c`: Linux
+    `CLOCK_MONOTONIC`, macOS monotonic-raw counter — which rejects
+    `CLOCK_MONOTONIC` —, Windows `QueryPerformanceCounter`). Immune to
+    NTP/DST steps; use for benchmarks and durations, never time-of-day.
+    Zero on backend failure.
   - `cpuMs()` — processor milliseconds (ISO C `clock()`). Monotonic
     while running, but CPU time, not wall: sleeping and parked tasks do
     not advance it. For CPU benchmarks, never wall timeouts. POSIX

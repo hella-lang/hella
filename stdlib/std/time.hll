@@ -9,6 +9,7 @@
 
 extern "c" from "hella_sync" do
     int hella_wall_micros()
+    int hella_monotonic_micros()
 end
 
 extern "c" from "libc" do
@@ -34,6 +35,21 @@ end
 /// True when `wallMs()` has passed `deadline`.
 bool expiredMs(int deadline) do
     return wallMs() >= deadline
+end
+
+/// Monotonic milliseconds for elapsed measurement: immune to NTP steps,
+/// DST, and manual clock changes — use for benchmarks, rates, and
+/// short-interval durations, never time-of-day (that is `wallMs`).
+/// Backends: `CLOCK_MONOTONIC` (Linux), monotonic-raw hardware counter
+/// (macOS, which rejects `CLOCK_MONOTONIC`), `QueryPerformanceCounter`
+/// (Windows). Zero on backend failure; wraps rarely on very long runs.
+int monotonicMs() do
+    return hella_monotonic_micros() / 1000
+end
+
+/// Monotonic microseconds (same clock as `monotonicMs`).
+int monotonicMicros() do
+    return hella_monotonic_micros()
 end
 
 /// Processor milliseconds consumed by this process (ISO C `clock()`).
