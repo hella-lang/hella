@@ -8032,6 +8032,12 @@ impl<'ctx> Codegen<'ctx> {
                             let ri = self.builder.build_ptr_to_int(r.into_pointer_value(), self.context.i64_type(), "is.ri").unwrap();
                             let li = if l.is_int_value() { l.into_int_value() } else { self.builder.build_ptr_to_int(l.into_pointer_value(), self.context.i64_type(), "is.li").unwrap() };
                             self.builder.build_int_compare(IntPredicate::EQ, li, ri, "is").unwrap().into()
+                        } else if l.is_float_value() && r.is_float_value() {
+                            // Float equality (sema accepts `is` on matching
+                            // float types but rejects ordering/arithmetic on
+                            // doubles — this arm only completes `is`/`is not`).
+                            // Ordered EQ: NaN `is` anything (even NaN) is false.
+                            self.builder.build_float_compare(inkwell::FloatPredicate::OEQ, l.into_float_value(), r.into_float_value(), "is").unwrap().into()
                         } else {
                             self.builder.build_int_compare(IntPredicate::EQ, l.into_int_value(), r.into_int_value(), "is").unwrap().into()
                         }
@@ -8055,6 +8061,9 @@ impl<'ctx> Codegen<'ctx> {
                             let ri = self.builder.build_ptr_to_int(r.into_pointer_value(), self.context.i64_type(), "isnot.ri").unwrap();
                             let li = if l.is_int_value() { l.into_int_value() } else { self.builder.build_ptr_to_int(l.into_pointer_value(), self.context.i64_type(), "isnot.li").unwrap() };
                             self.builder.build_int_compare(IntPredicate::NE, li, ri, "isnot").unwrap().into()
+                        } else if l.is_float_value() && r.is_float_value() {
+                            // Unordered NE: NaN `is not` anything is true.
+                            self.builder.build_float_compare(inkwell::FloatPredicate::UNE, l.into_float_value(), r.into_float_value(), "isnot").unwrap().into()
                         } else {
                             self.builder.build_int_compare(IntPredicate::NE, l.into_int_value(), r.into_int_value(), "isnot").unwrap().into()
                         }

@@ -14,31 +14,33 @@ int main() do
     assert clamp(-1, 0, 5) is 0
     assert clamp(3, 0, 5) is 3
 
-    // double libm — called for codegen coverage (double `is` not yet lowered)
-    double s4 = sqrt(4.0)
-    double s9 = sqrt(9.0)
-    double fa = fabs(2.5)
-    double af = absf(2.5)
-    double fl = floor(2.9)
-    double ce = ceil(2.1)
-    double ro = round(2.5)
-    double pw = pow(2.0, 3.0)
-    double ex = exp(0.0)
-    double lg = log(1.0)
-    double si = sin(0.0)
-    double co = cos(0.0)
-    double ta = tan(0.0)
-    double mn = fmin(1.5, 2.5)
-    double mx = fmax(1.5, 2.5)
-    double at = atan2(0.0, 1.0)
-    // clampf via fmin/fmax (double `is` not yet lowered: coverage only;
-    // negative double literals and `-` do not exist for doubles, so the
-    // below-lo case comes from libm: log(0.5) is negative)
-    double cf = clampf(10.0, 0.0, 5.0)
+    // double libm — exactly-representable results asserted via
+    // float `is` (ordered equality; NaN is never equal, even to itself)
+    assert sqrt(4.0) is 2.0
+    assert sqrt(9.0) is 3.0
+    assert fabs(2.5) is 2.5
+    assert absf(2.5) is 2.5
+    assert floor(2.9) is 2.0
+    assert ceil(2.1) is 3.0
+    assert round(2.5) is 3.0
+    assert pow(2.0, 3.0) is 8.0
+    assert exp(0.0) is 1.0
+    assert log(1.0) is 0.0
+    assert sin(0.0) is 0.0
+    assert sin(0.0) is not 1.0
+    assert cos(0.0) is 1.0
+    assert tan(0.0) is 0.0
+    assert fmin(1.5, 2.5) is 1.5
+    assert fmax(1.5, 2.5) is 2.5
+    assert atan2(0.0, 1.0) is 0.0
+    // clampf via fmin/fmax (negative double literals and `-` do not
+    // exist for doubles, so the below-lo case comes from libm:
+    // log(0.5) is negative)
+    assert clampf(10.0, 0.0, 5.0) is 5.0
     double below = log(0.5)
-    double cf2 = clampf(below, 0.0, 5.0)
-    double cf3 = clampf(3.0, 0.0, 5.0)
-    // touch values so they are not DCE'd
+    assert below is not 0.0
+    assert clampf(below, 0.0, 5.0) is 0.0
+    assert clampf(3.0, 0.0, 5.0) is 3.0
     println("doubles ok")
 
     println("math ok")

@@ -22,8 +22,10 @@ without its `import` is a sema error (`undefined function`) by design.
   - `double sqrt(double x)`, `sin`/`cos`/`tan`, `pow`, `floor`/`ceil`/`round`,
     `log`/`exp`, `fabs`, `fmin`/`fmax`, `atan2` via `libm`
   - `int abs(int x)`, `min`/`max`, `clamp`, `absf`/`minf`/`maxf` wrappers,
-    `double clampf(v, lo, hi)` (via `fmin`/`fmax`, so no double comparison
-    lowering is needed)
+    `double clampf(v, lo, hi)` (via `fmin`/`fmax`)
+  - Double equality uses `is` / `is not` (ordered `OEQ` / unordered `UNE`:
+    NaN is never equal, even to itself). Ordering (`<`, `<=`, `>`, `>=`)
+    and arithmetic on doubles remain sema-rejected by design.
 - `std::str` — `stdlib/std/str.hll`
   - `int len(string s)`, `bool isEmpty`, `bool equals`/`int compare`,
     `bool contains`/`startsWith`/`endsWith`, `string clone`/`substring`
