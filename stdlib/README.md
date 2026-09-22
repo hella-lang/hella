@@ -78,6 +78,12 @@ without its `import` is a sema error (`undefined function`) by design.
     every platform, unlike interpolation's `%ld`).
 - `std::env` — `stdlib/std/env.hll`
   - `string getEnv(string name)` (getenv + "" on miss, `string is null` now allowed), `bool hasEnv`, `void setEnv`/`unsetEnv` (setenv/unsetenv), `string cwd()` (getcwd + calloc)
+  - `string homeDir()` — `HOME`, else `USERPROFILE` (Windows), else `""`.
+    Pure lookup; no `~` expansion anywhere.
+  - `string tempDir()` — `TMPDIR`, else `TEMP`, else `TMP`, else `""` (empty
+    values skipped). No `/tmp` fallback — it does not exist on Windows, so
+    callers handle `""` (e.g. fall back to `cwd()`). Join with
+    `std::path::joinPath`; no trailing slash is guaranteed.
   - `string progName()` — `argv[0]` as the parent exec'd it (compiler-provided
     `__hella_progname`; no libc symbol involved despite the `from "libc"` header)
   - `void exitProcess(int code)` — immediate `exit(code)`; deferred cleanup
@@ -124,6 +130,17 @@ without its `import` is a sema error (`undefined function`) by design.
     methods and `m[k]` fail verification through by-value params)
   - mutate with direct local calls (`m.remove(k)`); `ref`-param method
     calls do not codegen
+- `std::log` — `stdlib/std/log.hll` (pure Hella over `std::io`/`str`/`num`/`time`)
+  - `logDebug`/`logInfo`/`logWarn`/`logError` to stderr, each line prefixed
+    with wall-clock epoch millis and the level tag (timestamps order output;
+    they are not pretty dates). `emitLog(level, s)` is the unfiltered
+    escape hatch.
+  - `LOG_DEBUG`/`LOG_INFO`/`LOG_WARN`/`LOG_ERROR` consts + `setLogLevel`
+    over a program-global threshold (default `INFO`, like `std::rand`
+    state: set once at startup, not task-synchronized). Above `LOG_ERROR`
+    silences everything.
+  - Lines use exact-size `concat`, never the interpolation buffer, so
+    unbounded messages stay safe.
 - `std::fmt` — `stdlib/std/fmt.hll`
   - `join(sep, parts)` (via `sJoin`), `repeat(s, n)`, `padStart(s, width)`,
     `padEnd(s, width)`, `padCenter(s, width)` (extra space goes right) —

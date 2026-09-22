@@ -1,0 +1,73 @@
+// std::log — leveled logging for Hella (pure Hella).
+// Import via: import std::log
+//
+// Four levels (`debug`, `info`, `warn`, `error`, §24 minimum) on stderr,
+// each line prefixed with the wall-clock epoch millis and the level tag.
+// Timestamps order concurrent writers; they are NOT pretty dates (no
+// calendar formatting exists yet — see `std::time`, wall clock only).
+// Lines are built with exact-size `concat`, never the 512-byte
+// interpolation buffer, so unbounded messages stay safe.
+//
+// Filtering is a module-global threshold (default `INFO`): a call logs
+// when its level is at or above it. Like `std::rand` state, the level is
+// program-global and not task-synchronized; set it once at startup.
+
+import std::io
+import std::str
+import std::num
+import std::time
+
+/// Verbosity constants for `setLogLevel` (higher = quieter).
+const int LOG_DEBUG = 0
+const int LOG_INFO = 1
+const int LOG_WARN = 2
+const int LOG_ERROR = 3
+
+/// Current threshold; messages below it are dropped. Default `LOG_INFO`.
+int logLevel = LOG_INFO
+
+/// Sets the threshold (e.g. `setLogLevel(LOG_DEBUG)` for everything,
+/// `setLogLevel(LOG_ERROR)` for errors only). Out-of-range values are
+/// stored as-is: above `LOG_ERROR` silences everything, below
+/// `LOG_DEBUG` logs everything.
+void setLogLevel(int level) do
+    logLevel = level
+end
+
+/// Logs `s` at an explicit level tag (the escape hatch behind the four
+/// typed helpers below). No filtering is applied here.
+void emitLog(string level, string s) do
+    string line = concat(toString(wallMs()), " ")
+    line = concat(line, level)
+    line = concat(line, " ")
+    line = concat(line, s)
+    eprintln(line)
+end
+
+/// Debug detail; hidden unless the level is `LOG_DEBUG`.
+void logDebug(string s) do
+    if logLevel <= LOG_DEBUG do
+        emitLog("DEBUG", s)
+    end
+end
+
+/// Normal operational message (the default threshold logs these).
+void logInfo(string s) do
+    if logLevel <= LOG_INFO do
+        emitLog("INFO", s)
+    end
+end
+
+/// Something looks wrong but the program continues.
+void logWarn(string s) do
+    if logLevel <= LOG_WARN do
+        emitLog("WARN", s)
+    end
+end
+
+/// Failures; always logged unless the threshold is raised past `LOG_ERROR`.
+void logError(string s) do
+    if logLevel <= LOG_ERROR do
+        emitLog("ERROR", s)
+    end
+end

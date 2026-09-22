@@ -1,6 +1,6 @@
 //! End-to-end stdlib regressions using the public compiler API and a real linker.
 //! No prebuilt CLI or installed ~/.hella stdlib; imports resolve to this checkout.
-use hella_compiler::{codegen, lexer, modules, parse, sema};
+use hella_compiler::{async_req, codegen, lexer, modules, parse, sema};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -38,6 +38,10 @@ impl Scratch {
         assert!(expanded.errors.is_empty(), "import expansion failed");
         let errors = sema::check(&expanded.program);
         assert!(errors.is_empty(), "{errors:?}");
+        // Modules over `runtime/hella_sync.c` (`std::time`/`sync`/`chan`/`net`,
+        // hence `std::log` via `std::time`) need the sync runtime linked,
+        // mirroring the CLI's conditional link (B1/B2).
+        let needs_sync = async_req::uses_sync_runtime(&expanded.program);
         let object = self.0.join("test.o");
         codegen::compile_to_object(&expanded.program, &object, opt).unwrap();
         let exe = self.0.join(if cfg!(windows) { "test.exe" } else { "test" });
@@ -52,6 +56,14 @@ impl Scratch {
             );
         } else {
             command.arg("-lm");
+        }
+        if needs_sync {
+            command.arg(
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/hella_sync.c"),
+            );
+            if !cfg!(windows) {
+                command.arg("-pthread");
+            }
         }
         let linked = command
             .output()
@@ -165,6 +177,26 @@ end
             );
             let exe = scratch.compile(&source, opt);
             scratch.run(&exe, "", false);
+        }
+        // Log lines carry wall-clock millis (nondeterministic), so match
+        // level tags + messages rather than whole lines. Filtering must
+        // hide debug/info/warn at LOG_ERROR while errors still show.
+        let source = fs::read_to_string(root.join("examples/stdlib_log.hll")).unwrap();
+        let exe = scratch.compile(&source, opt);
+        let (out, err) = scratch.run(&exe, "", true);
+        assert_eq!(out, "log ok\n");
+        for visible in [
+            "DEBUG debug visible",
+            "INFO info visible",
+            "WARN warn visible",
+            "ERROR error visible",
+            "CUSTOM custom visible",
+            "ERROR error still visible",
+        ] {
+            assert!(err.contains(visible), "stderr missing `{visible}`:\n{err}");
+        }
+        for hidden in ["debug hidden", "info hidden", "warn hidden"] {
+            assert!(!err.contains(hidden), "stderr leaked `{hidden}`:\n{err}");
         }
     }
 }

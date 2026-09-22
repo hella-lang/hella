@@ -25,6 +25,25 @@ int main() do
     assert isEmpty(dir) is false
     // argv[0] is always present, even with no user args
     assert isEmpty(progName()) is false
+    // home/temp dirs read fixed names, so the test controls them via
+    // setEnv — no dependence on ambient HOME/TMPDIR on any OS.
+    setEnv("HOME", "/home/testuser")
+    setEnv("USERPROFILE", "C:/Users/testuser")
+    assert equals(homeDir(), "/home/testuser") is true
+    unsetEnv("HOME")
+    assert equals(homeDir(), "C:/Users/testuser") is true
+    unsetEnv("USERPROFILE")
+    assert isEmpty(homeDir()) is true
+    setEnv("TMPDIR", "/scratch")
+    setEnv("TEMP", "/tmpwin")
+    setEnv("TMP", "/tmpother")
+    assert equals(tempDir(), "/scratch") is true
+    unsetEnv("TMPDIR")
+    assert equals(tempDir(), "/tmpwin") is true
+    unsetEnv("TEMP")
+    assert equals(tempDir(), "/tmpother") is true
+    unsetEnv("TMP")
+    assert isEmpty(tempDir()) is true
     println("env ok")
     return 0
 end
