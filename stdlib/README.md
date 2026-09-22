@@ -75,11 +75,23 @@ without its `import` is a sema error (`undefined function`) by design.
   - `bool exists(string path)` (access), `string readFile`/`void writeFile`/`appendFile`/`removeFile` (fopen/fseek/ftell/fread/fwrite/remove)
   - `int fileSize(string path)` — bytes via `fseek`/`ftell`, or `-1` when
     the file cannot be opened
-- `std::path` — `stdlib/std/path.hll` (pure Hella over `std::str`)
+  - `bool renameFile(oldPath, newPath)` — ISO C `rename`, portable across
+    Windows/Linux/macOS. Overwrites an existing destination on POSIX;
+    on Windows renaming onto an existing file fails.
+  - `bool copyFile(src, dst)` — best-effort copy via `readFile`/`writeFile`,
+    verified against the source size (empty files copy fine). Not atomic,
+    permissions not preserved; concurrent writers can race verification.
+- `std::path` — `stdlib/std/path.hll` (pure Hella over `std::str` + `std::vector`)
   - `joinPath(a, b)` (exactly one `/`, empty sides pass through),
     `basename(p)` (trailing slashes ignored; root/empty yield `""`),
     `dirname(p)` (no slash yields `"."`; root yields `"/"`),
     `extension(p)` (`"a.tar.gz"` → `"gz"`; dotfiles/dotless/trailing-dot yield `""`)
+  - `isAbsolute(p)` — true for a leading `/` (POSIX semantics;
+    `C:/x` is not absolute, `\` is an ordinary byte)
+  - `clean(p)` — lexical normalization (Go `path.Clean` parity):
+    collapses `//`, drops `.`, resolves `..` without escaping the root,
+    strips trailing slashes; `""` → `"."`, root stays `"/"`. At most 255
+    stacked components (string vec capacity); deeper paths abort.
   - `/`-separated only (no Windows `\` handling); composes with `std::fs` paths
 - `std::vector` — `stdlib/std/vector.hll` (pure Hella; named `vector` because
   `vec` is a compiler keyword and cannot be an import segment)

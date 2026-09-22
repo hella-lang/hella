@@ -6,6 +6,7 @@
 // exact-size via `allocateString`; see stdlib/README.md on ownership.
 
 import std::str
+import std::vector
 
 /// Joins two segments with exactly one `/` between them. Empty sides
 /// pass through (`joinPath("", "b")` is `"b"`); a doubled separator
@@ -103,4 +104,72 @@ string extension(string p) do
         return ""
     end
     return substring(base, dot + 1, len(base))
+end
+
+/// True when `p` starts with `/`. POSIX semantics only: drive-letter
+/// paths (`C:/x`) are NOT absolute, and `\` is an ordinary byte.
+bool isAbsolute(string p) do
+    return startsWith(p, "/")
+end
+
+/// Lexically normalizes `p` (Go `path.Clean` parity, `/`-separated only):
+/// repeated slashes collapse, `.` segments drop, `..` pops the preceding
+/// segment (never above the root; survivors stay relative), trailing
+/// slashes strip. Empty input yields `"."`; the root stays `"/"`.
+/// At most 255 stacked components (string vec capacity); deeper paths abort.
+string clean(string p) do
+    bool rooted = startsWith(p, "/")
+    string vec stack = vec[]
+    int cursor = 0
+    string field = splitNext(p, "/", ref cursor)
+    // NOTE: `out` is a reserved word (parameter modes); the accumulator
+    // is `result`. All locals are declared up front regardless.
+    string top = ""
+    string result = ""
+    int n = 0
+    int i = 0
+    while true do
+        if not equals(field, "") and not equals(field, ".") do
+            if equals(field, "..") do
+                if sLen(stack) > 0 do
+                    top = sLast(stack)
+                    if not equals(top, "..") do
+                        sPop(ref stack)
+                    end else do
+                        if not rooted do
+                            sPush(ref stack, field)
+                        end
+                    end
+                end else do
+                    if not rooted do
+                        sPush(ref stack, field)
+                    end
+                end
+            end else do
+                sPush(ref stack, field)
+            end
+        end
+        if cursor < 0 do
+            break
+        end
+        field = splitNext(p, "/", ref cursor)
+    end
+    n = sLen(stack)
+    if n is 0 do
+        if rooted do
+            return "/"
+        end
+        return "."
+    end
+    while i < n do
+        if i > 0 do
+            result = concat(result, "/")
+        end
+        result = concat(result, stack[i])
+        i = i + 1
+    end
+    if rooted do
+        result = concat("/", result)
+    end
+    return result
 end

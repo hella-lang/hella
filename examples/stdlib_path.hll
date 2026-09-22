@@ -31,6 +31,25 @@ int main() do
     assert equals(extension("a/b.c"), "c")
     // split and rejoin round-trips
     assert equals(joinPath(dirname("a/b/c.txt"), basename("a/b/c.txt")), "a/b/c.txt")
+    assert isAbsolute("/a") is true
+    assert isAbsolute("/") is true
+    assert isAbsolute("a") is false
+    assert isAbsolute("") is false
+    assert isAbsolute("C:/x") is false
+    assert equals(clean(""), ".")
+    assert equals(clean("/"), "/")
+    assert equals(clean("."), ".")
+    assert equals(clean("./a"), "a")
+    assert equals(clean("a//b/./c"), "a/b/c")
+    assert equals(clean("/a/b/../c"), "/a/c")
+    assert equals(clean("a/../../b"), "../b")
+    assert equals(clean("/../a"), "/a")
+    assert equals(clean("a/b/"), "a/b")
+    assert equals(clean("a/././b"), "a/b")
+    assert equals(clean("//a///b"), "/a/b")
+    assert equals(clean("../.."), "../..")
+    assert equals(clean("/a/./.././b/"), "/b")
+    assert equals(clean(joinPath("a/", "/b")), "a/b")
     println("path ok")
     return 0
 end

@@ -9,6 +9,7 @@ extern "c" from "libc" do
     int fread(string buf, int size, int count, string file)
     int fwrite(string buf, int size, int count, string file)
     int remove(string path)
+    int rename(string oldPath, string newPath)
     int access(string path, int mode)
     string calloc(int n, int size)
     int strlen(string s)
@@ -95,4 +96,25 @@ end
 /// Removes the file at `path`.
 void removeFile(string path) do
     remove(path)
+end
+
+/// Renames `oldPath` to `newPath` (ISO C `rename`, portable across
+/// Windows/Linux/macOS). Returns true on success. Overwrites an existing
+/// destination on POSIX; on Windows renaming onto an existing file fails.
+bool renameFile(string oldPath, string newPath) do
+    return rename(oldPath, newPath) is 0
+end
+
+/// Copies `src` to `dst` (truncating/creating), returning true when the
+/// destination verifies at the source size. Best-effort and not atomic:
+/// permissions are not preserved and a concurrent writer can race the
+/// verification. Empty files copy fine (size 0 verifies as 0).
+bool copyFile(string src, string dst) do
+    int size = fileSize(src)
+    if size < 0 do
+        return false
+    end
+    string data = readFile(src)
+    writeFile(dst, data)
+    return fileSize(dst) is size
 end

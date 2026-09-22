@@ -29,6 +29,25 @@ int main() do
     missing = readFile("hella_no_such_file_xyz.txt")
     assert isEmpty(missing) is true
     assert fileSize("hella_no_such_file_xyz.txt") is -1
+    string rpath = "hella_fs_test_tmp2.txt"
+    assert copyFile("hella_no_such_file_xyz.txt", rpath) is false
+    assert exists(rpath) is false
+    writeFile(path, data)
+    assert copyFile(path, rpath) is true
+    assert fileSize(rpath) is 8
+    assert equals(readFile(rpath), data) is true
+    assert renameFile(rpath, path) is true
+    assert exists(rpath) is false
+    assert exists(path) is true
+    assert equals(readFile(path), data) is true
+    assert renameFile("hella_no_such_file_xyz.txt", rpath) is false
+    writeFile(path, "")
+    assert copyFile(path, rpath) is true
+    assert fileSize(rpath) is 0
+    removeFile(path)
+    removeFile(rpath)
+    assert exists(path) is false
+    assert exists(rpath) is false
     println("fs ok")
     return 0
 end
