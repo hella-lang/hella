@@ -4,27 +4,39 @@
 
 use std::collections::HashMap;
 
-use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
-use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
-    PublishDiagnostics,
+use lsp_server::{
+    Connection, Message, Notification, Request, RequestId, Response,
 };
-use lsp_types::request::{CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest, Formatting, GotoDefinition, GotoImplementation, GotoImplementationParams, GotoTypeDefinition, GotoTypeDefinitionParams, HoverRequest, PrepareRenameRequest, RangeFormatting, References, Rename, Request as _, SignatureHelpRequest, WorkspaceSymbolRequest};
+use lsp_types::notification::{
+    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument,
+    Notification as _, PublishDiagnostics,
+};
+use lsp_types::request::{
+    CodeActionRequest, Completion, DocumentHighlightRequest,
+    DocumentSymbolRequest, Formatting, GotoDefinition, GotoImplementation,
+    GotoImplementationParams, GotoTypeDefinition, GotoTypeDefinitionParams,
+    HoverRequest, PrepareRenameRequest, RangeFormatting, References, Rename,
+    Request as _, SignatureHelpRequest, WorkspaceSymbolRequest,
+};
 use lsp_types::{
-    CodeActionParams, CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind,
-    DocumentHighlightParams, DocumentRangeFormattingParams, DocumentSymbolParams,
-    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, HoverParams,
-    InitializeResult, Location, OneOf, Position, PrepareRenameResponse, PublishDiagnosticsParams,
-    ReferenceParams, RenameOptions, RenameParams, ServerCapabilities, ServerInfo, SignatureHelp,
-    SignatureHelpOptions, SignatureHelpParams, SymbolInformation, TextDocumentPositionParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions, WorkspaceEdit,
+    CodeActionParams, CompletionParams, CompletionResponse,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentHighlight,
+    DocumentHighlightKind, DocumentHighlightParams,
+    DocumentRangeFormattingParams, DocumentSymbolParams,
+    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
+    HoverParams, InitializeResult, Location, OneOf, Position,
+    PrepareRenameResponse, PublishDiagnosticsParams, ReferenceParams,
+    RenameOptions, RenameParams, ServerCapabilities, ServerInfo, SignatureHelp,
+    SignatureHelpOptions, SignatureHelpParams, SymbolInformation,
+    TextDocumentPositionParams, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, WorkspaceEdit,
     WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 
 use crate::analysis::Analysis;
 use crate::diagnostics::diagnostics;
-use crate::document::{position_to_offset, DocumentManager};
+use crate::document::{DocumentManager, position_to_offset};
 use crate::progress::{self, ProgressState};
 
 const SERVER_NAME: &str = "hella-lsp";
@@ -128,13 +140,15 @@ pub fn run() -> i32 {
 /// Advertised LSP capabilities.
 fn server_capabilities() -> ServerCapabilities {
     ServerCapabilities {
-        text_document_sync: Some(TextDocumentSyncCapability::Options(TextDocumentSyncOptions {
-            open_close: Some(true),
-            change: Some(TextDocumentSyncKind::INCREMENTAL),
-            will_save: None,
-            will_save_wait_until: None,
-            save: None,
-        })),
+        text_document_sync: Some(TextDocumentSyncCapability::Options(
+            TextDocumentSyncOptions {
+                open_close: Some(true),
+                change: Some(TextDocumentSyncKind::INCREMENTAL),
+                will_save: None,
+                will_save_wait_until: None,
+                save: None,
+            },
+        )),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
         completion_provider: Some(lsp_types::CompletionOptions {
@@ -150,9 +164,15 @@ fn server_capabilities() -> ServerCapabilities {
             work_done_progress_options: Default::default(),
         }),
         references_provider: Some(OneOf::Left(true)),
-        type_definition_provider: Some(lsp_types::TypeDefinitionProviderCapability::Simple(true)),
-        implementation_provider: Some(lsp_types::ImplementationProviderCapability::Simple(true)),
-        code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
+        type_definition_provider: Some(
+            lsp_types::TypeDefinitionProviderCapability::Simple(true),
+        ),
+        implementation_provider: Some(
+            lsp_types::ImplementationProviderCapability::Simple(true),
+        ),
+        code_action_provider: Some(
+            lsp_types::CodeActionProviderCapability::Simple(true),
+        ),
         rename_provider: Some(OneOf::Right(RenameOptions {
             prepare_provider: Some(true),
             work_done_progress_options: Default::default(),
@@ -170,13 +190,14 @@ fn handle_request(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match req.method.as_str() {
         HoverRequest::METHOD => {
-            let (id, params) = match extract::<HoverParams>(req, HoverRequest::METHOD) {
-                Ok(v) => v,
-                Err((id, msg)) => {
-                    send_err(connection, id, msg);
-                    return Ok(());
-                }
-            };
+            let (id, params) =
+                match extract::<HoverParams>(req, HoverRequest::METHOD) {
+                    Ok(v) => v,
+                    Err((id, msg)) => {
+                        send_err(connection, id, msg);
+                        return Ok(());
+                    }
+                };
             let result = state
                 .hover(&params)
                 .map(|h| serde_json::to_value(h))
@@ -185,7 +206,10 @@ fn handle_request(
             send_ok(connection, id, result);
         }
         GotoDefinition::METHOD => {
-            let (id, params) = match extract::<GotoDefinitionParams>(req, GotoDefinition::METHOD) {
+            let (id, params) = match extract::<GotoDefinitionParams>(
+                req,
+                GotoDefinition::METHOD,
+            ) {
                 Ok(v) => v,
                 Err((id, msg)) => {
                     send_err(connection, id, msg);
@@ -200,13 +224,14 @@ fn handle_request(
             send_ok(connection, id, result);
         }
         Completion::METHOD => {
-            let (id, params) = match extract::<CompletionParams>(req, Completion::METHOD) {
-                Ok(v) => v,
-                Err((id, msg)) => {
-                    send_err(connection, id, msg);
-                    return Ok(());
-                }
-            };
+            let (id, params) =
+                match extract::<CompletionParams>(req, Completion::METHOD) {
+                    Ok(v) => v,
+                    Err((id, msg)) => {
+                        send_err(connection, id, msg);
+                        return Ok(());
+                    }
+                };
             let result = state
                 .completions(&params)
                 .map(|c| serde_json::to_value(c))
@@ -215,8 +240,10 @@ fn handle_request(
             send_ok(connection, id, result);
         }
         DocumentSymbolRequest::METHOD => {
-            let (id, params) = match extract::<DocumentSymbolParams>(req, DocumentSymbolRequest::METHOD)
-            {
+            let (id, params) = match extract::<DocumentSymbolParams>(
+                req,
+                DocumentSymbolRequest::METHOD,
+            ) {
                 Ok(v) => v,
                 Err((id, msg)) => {
                     send_err(connection, id, msg);
@@ -231,7 +258,10 @@ fn handle_request(
             send_ok(connection, id, result);
         }
         Formatting::METHOD => {
-            let (id, params) = match extract::<DocumentFormattingParams>(req, Formatting::METHOD) {
+            let (id, params) = match extract::<DocumentFormattingParams>(
+                req,
+                Formatting::METHOD,
+            ) {
                 Ok(v) => v,
                 Err((id, msg)) => {
                     send_err(connection, id, msg);
@@ -246,14 +276,16 @@ fn handle_request(
             send_ok(connection, id, result);
         }
         RangeFormatting::METHOD => {
-            let (id, params) =
-                match extract::<DocumentRangeFormattingParams>(req, RangeFormatting::METHOD) {
-                    Ok(v) => v,
-                    Err((id, msg)) => {
-                        send_err(connection, id, msg);
-                        return Ok(());
-                    }
-                };
+            let (id, params) = match extract::<DocumentRangeFormattingParams>(
+                req,
+                RangeFormatting::METHOD,
+            ) {
+                Ok(v) => v,
+                Err((id, msg)) => {
+                    send_err(connection, id, msg);
+                    return Ok(());
+                }
+            };
             let result = state
                 .format_range(&params)
                 .map(|e| serde_json::to_value(e))
@@ -262,14 +294,16 @@ fn handle_request(
             send_ok(connection, id, result);
         }
         SignatureHelpRequest::METHOD => {
-            let (id, params) =
-                match extract::<SignatureHelpParams>(req, SignatureHelpRequest::METHOD) {
-                    Ok(v) => v,
-                    Err((id, msg)) => {
-                        send_err(connection, id, msg);
-                        return Ok(());
-                    }
-                };
+            let (id, params) = match extract::<SignatureHelpParams>(
+                req,
+                SignatureHelpRequest::METHOD,
+            ) {
+                Ok(v) => v,
+                Err((id, msg)) => {
+                    send_err(connection, id, msg);
+                    return Ok(());
+                }
+            };
             let result = state
                 .signature_help(&params)
                 .map(|s| serde_json::to_value(s))
@@ -278,13 +312,14 @@ fn handle_request(
             send_ok(connection, id, result);
         }
         References::METHOD => {
-            let (id, params) = match extract::<ReferenceParams>(req, References::METHOD) {
-                Ok(v) => v,
-                Err((id, msg)) => {
-                    send_err(connection, id, msg);
-                    return Ok(());
-                }
-            };
+            let (id, params) =
+                match extract::<ReferenceParams>(req, References::METHOD) {
+                    Ok(v) => v,
+                    Err((id, msg)) => {
+                        send_err(connection, id, msg);
+                        return Ok(());
+                    }
+                };
             let result = state
                 .references(&params)
                 .map(|l| serde_json::to_value(l))
@@ -293,13 +328,14 @@ fn handle_request(
             send_ok(connection, id, result);
         }
         Rename::METHOD => {
-            let (id, params) = match extract::<RenameParams>(req, Rename::METHOD) {
-                Ok(v) => v,
-                Err((id, msg)) => {
-                    send_err(connection, id, msg);
-                    return Ok(());
-                }
-            };
+            let (id, params) =
+                match extract::<RenameParams>(req, Rename::METHOD) {
+                    Ok(v) => v,
+                    Err((id, msg)) => {
+                        send_err(connection, id, msg);
+                        return Ok(());
+                    }
+                };
             match state.rename(&params) {
                 Ok(edit) => {
                     let result = serde_json::to_value(edit)?;
@@ -309,14 +345,16 @@ fn handle_request(
             }
         }
         PrepareRenameRequest::METHOD => {
-            let (id, params) =
-                match extract::<TextDocumentPositionParams>(req, PrepareRenameRequest::METHOD) {
-                    Ok(v) => v,
-                    Err((id, msg)) => {
-                        send_err(connection, id, msg);
-                        return Ok(());
-                    }
-                };
+            let (id, params) = match extract::<TextDocumentPositionParams>(
+                req,
+                PrepareRenameRequest::METHOD,
+            ) {
+                Ok(v) => v,
+                Err((id, msg)) => {
+                    send_err(connection, id, msg);
+                    return Ok(());
+                }
+            };
             let result = state
                 .prepare_rename(&params)
                 .map(|r| serde_json::to_value(r))
@@ -325,14 +363,16 @@ fn handle_request(
             send_ok(connection, id, result);
         }
         DocumentHighlightRequest::METHOD => {
-            let (id, params) =
-                match extract::<DocumentHighlightParams>(req, DocumentHighlightRequest::METHOD) {
-                    Ok(v) => v,
-                    Err((id, msg)) => {
-                        send_err(connection, id, msg);
-                        return Ok(());
-                    }
-                };
+            let (id, params) = match extract::<DocumentHighlightParams>(
+                req,
+                DocumentHighlightRequest::METHOD,
+            ) {
+                Ok(v) => v,
+                Err((id, msg)) => {
+                    send_err(connection, id, msg);
+                    return Ok(());
+                }
+            };
             let result = state
                 .document_highlights(&params)
                 .map(|h| serde_json::to_value(h))
@@ -341,14 +381,16 @@ fn handle_request(
             send_ok(connection, id, result);
         }
         WorkspaceSymbolRequest::METHOD => {
-            let (id, params) =
-                match extract::<WorkspaceSymbolParams>(req, WorkspaceSymbolRequest::METHOD) {
-                    Ok(v) => v,
-                    Err((id, msg)) => {
-                        send_err(connection, id, msg);
-                        return Ok(());
-                    }
-                };
+            let (id, params) = match extract::<WorkspaceSymbolParams>(
+                req,
+                WorkspaceSymbolRequest::METHOD,
+            ) {
+                Ok(v) => v,
+                Err((id, msg)) => {
+                    send_err(connection, id, msg);
+                    return Ok(());
+                }
+            };
             let result = state
                 .workspace_symbols(&params)
                 .map(|s| serde_json::to_value(s))
@@ -357,14 +399,16 @@ fn handle_request(
             send_ok(connection, id, result);
         }
         GotoTypeDefinition::METHOD => {
-            let (id, params) =
-                match extract::<GotoTypeDefinitionParams>(req, GotoTypeDefinition::METHOD) {
-                    Ok(v) => v,
-                    Err((id, msg)) => {
-                        send_err(connection, id, msg);
-                        return Ok(());
-                    }
-                };
+            let (id, params) = match extract::<GotoTypeDefinitionParams>(
+                req,
+                GotoTypeDefinition::METHOD,
+            ) {
+                Ok(v) => v,
+                Err((id, msg)) => {
+                    send_err(connection, id, msg);
+                    return Ok(());
+                }
+            };
             let result = state
                 .type_definition(&params)
                 .map(|d| serde_json::to_value(d))
@@ -373,14 +417,16 @@ fn handle_request(
             send_ok(connection, id, result);
         }
         GotoImplementation::METHOD => {
-            let (id, params) =
-                match extract::<GotoImplementationParams>(req, GotoImplementation::METHOD) {
-                    Ok(v) => v,
-                    Err((id, msg)) => {
-                        send_err(connection, id, msg);
-                        return Ok(());
-                    }
-                };
+            let (id, params) = match extract::<GotoImplementationParams>(
+                req,
+                GotoImplementation::METHOD,
+            ) {
+                Ok(v) => v,
+                Err((id, msg)) => {
+                    send_err(connection, id, msg);
+                    return Ok(());
+                }
+            };
             let result = state
                 .implementation(&params)
                 .map(|d| serde_json::to_value(d))
@@ -389,7 +435,10 @@ fn handle_request(
             send_ok(connection, id, result);
         }
         CodeActionRequest::METHOD => {
-            let (id, params) = match extract::<CodeActionParams>(req, CodeActionRequest::METHOD) {
+            let (id, params) = match extract::<CodeActionParams>(
+                req,
+                CodeActionRequest::METHOD,
+            ) {
                 Ok(v) => v,
                 Err((id, msg)) => {
                     send_err(connection, id, msg);
@@ -434,7 +483,8 @@ fn extract<P: serde::de::DeserializeOwned>(
 }
 
 fn send_err(connection: &Connection, id: RequestId, msg: String) {
-    let resp = Response::new_err(id, lsp_server::ErrorCode::InvalidParams as i32, msg);
+    let resp =
+        Response::new_err(id, lsp_server::ErrorCode::InvalidParams as i32, msg);
     let _ = connection.sender.send(resp.into());
 }
 
@@ -446,7 +496,9 @@ fn send_ok(connection: &Connection, id: RequestId, result: serde_json::Value) {
 /// Workspace roots for progress reporting: `workspaceFolders` first,
 /// falling back to `rootUri`. Non-file URIs are skipped.
 #[allow(deprecated)] // `rootUri` fallback for older clients
-fn workspace_roots(init: &lsp_types::InitializeParams) -> Vec<std::path::PathBuf> {
+fn workspace_roots(
+    init: &lsp_types::InitializeParams,
+) -> Vec<std::path::PathBuf> {
     let mut roots = Vec::new();
     if let Some(folders) = &init.workspace_folders {
         for f in folders {
@@ -473,7 +525,8 @@ fn request_startup_progress(connection: &Connection, state: &mut State) {
         return;
     }
     state.next_request_id += 1;
-    let id = RequestId::from(format!("hella/progress/{}", state.next_request_id));
+    let id =
+        RequestId::from(format!("hella/progress/{}", state.next_request_id));
     let req = progress::create_request(id.clone());
     if connection.sender.send(req.into()).is_err() {
         return;
@@ -523,21 +576,26 @@ fn run_indexing_progress(connection: &Connection, state: &State) {
     let _ = connection.sender.send(
         progress::report(Some(&format!("Found {files}")), Some(100)).into(),
     );
-    let _ = connection.sender.send(
-        progress::end(Some(&format!("Indexed {files}"))).into(),
-    );
+    let _ = connection
+        .sender
+        .send(progress::end(Some(&format!("Indexed {files}"))).into());
 }
 
-fn handle_notification(connection: &Connection, state: &mut State, not: Notification) {
+fn handle_notification(
+    connection: &Connection,
+    state: &mut State,
+    not: Notification,
+) {
     match not.method.as_str() {
         DidOpenTextDocument::METHOD => {
-            let params: DidOpenTextDocumentParams = match serde_json::from_value(not.params) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("{SERVER_NAME}: bad didOpen: {e}");
-                    return;
-                }
-            };
+            let params: DidOpenTextDocumentParams =
+                match serde_json::from_value(not.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("{SERVER_NAME}: bad didOpen: {e}");
+                        return;
+                    }
+                };
             state.docs.open(
                 params.text_document.uri.clone(),
                 params.text_document.version,
@@ -547,13 +605,14 @@ fn handle_notification(connection: &Connection, state: &mut State, not: Notifica
             publish(connection, state, &params.text_document.uri);
         }
         DidChangeTextDocument::METHOD => {
-            let params: DidChangeTextDocumentParams = match serde_json::from_value(not.params) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("{SERVER_NAME}: bad didChange: {e}");
-                    return;
-                }
-            };
+            let params: DidChangeTextDocumentParams =
+                match serde_json::from_value(not.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("{SERVER_NAME}: bad didChange: {e}");
+                        return;
+                    }
+                };
             state.docs.change(
                 &params.text_document.uri,
                 params.text_document.version,
@@ -563,20 +622,24 @@ fn handle_notification(connection: &Connection, state: &mut State, not: Notifica
             publish(connection, state, &params.text_document.uri);
         }
         DidCloseTextDocument::METHOD => {
-            let params: DidCloseTextDocumentParams = match serde_json::from_value(not.params) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("{SERVER_NAME}: bad didClose: {e}");
-                    return;
-                }
-            };
+            let params: DidCloseTextDocumentParams =
+                match serde_json::from_value(not.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("{SERVER_NAME}: bad didClose: {e}");
+                        return;
+                    }
+                };
             // Clear any outstanding diagnostics.
             let clear = PublishDiagnosticsParams::new(
                 params.text_document.uri.clone(),
                 vec![],
                 None,
             );
-            let not = Notification::new(PublishDiagnostics::METHOD.to_string(), clear);
+            let not = Notification::new(
+                PublishDiagnostics::METHOD.to_string(),
+                clear,
+            );
             let _ = connection.sender.send(not.into());
             state.docs.close(&params.text_document.uri);
             state.analysis.remove(params.text_document.uri.as_str());
@@ -595,7 +658,8 @@ fn publish(connection: &Connection, state: &State, uri: &lsp_types::Uri) {
     // `None` (non-file URIs) keeps the legacy single-file behavior.
     let path = crate::document::uri_to_path(uri);
     let diags = diagnostics(&doc.text, path.as_deref());
-    let params = PublishDiagnosticsParams::new(uri.clone(), diags, Some(doc.version));
+    let params =
+        PublishDiagnosticsParams::new(uri.clone(), diags, Some(doc.version));
     let not = Notification::new(PublishDiagnostics::METHOD.to_string(), params);
     let _ = connection.sender.send(not.into());
 }
@@ -640,7 +704,9 @@ impl State {
         };
         let mut analysis = Analysis::default();
         let out = hella_compiler::lexer::lex(&doc.text);
-        if let Ok(prog) = hella_compiler::parse::parse(out.tokens, doc.text.clone()) {
+        if let Ok(prog) =
+            hella_compiler::parse::parse(out.tokens, doc.text.clone())
+        {
             analysis = Analysis::from_program_with_source(&prog, &doc.text);
             // Imported names (e.g. `std::io` functions) resolve for hover
             // with their own `///` docs attached from the imported files.
@@ -660,7 +726,10 @@ impl State {
         a.hover(&doc.text, offset)
     }
 
-    fn definition(&self, params: &GotoDefinitionParams) -> Option<GotoDefinitionResponse> {
+    fn definition(
+        &self,
+        params: &GotoDefinitionParams,
+    ) -> Option<GotoDefinitionResponse> {
         let (doc, offset) = self.doc_at(
             &params.text_document_position_params.text_document.uri,
             &params.text_document_position_params.position,
@@ -670,23 +739,29 @@ impl State {
             .map(GotoDefinitionResponse::Scalar)
     }
 
-    fn completions(&self, params: &CompletionParams) -> Option<CompletionResponse> {
+    fn completions(
+        &self,
+        params: &CompletionParams,
+    ) -> Option<CompletionResponse> {
         let uri = &params.text_document_position.text_document.uri;
-        let (doc, offset) = self.doc_at(
-            uri,
-            &params.text_document_position.position,
-        )?;
+        let (doc, offset) =
+            self.doc_at(uri, &params.text_document_position.position)?;
         // Completion parses error-tolerantly on its own (mid-typing
         // buffers with an incomplete `receiver.|` rarely parse cleanly),
         // so it does not use the cached analysis. The document path drives
         // import-path completion and loading imported names.
         let path = crate::document::uri_to_path(uri);
-        let mut items =
-            Analysis::complete_with_path(&doc.text, path.as_deref(), offset, self.snippet_support);
+        let mut items = Analysis::complete_with_path(
+            &doc.text,
+            path.as_deref(),
+            offset,
+            self.snippet_support,
+        );
         // Auto-import: unimported workspace symbols matching the prefix,
         // offered with an import edit. Bounded scan, skipped inside member access.
         if !items.iter().any(|i| i.label.starts_with('.')) {
-            let prefix = crate::analysis::word_prefix_for_completion(&doc.text, offset);
+            let prefix =
+                crate::analysis::word_prefix_for_completion(&doc.text, offset);
             if prefix.as_ref().map(|p| !p.is_empty()).unwrap_or(true) {
                 let existing: std::collections::HashSet<String> =
                     items.iter().map(|i| i.label.clone()).collect();
@@ -727,28 +802,39 @@ impl State {
         Some(CompletionResponse::Array(items))
     }
 
-    fn document_symbols(&self, params: &DocumentSymbolParams) -> Option<DocumentSymbolResponse> {
+    fn document_symbols(
+        &self,
+        params: &DocumentSymbolParams,
+    ) -> Option<DocumentSymbolResponse> {
         let doc = self.docs.get(&params.text_document.uri)?;
         let a = self.analysis.get(doc.uri.as_str())?;
         let symbols = a.document_symbols(&doc.text);
         Some(DocumentSymbolResponse::Nested(symbols))
     }
 
-    fn format_document(&self, params: &DocumentFormattingParams) -> Option<Vec<lsp_types::TextEdit>> {
+    fn format_document(
+        &self,
+        params: &DocumentFormattingParams,
+    ) -> Option<Vec<lsp_types::TextEdit>> {
         let doc = self.docs.get(&params.text_document.uri)?;
         crate::formatting::format_document(&doc.text)
     }
 
-    fn format_range(&self, params: &DocumentRangeFormattingParams) -> Option<Vec<lsp_types::TextEdit>> {
+    fn format_range(
+        &self,
+        params: &DocumentRangeFormattingParams,
+    ) -> Option<Vec<lsp_types::TextEdit>> {
         let doc = self.docs.get(&params.text_document.uri)?;
         crate::formatting::format_range(&doc.text, &params.range)
     }
 
-    fn signature_help(&self, params: &SignatureHelpParams) -> Option<SignatureHelp> {        let uri = &params.text_document_position_params.text_document.uri;
-        let (doc, offset) = self.doc_at(
-            uri,
-            &params.text_document_position_params.position,
-        )?;
+    fn signature_help(
+        &self,
+        params: &SignatureHelpParams,
+    ) -> Option<SignatureHelp> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let (doc, offset) =
+            self.doc_at(uri, &params.text_document_position_params.position)?;
         // Prefer the cached analysis; fall back to a tolerant re-parse so
         // mid-typing buffers (unclosed parens/blocks) still resolve.
         if let Some(a) = self.analysis.get(doc.uri.as_str()) {
@@ -766,7 +852,8 @@ impl State {
 
     fn references(&self, params: &ReferenceParams) -> Option<Vec<Location>> {
         let uri = &params.text_document_position.text_document.uri;
-        let (doc, offset) = self.doc_at(uri, &params.text_document_position.position)?;
+        let (doc, offset) =
+            self.doc_at(uri, &params.text_document_position.position)?;
         // Cached analysis when it exists; references degrade gracefully to
         // whole-document word matches, so a tolerant re-parse is enough.
         let fallback;
@@ -774,15 +861,19 @@ impl State {
             Some(a) => a,
             None => {
                 let out = hella_compiler::lexer::lex(&doc.text);
-                let prog = hella_compiler::parse::parse(out.tokens, doc.text.clone())
-                    .ok()
-                    .or_else(|| tolerant_parse(&doc.text))?;
+                let prog =
+                    hella_compiler::parse::parse(out.tokens, doc.text.clone())
+                        .ok()
+                        .or_else(|| tolerant_parse(&doc.text))?;
                 fallback = Analysis::from_program(&prog);
                 &fallback
             }
         };
-        let spans =
-            analysis.reference_spans(&doc.text, offset, params.context.include_declaration);
+        let spans = analysis.reference_spans(
+            &doc.text,
+            offset,
+            params.context.include_declaration,
+        );
         Some(
             spans
                 .into_iter()
@@ -796,8 +887,17 @@ impl State {
 
     /// Owned analysis for a document: cached when present, tolerantly
     /// re-parsed otherwise (rename/highlights share this path).
-    fn owned_analysis(&self, uri: &lsp_types::Uri) -> Option<(crate::document::Document, Analysis)> {
-        let (doc, _) = self.doc_at(uri, &Position { line: u32::MAX, character: 0 })?;
+    fn owned_analysis(
+        &self,
+        uri: &lsp_types::Uri,
+    ) -> Option<(crate::document::Document, Analysis)> {
+        let (doc, _) = self.doc_at(
+            uri,
+            &Position {
+                line: u32::MAX,
+                character: 0,
+            },
+        )?;
         if let Some(a) = self.analysis.get(doc.uri.as_str()) {
             return Some((doc, a.clone()));
         }
@@ -812,7 +912,8 @@ impl State {
         &self,
         params: &TextDocumentPositionParams,
     ) -> Option<PrepareRenameResponse> {
-        let (doc, offset) = self.doc_at(&params.text_document.uri, &params.position)?;
+        let (doc, offset) =
+            self.doc_at(&params.text_document.uri, &params.position)?;
         let span = Analysis::word_span_at(&doc.text, offset)?;
         let word = doc.text.get(span.start..span.end)?.to_string();
         if !Analysis::valid_ident(&word) {
@@ -824,7 +925,10 @@ impl State {
         })
     }
 
-    fn rename(&self, params: &RenameParams) -> Result<Option<WorkspaceEdit>, String> {
+    fn rename(
+        &self,
+        params: &RenameParams,
+    ) -> Result<Option<WorkspaceEdit>, String> {
         if !Analysis::valid_ident(&params.new_name) {
             return Err(format!("invalid rename target `{}`", params.new_name));
         }
@@ -861,7 +965,10 @@ impl State {
     ) -> Option<Vec<DocumentHighlight>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let (doc, analysis) = self.owned_analysis(uri)?;
-        let offset = crate::document::position_to_offset(&doc.text, &params.text_document_position_params.position);
+        let offset = crate::document::position_to_offset(
+            &doc.text,
+            &params.text_document_position_params.position,
+        );
         let hl = analysis.highlights(&doc.text, offset);
         if hl.is_empty() {
             return None;
@@ -905,7 +1012,10 @@ impl State {
                     deprecated: None,
                     location: Location {
                         uri: doc.uri.clone(),
-                        range: crate::document::span_to_range(&doc.text, sym.name_span),
+                        range: crate::document::span_to_range(
+                            &doc.text,
+                            sym.name_span,
+                        ),
                     },
                     container_name: None,
                 });
@@ -920,7 +1030,8 @@ impl State {
     fn type_definition(
         &self,
         params: &GotoTypeDefinitionParams,
-    ) -> Option<GotoDefinitionResponse> {        let uri = &params.text_document_position_params.text_document.uri;
+    ) -> Option<GotoDefinitionResponse> {
+        let uri = &params.text_document_position_params.text_document.uri;
         let (doc, analysis) = self.owned_analysis(uri)?;
         let offset = crate::document::position_to_offset(
             &doc.text,

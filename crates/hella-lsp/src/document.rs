@@ -49,7 +49,9 @@ impl DocumentManager {
                 Some(range) => {
                     let start = position_to_offset(&doc.text, &range.start);
                     let end = position_to_offset(&doc.text, &range.end);
-                    let mut next = String::with_capacity(doc.text.len() + change.text.len());
+                    let mut next = String::with_capacity(
+                        doc.text.len() + change.text.len(),
+                    );
                     next.push_str(&doc.text[..start]);
                     next.push_str(&change.text);
                     next.push_str(&doc.text[end..]);
@@ -158,7 +160,8 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
-            if let (Some(h), Some(l)) = (hex(bytes.get(i + 1)), hex(bytes.get(i + 2)))
+            if let (Some(h), Some(l)) =
+                (hex(bytes.get(i + 1)), hex(bytes.get(i + 2)))
             {
                 out.push(h << 4 | l);
                 i += 3;
@@ -205,7 +208,16 @@ mod tests {
         assert_eq!(pos_of_c.character, 5); // a + ä + b + 𝄞 (2 units)
         // Round-trips through position_to_offset.
         assert_eq!(position_to_offset(text, &pos_of_c), 8);
-        assert_eq!(position_to_offset(text, &Position { line: 0, character: 3 }), 4);
+        assert_eq!(
+            position_to_offset(
+                text,
+                &Position {
+                    line: 0,
+                    character: 3
+                }
+            ),
+            4
+        );
     }
 
     #[test]

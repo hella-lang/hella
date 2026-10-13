@@ -14,8 +14,8 @@ use std::collections::HashSet;
 use hella_compiler::ast::{self, ExprKind, Item, Stmt};
 use hella_compiler::token::{Span, Token};
 use lsp_types::{
-    CompletionItem, CompletionItemKind, DocumentSymbol, Hover, HoverContents, InsertTextFormat,
-    Location, MarkupContent, MarkupKind, SymbolKind,
+    CompletionItem, CompletionItemKind, DocumentSymbol, Hover, HoverContents,
+    InsertTextFormat, Location, MarkupContent, MarkupKind, SymbolKind,
 };
 
 use crate::document::span_to_range;
@@ -223,12 +223,18 @@ impl Analysis {
         for sym in self.locals.iter_mut() {
             // Locals rarely carry docs, but a `///` above a `var` still counts.
             if sym.doc.is_none() {
-                sym.doc = hella_compiler::docs::extract_doc_comment(source, sym.full_span.start);
+                sym.doc = hella_compiler::docs::extract_doc_comment(
+                    source,
+                    sym.full_span.start,
+                );
             }
         }
         for sym in self.imported.iter_mut() {
             if sym.doc.is_none() {
-                sym.doc = hella_compiler::docs::extract_doc_comment(source, sym.full_span.start);
+                sym.doc = hella_compiler::docs::extract_doc_comment(
+                    source,
+                    sym.full_span.start,
+                );
             }
             for child in sym.children.iter_mut() {
                 attach_symbol_docs(child, source);
@@ -255,7 +261,11 @@ impl Analysis {
     /// Shared member builders used by both class and `extend` collection,
     /// so the two stay identical. Each pushes the member symbol and walks
     /// its bodies for locals.
-    fn collect_field_sym(&mut self, f: &ast::StructField, children: &mut Vec<Symbol>) {
+    fn collect_field_sym(
+        &mut self,
+        f: &ast::StructField,
+        children: &mut Vec<Symbol>,
+    ) {
         children.push(
             make_symbol(
                 &f.name,
@@ -269,7 +279,11 @@ impl Analysis {
         );
     }
 
-    fn collect_method_sym(&mut self, m: &ast::Function, children: &mut Vec<Symbol>) {
+    fn collect_method_sym(
+        &mut self,
+        m: &ast::Function,
+        children: &mut Vec<Symbol>,
+    ) {
         let detail = format!(
             "fn {}({}) -> {}",
             m.name,
@@ -290,12 +304,15 @@ impl Analysis {
         self.collect_block_locals(&m.body, m.span, &m.params);
     }
 
-    fn collect_property_sym(&mut self, p: &ast::PropertyDecl, children: &mut Vec<Symbol>) {
-        let ty = p
-            .ty
-            .as_ref()
-            .map(|t| t.name())
-            .unwrap_or_else(|| "any".to_string());
+    fn collect_property_sym(
+        &mut self,
+        p: &ast::PropertyDecl,
+        children: &mut Vec<Symbol>,
+    ) {
+        let ty =
+            p.ty.as_ref()
+                .map(|t| t.name())
+                .unwrap_or_else(|| "any".to_string());
         children.push(
             make_symbol(
                 &p.name,
@@ -318,7 +335,11 @@ impl Analysis {
         }
     }
 
-    fn collect_ctor_sym(&mut self, k: &ast::ConstructorDecl, children: &mut Vec<Symbol>) {
+    fn collect_ctor_sym(
+        &mut self,
+        k: &ast::ConstructorDecl,
+        children: &mut Vec<Symbol>,
+    ) {
         children.push(
             make_symbol(
                 &k.name,
@@ -336,7 +357,11 @@ impl Analysis {
         }
     }
 
-    fn collect_dtor_sym(&mut self, d: &ast::DestructorDecl, children: &mut Vec<Symbol>) {
+    fn collect_dtor_sym(
+        &mut self,
+        d: &ast::DestructorDecl,
+        children: &mut Vec<Symbol>,
+    ) {
         children.push(make_symbol(
             &format!("~{}", d.name),
             SymKind::Destructor,
@@ -363,11 +388,21 @@ impl Analysis {
         let mut members = Vec::new();
         for m in &e.members {
             match m {
-                ast::ExtensionMember::Field(f) => self.collect_field_sym(f, &mut members),
-                ast::ExtensionMember::Function(f) => self.collect_method_sym(f, &mut members),
-                ast::ExtensionMember::Operator(o) => self.collect_operator_body(o),
-                ast::ExtensionMember::Property(p) => self.collect_property_sym(p, &mut members),
-                ast::ExtensionMember::Conversion(c) => self.collect_conversion_body(c),
+                ast::ExtensionMember::Field(f) => {
+                    self.collect_field_sym(f, &mut members)
+                }
+                ast::ExtensionMember::Function(f) => {
+                    self.collect_method_sym(f, &mut members)
+                }
+                ast::ExtensionMember::Operator(o) => {
+                    self.collect_operator_body(o)
+                }
+                ast::ExtensionMember::Property(p) => {
+                    self.collect_property_sym(p, &mut members)
+                }
+                ast::ExtensionMember::Conversion(c) => {
+                    self.collect_conversion_body(c)
+                }
             }
         }
         self.extensions.push(ExtensionInfo {
@@ -378,7 +413,7 @@ impl Analysis {
         });
     }
 
-fn collect_item(&mut self, item: &Item) {
+    fn collect_item(&mut self, item: &Item) {
         match item {
             Item::Function(f) => {
                 let detail = format!(
@@ -500,7 +535,7 @@ fn collect_item(&mut self, item: &Item) {
                 );
                 self.push_top(sym, e.name_span);
             }
-Item::Trait(t) => {
+            Item::Trait(t) => {
                 let mut children = Vec::new();
                 for m in &t.methods {
                     let detail = format!(
@@ -557,7 +592,10 @@ Item::Trait(t) => {
                 self.push_top(sym, d.name_span);
             }
             Item::Const(c) => {
-                let ty = c.ty.as_ref().map(|t| t.name()).unwrap_or_else(|| "*".into());
+                let ty =
+                    c.ty.as_ref()
+                        .map(|t| t.name())
+                        .unwrap_or_else(|| "*".into());
                 let sym = make_symbol(
                     &c.name,
                     SymKind::Constant,
@@ -625,9 +663,24 @@ Item::Trait(t) => {
                             .with_params(&pairs);
                             self.push_top(sym, *name_span);
                         }
-                        ast::ExternMember::Struct { name, name_span, span, .. }
-                        | ast::ExternMember::Enum { name, name_span, span, .. }
-                        | ast::ExternMember::Const { name, name_span, span, .. } => {
+                        ast::ExternMember::Struct {
+                            name,
+                            name_span,
+                            span,
+                            ..
+                        }
+                        | ast::ExternMember::Enum {
+                            name,
+                            name_span,
+                            span,
+                            ..
+                        }
+                        | ast::ExternMember::Const {
+                            name,
+                            name_span,
+                            span,
+                            ..
+                        } => {
                             let sym = make_symbol(
                                 name,
                                 SymKind::Function,
@@ -665,7 +718,12 @@ Item::Trait(t) => {
         }
     }
 
-    fn collect_block_locals(&mut self, block: &ast::Block, scope: Span, params: &[ast::Param]) {
+    fn collect_block_locals(
+        &mut self,
+        block: &ast::Block,
+        scope: Span,
+        params: &[ast::Param],
+    ) {
         self.collect_params(params, scope);
         self.collect_block(block, scope);
     }
@@ -675,7 +733,7 @@ Item::Trait(t) => {
             self.collect_stmt(stmt, scope);
         }
     }
-fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
+    fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
         match stmt {
             Stmt::VarDecl(v) => {
                 let detail = format!("var {}: {}", v.name, v.ty.name());
@@ -695,7 +753,10 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
                 }
             }
             Stmt::Const(c) => {
-                let ty = c.ty.as_ref().map(|t| t.name()).unwrap_or_else(|| "*".into());
+                let ty =
+                    c.ty.as_ref()
+                        .map(|t| t.name())
+                        .unwrap_or_else(|| "*".into());
                 let detail = format!("const {}: {}", c.name, ty);
                 let sym = make_symbol(
                     &c.name,
@@ -810,7 +871,9 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
             ExprKind::Paren(e)
             | ExprKind::Unary { expr: e, .. }
             | ExprKind::Postfix { expr: e, .. } => self.collect_expr(e),
-            ExprKind::Await { task, .. } | ExprKind::Spawn { task, .. } => self.collect_expr(task),
+            ExprKind::Await { task, .. } | ExprKind::Spawn { task, .. } => {
+                self.collect_expr(task)
+            }
             ExprKind::Tuple(es) | ExprKind::ArrayLit(es) => {
                 for e in es {
                     self.collect_expr(e);
@@ -835,7 +898,8 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
                     self.collect_expr(e);
                 }
             }
-            ExprKind::Assign { lhs, value } | ExprKind::CompoundAssign { lhs, value, .. } => {
+            ExprKind::Assign { lhs, value }
+            | ExprKind::CompoundAssign { lhs, value, .. } => {
                 self.collect_expr(lhs);
                 self.collect_expr(value);
             }
@@ -848,7 +912,8 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
                 self.collect_expr(then_branch);
                 self.collect_expr(else_branch);
             }
-            ExprKind::NullableMemberAccess { object, .. } | ExprKind::MemberAccess { object, .. } => {
+            ExprKind::NullableMemberAccess { object, .. }
+            | ExprKind::MemberAccess { object, .. } => {
                 self.collect_expr(object);
             }
             ExprKind::MethodCall { object, args, .. } => {
@@ -861,7 +926,9 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
                 self.collect_expr(object);
                 self.collect_expr(index);
             }
-            ExprKind::Slice { object, start, end, .. } => {
+            ExprKind::Slice {
+                object, start, end, ..
+            } => {
                 self.collect_expr(object);
                 if let Some(s) = start {
                     self.collect_expr(s);
@@ -884,7 +951,9 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
                     }
                     match &arm.body {
                         ast::MatchArmBody::Expr(e) => self.collect_expr(e),
-                        ast::MatchArmBody::Block(b) => self.collect_block(b, arm.span),
+                        ast::MatchArmBody::Block(b) => {
+                            self.collect_block(b, arm.span)
+                        }
                     }
                 }
             }
@@ -905,7 +974,7 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
             }
         }
     }
-// ── Queries ───────────────────────────────────────────────────────
+    // ── Queries ───────────────────────────────────────────────────────
 
     /// All top-level symbols (including imported modules, useful for
     /// completion but filtered out of document symbols).
@@ -972,7 +1041,11 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
 
     pub fn hover(&self, source: &str, offset: usize) -> Option<Hover> {
         let sym = self.resolve_symbol_at(source, offset)?;
-        let mut value = format!("**{}**\n\n```hll\n{}\n```", sym.kind_heading(), sym.detail);
+        let mut value = format!(
+            "**{}**\n\n```hll\n{}\n```",
+            sym.kind_heading(),
+            sym.detail
+        );
         // `///` doc comment, when present. Ordinary `//` comments never
         // reach `Symbol::doc`, so they stay invisible here by construction.
         if let Some(doc) = sym.doc.as_deref() {
@@ -984,7 +1057,9 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
         }
         // `own` slots move on assignment and are destroyed at scope exit —
         // worth surfacing where the type is hovered.
-        if sym.ty.as_deref().is_some_and(|t| t.strip_prefix("own ").is_some_and(|r| !r.is_empty())) {
+        if sym.ty.as_deref().is_some_and(|t| {
+            t.strip_prefix("own ").is_some_and(|r| !r.is_empty())
+        }) {
             value.push_str("\n\n*heap-owned: moves on assignment, destroyed at scope exit (`delete` frees early).*");
         }
         Some(Hover {
@@ -1014,7 +1089,11 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
     /// top-level/local/imported symbol whose name matches the word under
     /// the cursor. Powers hover (shows the referenced symbol's info) and
     /// goto-definition.
-    fn resolve_symbol_at(&self, source: &str, offset: usize) -> Option<&Symbol> {
+    fn resolve_symbol_at(
+        &self,
+        source: &str,
+        offset: usize,
+    ) -> Option<&Symbol> {
         // 1. Cursor on a declaration name.
         if let Some(sym) = self.symbol_at(offset) {
             return Some(sym);
@@ -1032,7 +1111,11 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
     }
 
     /// Span of the declaration the identifier at `offset` refers to.
-    fn resolve_definition_span(&self, source: &str, offset: usize) -> Option<Span> {
+    fn resolve_definition_span(
+        &self,
+        source: &str,
+        offset: usize,
+    ) -> Option<Span> {
         let word = ident_at(source, offset)?;
         if let Some(l) = innermost_local(&self.locals, &word, offset, false) {
             return Some(l.name_span);
@@ -1047,7 +1130,11 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
     /// plus the scope to narrow reference search to. Locals resolve
     /// inward (shadowing-safe); top-level/imported names are document-wide.
     /// Unresolved words get `(None, None)` — the whole-document fallback.
-    fn anchor_for(&self, word: &str, offset: usize) -> (Option<Span>, Option<Span>) {
+    fn anchor_for(
+        &self,
+        word: &str,
+        offset: usize,
+    ) -> (Option<Span>, Option<Span>) {
         if let Some(l) = innermost_local(&self.locals, word, offset, false) {
             return (Some(l.name_span), l.scope);
         }
@@ -1084,7 +1171,9 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
             if t.token != Token::Ident {
                 continue;
             }
-            if t.span.end > source.len() || &source[t.span.start..t.span.end] != word {
+            if t.span.end > source.len()
+                || &source[t.span.start..t.span.end] != word
+            {
                 continue;
             }
             if let Some(scope) = scope {
@@ -1123,11 +1212,15 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
         let bytes = source.as_bytes();
         let offset = offset.min(bytes.len());
         let mut lo = offset;
-        while lo > 0 && (bytes[lo - 1].is_ascii_alphanumeric() || bytes[lo - 1] == b'_') {
+        while lo > 0
+            && (bytes[lo - 1].is_ascii_alphanumeric() || bytes[lo - 1] == b'_')
+        {
             lo -= 1;
         }
         let mut hi = offset;
-        while hi < bytes.len() && (bytes[hi].is_ascii_alphanumeric() || bytes[hi] == b'_') {
+        while hi < bytes.len()
+            && (bytes[hi].is_ascii_alphanumeric() || bytes[hi] == b'_')
+        {
             hi += 1;
         }
         if lo == hi {
@@ -1139,7 +1232,11 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
     /// Whether `name` is a legal rename target: identifier shape, no
     /// leading digit, not a keyword.
     pub fn valid_ident(name: &str) -> bool {
-        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$') {
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$')
+        {
             return false;
         }
         if name.bytes().next().is_some_and(|b| b.is_ascii_digit()) {
@@ -1158,7 +1255,9 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
         let q = query.to_lowercase();
         self.top_recursive()
             .into_iter()
-            .filter(|s| s.kind != SymKind::Module && s.name.to_lowercase().contains(&q))
+            .filter(|s| {
+                s.kind != SymKind::Module && s.name.to_lowercase().contains(&q)
+            })
             .cloned()
             .collect()
     }
@@ -1167,9 +1266,15 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
     /// declaration span (`textDocument/typeDefinition`). Handles `own T`
     /// wrappers, generic/array suffixes, and cursor-on-the-type-name
     /// (which resolves to itself).
-    pub fn type_definition_span(&self, source: &str, offset: usize) -> Option<Span> {
+    pub fn type_definition_span(
+        &self,
+        source: &str,
+        offset: usize,
+    ) -> Option<Span> {
         let word = ident_at(source, offset)?;
-        let sym = if let Some(l) = innermost_local(&self.locals, &word, offset, false) {
+        let sym = if let Some(l) =
+            innermost_local(&self.locals, &word, offset, false)
+        {
             l.clone()
         } else {
             self.top_recursive()
@@ -1191,7 +1296,7 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
                     | SymKind::Distinct
             ) =>
             {
-                return Some(sym.name_span)
+                return Some(sym.name_span);
             }
             None => return None,
         };
@@ -1216,7 +1321,11 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
     /// Implementation locations for the trait or trait method at `offset`
     /// (`textDocument/implementation`): implementing classes (trait name)
     /// or their same-named method declarations (trait method).
-    pub fn implementation_spans(&self, source: &str, offset: usize) -> Vec<Span> {
+    pub fn implementation_spans(
+        &self,
+        source: &str,
+        offset: usize,
+    ) -> Vec<Span> {
         let Some(word) = ident_at(source, offset) else {
             return Vec::new();
         };
@@ -1278,7 +1387,11 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
     /// failure it retries with a dummy identifier completing the member
     /// access at the cursor (`p.__hella_complete`), then queries at the
     /// adjusted offset.
-    pub fn complete(source: &str, offset: usize, snippets: bool) -> Vec<CompletionItem> {
+    pub fn complete(
+        source: &str,
+        offset: usize,
+        snippets: bool,
+    ) -> Vec<CompletionItem> {
         Self::complete_with_path(source, None, offset, snippets)
     }
 
@@ -1297,35 +1410,40 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
                 // Explicitly replace only the final component, not the qualified
                 // path an editor may otherwise treat as its completion word.
                 let prefix = match &ctx {
-                    ImportCtx::Path { prefix, .. } | ImportCtx::Members { prefix, .. } => prefix,
+                    ImportCtx::Path { prefix, .. }
+                    | ImportCtx::Members { prefix, .. } => prefix,
                 };
                 let start = offset - prefix.len();
-                let end = offset + source[offset..]
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .map(char::len_utf8)
-                    .sum::<usize>();
+                let end = offset
+                    + source[offset..]
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .map(char::len_utf8)
+                        .sum::<usize>();
                 let range = span_to_range(source, Span::new(start, end));
                 for item in &mut items {
                     item.insert_text = Some(item.label.clone());
-                    item.text_edit = Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
-                        range,
-                        new_text: item.label.clone(),
-                    }));
+                    item.text_edit = Some(lsp_types::CompletionTextEdit::Edit(
+                        lsp_types::TextEdit {
+                            range,
+                            new_text: item.label.clone(),
+                        },
+                    ));
                 }
                 return items;
             }
         }
-        let (analysis, effective, adjusted) = match Self::parse_for_completion(source, offset) {
-            Some((prog, eff, adj)) => {
-                let mut a = Self::from_program_with_source(&prog, &eff);
-                if let Some(p) = doc_path {
-                    a.load_imports(p, &prog);
+        let (analysis, effective, adjusted) =
+            match Self::parse_for_completion(source, offset) {
+                Some((prog, eff, adj)) => {
+                    let mut a = Self::from_program_with_source(&prog, &eff);
+                    if let Some(p) = doc_path {
+                        a.load_imports(p, &prog);
+                    }
+                    (a, eff, adj)
                 }
-                (a, eff, adj)
-            }
-            None => (Self::default(), source.to_string(), offset),
-        };
+                None => (Self::default(), source.to_string(), offset),
+            };
         analysis.completions_in(&effective, adjusted, snippets)
     }
 
@@ -1345,7 +1463,8 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
         source: &str,
         offset: usize,
     ) -> Option<(ast::Program, String, usize)> {
-        let mut candidates: Vec<(String, usize)> = vec![(source.to_string(), offset)];
+        let mut candidates: Vec<(String, usize)> =
+            vec![(source.to_string(), offset)];
         let balanced = balance_ends(source);
         if balanced != source {
             candidates.push((balanced.clone(), offset));
@@ -1385,14 +1504,20 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
     /// complete as globals (and their types resolve for member completion),
     /// with `///` docs attached from each imported file's own source.
     /// Single level only; failures are skipped silently.
-    pub(crate) fn load_imports(&mut self, doc_path: &std::path::Path, prog: &ast::Program) {
+    pub(crate) fn load_imports(
+        &mut self,
+        doc_path: &std::path::Path,
+        prog: &ast::Program,
+    ) {
         let bases = hella_compiler::modules::search_bases(doc_path);
         let mut decls: Vec<&ast::ImportDecl> = Vec::new();
         fn walk<'a>(items: &'a [Item], out: &mut Vec<&'a ast::ImportDecl>) {
             for item in items {
                 match item {
                     Item::Import(d) => out.push(d),
-                    Item::Attributed { item, .. } => walk(std::slice::from_ref(item.as_ref()), out),
+                    Item::Attributed { item, .. } => {
+                        walk(std::slice::from_ref(item.as_ref()), out)
+                    }
                     _ => {}
                 }
             }
@@ -1400,7 +1525,9 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
         walk(&prog.items, &mut decls);
         let mut seen: HashSet<std::path::PathBuf> = HashSet::new();
         for decl in decls {
-            let resolved = match hella_compiler::modules::resolve_import(&decl.path, &bases) {
+            let resolved = match hella_compiler::modules::resolve_import(
+                &decl.path, &bases,
+            ) {
                 Some(p) => p,
                 None => continue,
             };
@@ -1458,15 +1585,24 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
     /// functions/methods complete to call snippets with tab-stop arguments
     /// and block keywords (`if`, `while`, …) complete to templates that
     /// include the closing `end`.
-    fn completions_in(&self, source: &str, offset: usize, snippets: bool) -> Vec<CompletionItem> {
+    fn completions_in(
+        &self,
+        source: &str,
+        offset: usize,
+        snippets: bool,
+    ) -> Vec<CompletionItem> {
         if let Some((receiver, prefix)) = member_receiver(source, offset) {
-            if let Some(items) = self.member_completions(&receiver, &prefix, offset, snippets) {
+            if let Some(items) =
+                self.member_completions(&receiver, &prefix, offset, snippets)
+            {
                 return items;
             }
         }
         let prefix = word_prefix_at(source, offset).unwrap_or_default();
         let mut items = Vec::new();
-        let matches = |name: &str| prefix.is_empty() || name.to_lowercase().starts_with(&prefix);
+        let matches = |name: &str| {
+            prefix.is_empty() || name.to_lowercase().starts_with(&prefix)
+        };
         // Locals in scope, declared before the cursor.
         for l in self
             .locals
@@ -1522,13 +1658,16 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
             }
         } else if receiver == "super" {
             self.super_chain_members(offset)?
-        } else if let Some(local) = innermost_local(&self.locals, receiver, offset, true) {
+        } else if let Some(local) =
+            innermost_local(&self.locals, receiver, offset, true)
+        {
             let ty = local.ty.as_deref()?;
             let inner = ty.strip_prefix("own ").unwrap_or(ty);
             let resolved = self.resolve_named_type(inner)?;
             match resolved.kind {
                 SymKind::Struct | SymKind::Class => {
-                    let mut out: Vec<&Symbol> = resolved.children.iter().collect();
+                    let mut out: Vec<&Symbol> =
+                        resolved.children.iter().collect();
                     out.extend(self.unlinked_members(inner));
                     out
                 }
@@ -1551,7 +1690,8 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
             .into_iter()
             .filter(|m| {
                 m.kind.completes_as_expression()
-                    && (prefix.is_empty() || m.name.to_lowercase().starts_with(&prefix))
+                    && (prefix.is_empty()
+                        || m.name.to_lowercase().starts_with(&prefix))
             })
             .map(|m| symbol_item(m, 0, snippets))
             .collect();
@@ -1572,7 +1712,8 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
                 // extensions/methods nest inside the class span).
                 let narrower = match best {
                     Some(b) => {
-                        (s.full_span.end - s.full_span.start) < (b.full_span.end - b.full_span.start)
+                        (s.full_span.end - s.full_span.start)
+                            < (b.full_span.end - b.full_span.start)
                     }
                     None => true,
                 };
@@ -1627,9 +1768,8 @@ fn collect_stmt(&mut self, stmt: &Stmt, scope: Span) {
     fn super_chain_members(&self, offset: usize) -> Option<Vec<&Symbol>> {
         let mut out: Vec<&Symbol> = Vec::new();
         let mut seen_types: HashSet<String> = HashSet::new();
-        let mut next: Option<String> = self
-            .enclosing_class(offset)
-            .and_then(|c| c.parent.clone());
+        let mut next: Option<String> =
+            self.enclosing_class(offset).and_then(|c| c.parent.clone());
         let mut resolved_any = false;
         for _ in 0..8 {
             let name = match next {
@@ -1711,7 +1851,10 @@ fn make_symbol(
 /// Attach `///` docs to a symbol and its children from `source`.
 fn attach_symbol_docs(sym: &mut Symbol, source: &str) {
     if sym.doc.is_none() {
-        sym.doc = hella_compiler::docs::extract_doc_comment(source, sym.full_span.start);
+        sym.doc = hella_compiler::docs::extract_doc_comment(
+            source,
+            sym.full_span.start,
+        );
     }
     for child in sym.children.iter_mut() {
         attach_symbol_docs(child, source);
@@ -1723,13 +1866,16 @@ fn base_type_name(ty: &str) -> String {
     // `own Speaker` → `Speaker`; `Vec<int>` → `Vec`; `int[]` → `int`.
     let t = ty.strip_prefix("own ").unwrap_or(ty).trim();
     let end = t
-        .find(|c: char| c == '<' || c == '[' || c == '(' || c == ':' || c.is_whitespace())
+        .find(|c: char| {
+            c == '<' || c == '[' || c == '(' || c == ':' || c.is_whitespace()
+        })
         .unwrap_or(t.len());
     t[..end].to_string()
 }
 
 /// `(name, type-name)` pairs for snippet placeholders.
-fn param_pairs(params: &[ast::Param]) -> Vec<(String, String)> {    params
+fn param_pairs(params: &[ast::Param]) -> Vec<(String, String)> {
+    params
         .iter()
         .map(|p| (p.name.clone(), p.ty.name()))
         .collect()
@@ -1757,7 +1903,9 @@ fn format_params(params: &[ast::Param]) -> String {
 fn link_extension_into(tops: &mut [Symbol], ext: &ExtensionInfo) -> bool {
     let mut linked = false;
     for top in tops.iter_mut() {
-        if matches!(top.kind, SymKind::Struct | SymKind::Class) && top.name == ext.target {
+        if matches!(top.kind, SymKind::Struct | SymKind::Class)
+            && top.name == ext.target
+        {
             top.children.extend(ext.members.iter().cloned());
             linked = true;
         }
@@ -1778,7 +1926,11 @@ fn walk_symbols(syms: &[Symbol]) -> Vec<&Symbol> {
     v
 }
 
-fn collect_containing<'a>(syms: &'a [Symbol], offset: usize, out: &mut Vec<&'a Symbol>) {
+fn collect_containing<'a>(
+    syms: &'a [Symbol],
+    offset: usize,
+    out: &mut Vec<&'a Symbol>,
+) {
     for s in syms {
         // Descend only into symbols whose *body* could contain the offset;
         // a symbol "matches" when the offset is on its name.
@@ -1832,7 +1984,11 @@ fn innermost_local<'a>(
 /// the cursor, so we don't offer a symbol in the middle of typing it.
 fn scope_covers_prefix(l: &Symbol, offset: usize) -> bool {
     match l.scope {
-        Some(scope) => scope.start <= offset && offset <= scope.end && l.name_span.end <= offset,
+        Some(scope) => {
+            scope.start <= offset
+                && offset <= scope.end
+                && l.name_span.end <= offset
+        }
         None => true,
     }
 }
@@ -1860,14 +2016,8 @@ fn to_document_symbol(source: &str, sym: &Symbol) -> DocumentSymbol {
 /// (keeps the lowest-tier — most local — entry).
 fn sort_completions(items: &mut Vec<CompletionItem>) {
     items.sort_by(|a, b| {
-        (
-            a.sort_text.as_deref().unwrap_or(""),
-            a.label.as_str(),
-        )
-            .cmp(&(
-                b.sort_text.as_deref().unwrap_or(""),
-                b.label.as_str(),
-            ))
+        (a.sort_text.as_deref().unwrap_or(""), a.label.as_str())
+            .cmp(&(b.sort_text.as_deref().unwrap_or(""), b.label.as_str()))
     });
     items.dedup_by(|a, b| a.label == b.label);
 }
@@ -1911,7 +2061,8 @@ fn symbol_item(sym: &Symbol, tier: u8, snippets: bool) -> CompletionItem {
     // they carry constructor parameters (`Rect(${1:int w})$0`). Properties
     // complete as plain names (`c.count`, never `c.count()`).
     if snippets
-        && (matches!(sym.kind, SymKind::Function | SymKind::Method) || !sym.params.is_empty())
+        && (matches!(sym.kind, SymKind::Function | SymKind::Method)
+            || !sym.params.is_empty())
     {
         item.insert_text = Some(call_snippet(&sym.name, &sym.params));
         item.insert_text_format = Some(InsertTextFormat::SNIPPET);
@@ -1923,19 +2074,41 @@ fn symbol_item(sym: &Symbol, tier: u8, snippets: bool) -> CompletionItem {
 /// template (including the closing `end`) and a short detail.
 const BLOCK_SNIPPETS: &[(&str, &str, &str)] = &[
     ("if", "if ${1:condition} do\n    $0\nend", "if … do … end"),
-    ("while", "while ${1:condition} do\n    $0\nend", "while … do … end"),
-    ("for", "for ${1:x} in ${2:iter} do\n    $0\nend", "for … in … do … end"),
+    (
+        "while",
+        "while ${1:condition} do\n    $0\nend",
+        "while … do … end",
+    ),
+    (
+        "for",
+        "for ${1:x} in ${2:iter} do\n    $0\nend",
+        "for … in … do … end",
+    ),
     ("loop", "loop do\n    $0\nend", "loop … end"),
-    ("match", "match ${1:expr} do\n    ${2:_} -> $0\nend", "match … do … end"),
+    (
+        "match",
+        "match ${1:expr} do\n    ${2:_} -> $0\nend",
+        "match … do … end",
+    ),
     ("do", "do\n    $0\nend", "do … end"),
-    ("struct", "struct ${1:Name} has\n    $0\nend", "struct … has … end"),
-    ("class", "class ${1:Name} has\n    $0\nend", "class … has … end"),
+    (
+        "struct",
+        "struct ${1:Name} has\n    $0\nend",
+        "struct … has … end",
+    ),
+    (
+        "class",
+        "class ${1:Name} has\n    $0\nend",
+        "class … has … end",
+    ),
     ("init", "init do\n    $0\nend", "init … end"),
 ];
 
 fn keyword_item(kw: &str, snippets: bool) -> CompletionItem {
     if snippets {
-        if let Some((_, snippet, detail)) = BLOCK_SNIPPETS.iter().find(|(k, _, _)| *k == kw) {
+        if let Some((_, snippet, detail)) =
+            BLOCK_SNIPPETS.iter().find(|(k, _, _)| *k == kw)
+        {
             return CompletionItem {
                 label: kw.to_string(),
                 kind: Some(CompletionItemKind::SNIPPET),
@@ -2000,13 +2173,18 @@ fn global_dot_dummy(source: &str, offset: usize) -> Option<(String, usize)> {
 /// name (or inserts) at the cursor with a dummy identifier so the buffer
 /// parses (`return p.fo|` → `return p.__hella_complete`). Returns the new
 /// source and the adjusted query offset (right after the dot).
-fn dummy_completion_source(source: &str, offset: usize) -> Option<(String, usize)> {
+fn dummy_completion_source(
+    source: &str,
+    offset: usize,
+) -> Option<(String, usize)> {
     if !source.is_char_boundary(offset) {
         return None;
     }
     let bytes = source.as_bytes();
     let mut lo = offset;
-    while lo > 0 && (bytes[lo - 1].is_ascii_alphanumeric() || bytes[lo - 1] == b'_') {
+    while lo > 0
+        && (bytes[lo - 1].is_ascii_alphanumeric() || bytes[lo - 1] == b'_')
+    {
         lo -= 1;
     }
     if lo == 0 || bytes[lo - 1] != b'.' {
@@ -2050,8 +2228,14 @@ fn balance_ends(source: &str) -> String {
 /// Import-line completion context: `import std::i|` (path segments plus a
 /// partial name) or `import std::io::{pr|` (names exported by a module).
 enum ImportCtx {
-    Path { segments: Vec<String>, prefix: String },
-    Members { module: Vec<String>, prefix: String },
+    Path {
+        segments: Vec<String>,
+        prefix: String,
+    },
+    Members {
+        module: Vec<String>,
+        prefix: String,
+    },
 }
 
 /// Detect an `import` line at the cursor. Purely line-based, so it works in
@@ -2091,8 +2275,10 @@ fn import_context(source: &str, offset: usize) -> Option<ImportCtx> {
     }
     // `import std::io::|` — a trailing separator (or nothing yet) means an
     // empty prefix inside that directory.
-    let trailing_sep =
-        rest.is_empty() || rest.ends_with("::") || rest.ends_with(' ') || rest.ends_with('\t');
+    let trailing_sep = rest.is_empty()
+        || rest.ends_with("::")
+        || rest.ends_with(' ')
+        || rest.ends_with('\t');
     let mut segments: Vec<String> = rest
         .split("::")
         .map(str::trim)
@@ -2149,8 +2335,8 @@ fn complete_import(
                     if name.starts_with('.') || !seen.insert(name.clone()) {
                         continue;
                     }
-                    let matches =
-                        needle.is_empty() || name.to_lowercase().starts_with(&needle);
+                    let matches = needle.is_empty()
+                        || name.to_lowercase().starts_with(&needle);
                     if !matches {
                         continue;
                     }
@@ -2159,7 +2345,10 @@ fn complete_import(
                         Err(_) => continue,
                     };
                     if ft.is_dir() {
-                        if matches!(name.as_str(), "target" | "out" | "node_modules") {
+                        if matches!(
+                            name.as_str(),
+                            "target" | "out" | "node_modules"
+                        ) {
                             continue;
                         }
                         // Offer every directory for navigation (`net::http`
@@ -2212,7 +2401,8 @@ fn complete_import(
             Some(items)
         }
         ImportCtx::Members { module, prefix } => {
-            let resolved = hella_compiler::modules::resolve_import(module, &bases)?;
+            let resolved =
+                hella_compiler::modules::resolve_import(module, &bases)?;
             let src = std::fs::read_to_string(&resolved).ok()?;
             let sub = Analysis::parsed(&src)?;
             let owner = Analysis::from_program(&sub);
@@ -2221,7 +2411,8 @@ fn complete_import(
                 .into_iter()
                 .filter(|s| {
                     s.kind != SymKind::Module
-                        && (needle.is_empty() || s.name.to_lowercase().starts_with(&needle))
+                        && (needle.is_empty()
+                            || s.name.to_lowercase().starts_with(&needle))
                 })
                 .map(|s| CompletionItem {
                     label: s.name.clone(),
@@ -2248,7 +2439,9 @@ fn member_receiver(source: &str, offset: usize) -> Option<(String, String)> {
     }
     // Partial member name after the dot (empty for `p.|`).
     let mut lo = offset;
-    while lo > 0 && (bytes[lo - 1].is_ascii_alphanumeric() || bytes[lo - 1] == b'_') {
+    while lo > 0
+        && (bytes[lo - 1].is_ascii_alphanumeric() || bytes[lo - 1] == b'_')
+    {
         lo -= 1;
     }
     let prefix = source[lo..offset].to_string();
@@ -2261,7 +2454,10 @@ fn member_receiver(source: &str, offset: usize) -> Option<(String, String)> {
         end -= 1;
     }
     let mut start = end;
-    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+    while start > 0
+        && (bytes[start - 1].is_ascii_alphanumeric()
+            || bytes[start - 1] == b'_')
+    {
         start -= 1;
     }
     if start == end {
@@ -2286,11 +2482,15 @@ fn ident_at(source: &str, offset: usize) -> Option<String> {
         return None;
     }
     let mut lo = offset;
-    while lo > 0 && (bytes[lo - 1].is_ascii_alphanumeric() || bytes[lo - 1] == b'_') {
+    while lo > 0
+        && (bytes[lo - 1].is_ascii_alphanumeric() || bytes[lo - 1] == b'_')
+    {
         lo -= 1;
     }
     let mut hi = offset;
-    while hi < bytes.len() && (bytes[hi].is_ascii_alphanumeric() || bytes[hi] == b'_') {
+    while hi < bytes.len()
+        && (bytes[hi].is_ascii_alphanumeric() || bytes[hi] == b'_')
+    {
         hi += 1;
     }
     if lo == hi {
@@ -2300,14 +2500,19 @@ fn ident_at(source: &str, offset: usize) -> Option<String> {
 }
 
 /// Lowercased word prefix ending at `offset`, or `None` when not in a word.
-pub fn word_prefix_for_completion(source: &str, offset: usize) -> Option<String> {
+pub fn word_prefix_for_completion(
+    source: &str,
+    offset: usize,
+) -> Option<String> {
     word_prefix_at(source, offset)
 }
 
 fn word_prefix_at(source: &str, offset: usize) -> Option<String> {
     let bytes = source.as_bytes();
     let mut lo = offset;
-    while lo > 0 && (bytes[lo - 1].is_ascii_alphanumeric() || bytes[lo - 1] == b'_') {
+    while lo > 0
+        && (bytes[lo - 1].is_ascii_alphanumeric() || bytes[lo - 1] == b'_')
+    {
         lo -= 1;
     }
     let prefix = source[lo..offset].to_lowercase();
@@ -2320,14 +2525,68 @@ fn word_prefix_at(source: &str, offset: usize) -> Option<String> {
 
 /// Hella keywords offered in completion.
 const KEYWORDS: &[&str] = &[
-    "and", "any", "assert", "bool", "break", "char", "class", "const", "continue",
-    "debug_assert", "defer", "distinct", "do", "double", "else", "end", "enum",
-    "extends", "extend", "explicit", "extern", "float", "for", "function", "from",
-    "get", "has", "if", "import", "implements", "in", "init", "initialize", "int",
-    "is", "loop", "match", "not", "null", "open", "operator", "or", "out",
-    "override", "private", "public", "ref", "return", "sealed", "set", "static",
-    "string", "struct", "super", "this", "to", "trait", "typedef", "var", "void",
-    "where", "while",
+    "and",
+    "any",
+    "assert",
+    "bool",
+    "break",
+    "char",
+    "class",
+    "const",
+    "continue",
+    "debug_assert",
+    "defer",
+    "distinct",
+    "do",
+    "double",
+    "else",
+    "end",
+    "enum",
+    "extends",
+    "extend",
+    "explicit",
+    "extern",
+    "float",
+    "for",
+    "function",
+    "from",
+    "get",
+    "has",
+    "if",
+    "import",
+    "implements",
+    "in",
+    "init",
+    "initialize",
+    "int",
+    "is",
+    "loop",
+    "match",
+    "not",
+    "null",
+    "open",
+    "operator",
+    "or",
+    "out",
+    "override",
+    "private",
+    "public",
+    "ref",
+    "return",
+    "sealed",
+    "set",
+    "static",
+    "string",
+    "struct",
+    "super",
+    "this",
+    "to",
+    "trait",
+    "typedef",
+    "var",
+    "void",
+    "where",
+    "while",
 ];
 
 #[cfg(test)]
@@ -2336,14 +2595,18 @@ mod tests {
 
     fn analyze(src: &str) -> Analysis {
         let out = hella_compiler::lexer::lex(src);
-        let prog = hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
+        let prog =
+            hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
         Analysis::from_program(&prog)
     }
 
     #[test]
     fn collects_top_level() {
-        let a = analyze("void main() do\n  int x = 1\nend\nint foo(int a) do\n  return a\nend");
-        let names: Vec<_> = a.top_symbols().iter().map(|s| s.name.as_str()).collect();
+        let a = analyze(
+            "void main() do\n  int x = 1\nend\nint foo(int a) do\n  return a\nend",
+        );
+        let names: Vec<_> =
+            a.top_symbols().iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"main"));
         assert!(names.contains(&"foo"));
     }
@@ -2439,10 +2702,15 @@ mod tests {
     fn workspace_search_finds_members() {
         let src = "struct Point has\n  int x\nend\nint distance(int a) do\n  return a\nend\nvoid main() do\nend";
         let a = analyze(src);
-        let hits: Vec<_> = a.search("point").iter().map(|s| s.name.clone()).collect();
+        let hits: Vec<_> =
+            a.search("point").iter().map(|s| s.name.clone()).collect();
         assert!(hits.contains(&"Point".to_string()), "struct: {hits:?}");
-        let field: Vec<_> = a.search("DIST").iter().map(|s| s.name.clone()).collect();
-        assert!(field.contains(&"distance".to_string()), "case-insensitive fn: {field:?}");
+        let field: Vec<_> =
+            a.search("DIST").iter().map(|s| s.name.clone()).collect();
+        assert!(
+            field.contains(&"distance".to_string()),
+            "case-insensitive fn: {field:?}"
+        );
         assert!(a.search("").is_empty());
         assert!(a.search("zzz_no_match").is_empty());
     }
@@ -2553,7 +2821,10 @@ mod tests {
         let items = Analysis::complete(src, off, true);
         let if_ = items.iter().find(|i| i.label == "if").unwrap();
         let text = if_.insert_text.as_deref().unwrap();
-        assert!(text.contains("\nend"), "block snippet must close with end: {text:?}");
+        assert!(
+            text.contains("\nend"),
+            "block snippet must close with end: {text:?}"
+        );
         assert!(text.contains("$0"), "block snippet needs final tab stop");
         assert_eq!(
             if_.insert_text_format,
@@ -2588,17 +2859,24 @@ mod tests {
         let names = labels(&items);
         assert!(names.contains(&"n"), "this. offers fields: {names:?}");
         assert!(names.contains(&"fetch"), "this. offers methods: {names:?}");
-        let src_enum = "enum S has\n  Ok\n  Err\nend\nS s() do\n  return S.\nend";
+        let src_enum =
+            "enum S has\n  Ok\n  Err\nend\nS s() do\n  return S.\nend";
         let enum_off = src_enum.find("S.").unwrap() + 2;
         let enum_items = Analysis::complete(src_enum, enum_off, false);
         let enum_names = labels(&enum_items);
-        assert!(enum_names.contains(&"Ok"), "Type. offers variants: {enum_names:?}");
+        assert!(
+            enum_names.contains(&"Ok"),
+            "Type. offers variants: {enum_names:?}"
+        );
         assert!(enum_names.contains(&"Err"));
         // unknown receiver falls back to globals
         let src2 = "void main() do\n  nosuch.\nend";
         let off2 = src2.find("nosuch.").unwrap() + 7;
         let fallback = Analysis::complete(src2, off2, false);
-        assert!(labels(&fallback).contains(&"if"), "fallback offers keywords");
+        assert!(
+            labels(&fallback).contains(&"if"),
+            "fallback offers keywords"
+        );
     }
 
     #[test]
@@ -2644,19 +2922,31 @@ mod tests {
         let dir = scratch_import_project();
         let main = dir.join("main.hll");
         // `import |` offers sibling modules and subdirs.
-        let items = Analysis::complete_with_path("import ", Some(&main), 7, false);
+        let items =
+            Analysis::complete_with_path("import ", Some(&main), 7, false);
         let names = labels(&items);
         assert!(names.contains(&"util"), "sibling module: {names:?}");
         assert!(names.contains(&"net"), "submodule dir: {names:?}");
         assert!(!names.contains(&"main"), "no self-import: {names:?}");
         // prefix filtering
-        let items = Analysis::complete_with_path("import uti", Some(&main), 10, false);
+        let items =
+            Analysis::complete_with_path("import uti", Some(&main), 10, false);
         assert_eq!(labels(&items), vec!["util"]);
         // `import net::|` descends
-        let items = Analysis::complete_with_path("import net::", Some(&main), 12, false);
+        let items = Analysis::complete_with_path(
+            "import net::",
+            Some(&main),
+            12,
+            false,
+        );
         assert_eq!(labels(&items), vec!["http"]);
         // `import net::h` filters
-        let items = Analysis::complete_with_path("import net::h", Some(&main), 13, false);
+        let items = Analysis::complete_with_path(
+            "import net::h",
+            Some(&main),
+            13,
+            false,
+        );
         assert_eq!(labels(&items), vec!["http"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2665,16 +2955,29 @@ mod tests {
     fn completion_import_replaces_only_final_component() {
         let dir = scratch_import_project();
         let main = dir.join("main.hll");
-        for (source, offset) in [("import net::h", 13), ("import net::", 12), ("import net::ht", 13)] {
-            let items = Analysis::complete_with_path(source, Some(&main), offset, false);
+        for (source, offset) in [
+            ("import net::h", 13),
+            ("import net::", 12),
+            ("import net::ht", 13),
+        ] {
+            let items = Analysis::complete_with_path(
+                source,
+                Some(&main),
+                offset,
+                false,
+            );
             let item = items.iter().find(|item| item.label == "http").unwrap();
             assert_eq!(item.insert_text.as_deref(), Some("http"));
-            let Some(lsp_types::CompletionTextEdit::Edit(edit)) = &item.text_edit else {
+            let Some(lsp_types::CompletionTextEdit::Edit(edit)) =
+                &item.text_edit
+            else {
                 panic!("import completion must specify its replacement range");
             };
             assert_eq!(edit.new_text, "http");
-            let start = crate::document::position_to_offset(source, &edit.range.start);
-            let end = crate::document::position_to_offset(source, &edit.range.end);
+            let start =
+                crate::document::position_to_offset(source, &edit.range.start);
+            let end =
+                crate::document::position_to_offset(source, &edit.range.end);
             let mut completed = source.to_string();
             completed.replace_range(start..end, &edit.new_text);
             assert_eq!(completed, "import net::http");
@@ -2688,12 +2991,14 @@ mod tests {
         let main = dir.join("main.hll");
         // `import util::{t|` offers the module's names.
         let src = "import util::{t";
-        let items = Analysis::complete_with_path(src, Some(&main), src.len(), false);
+        let items =
+            Analysis::complete_with_path(src, Some(&main), src.len(), false);
         assert_eq!(labels(&items), vec!["twice"]);
         // names from imports complete as globals in code.
         let src2 = "import util\n\nvoid main() do\n  tw\nend\n";
         let off2 = src2.find("\n  tw").unwrap() + 4;
-        let items2 = Analysis::complete_with_path(src2, Some(&main), off2, false);
+        let items2 =
+            Analysis::complete_with_path(src2, Some(&main), off2, false);
         assert!(
             labels(&items2).contains(&"twice"),
             "imported name completes: {:?}",
@@ -2707,7 +3012,8 @@ mod tests {
         .unwrap();
         let src3 = "import shapes\n\nvoid main() do\n  Circle c = has\n    r = 1\n  end\n  c.\nend\n";
         let off3 = src3.find("c.").unwrap() + 2;
-        let items3 = Analysis::complete_with_path(src3, Some(&main), off3, false);
+        let items3 =
+            Analysis::complete_with_path(src3, Some(&main), off3, false);
         assert_eq!(labels(&items3), vec!["r"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2750,7 +3056,8 @@ mod tests {
         // sanity: it parses
         let out = hella_compiler::lexer::lex(src);
         assert!(out.errors.is_empty());
-        let prog = hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
+        let prog =
+            hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
         let a = Analysis::from_program(&prog);
         assert!(a.top_symbols().iter().any(|s| s.name == "Counter"));
         let off = src.find("\n    Counter\n").unwrap() + 12;
@@ -2765,7 +3072,8 @@ mod tests {
 
     #[test]
     fn completion_destructor_body_locals() {
-        let src = "class C has\n  int n\n  ~C() do\n    int x = n\n    x\n  end\nend";
+        let src =
+            "class C has\n  int n\n  ~C() do\n    int x = n\n    x\n  end\nend";
         let off = src.rfind("\n    x").unwrap() + 6; // right after `x`
         let items = Analysis::complete(src, off, false);
         assert_eq!(labels(&items), vec!["x"], "local filtered by prefix");
@@ -2774,7 +3082,10 @@ mod tests {
         let items2 = Analysis::complete(src, off2, false);
         let names2 = labels(&items2);
         assert!(names2.contains(&"n"), "fields visible in dtor: {names2:?}");
-        assert!(!names2.contains(&"x"), "later local not visible: {names2:?}");
+        assert!(
+            !names2.contains(&"x"),
+            "later local not visible: {names2:?}"
+        );
     }
 
     #[test]
@@ -2829,21 +3140,22 @@ mod tests {
         let src2 = "class Solo has\n  int n\n  int f() do\n    return super.\n  end\nend";
         let off2 = src2.find("super.").unwrap() + 6;
         let fallback = Analysis::complete(src2, off2, false);
-        assert!(labels(&fallback).contains(&"if"), "fallback offers keywords");
+        assert!(
+            labels(&fallback).contains(&"if"),
+            "fallback offers keywords"
+        );
     }
 
     #[test]
     fn extension_members_merge_into_target_outline() {
         let src = "struct Point has\n  int x\nend\nextend Point do\n  int doubled() do\n    return this.x\n  end\nend";
         let out = hella_compiler::lexer::lex(src);
-        let prog = hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
+        let prog =
+            hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
         let a = Analysis::from_program(&prog);
-        let point = a
-            .top_symbols()
-            .iter()
-            .find(|s| s.name == "Point")
-            .unwrap();
-        let names: Vec<_> = point.children.iter().map(|c| c.name.as_str()).collect();
+        let point = a.top_symbols().iter().find(|s| s.name == "Point").unwrap();
+        let names: Vec<_> =
+            point.children.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"x"), "own fields: {names:?}");
         assert!(names.contains(&"doubled"), "extension methods: {names:?}");
         let symbols = a.document_symbols(src);
@@ -2861,10 +3173,16 @@ mod tests {
 
     #[test]
     fn trait_methods_collected() {
-        let src = "trait Drawable has\n  void draw()\n  int area(int scale)\nend";
+        let src =
+            "trait Drawable has\n  void draw()\n  int area(int scale)\nend";
         let a = analyze(src);
-        let t = a.top_symbols().iter().find(|s| s.name == "Drawable").unwrap();
-        let names: Vec<_> = t.children.iter().map(|c| c.name.as_str()).collect();
+        let t = a
+            .top_symbols()
+            .iter()
+            .find(|s| s.name == "Drawable")
+            .unwrap();
+        let names: Vec<_> =
+            t.children.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"draw"), "trait methods: {names:?}");
         assert!(names.contains(&"area"), "trait methods: {names:?}");
         // outline + hover/goto resolve through the child symbol
@@ -2888,10 +3206,7 @@ mod tests {
         let src2 = format!("{src}\n  ");
         let items = Analysis::complete(&src2, src2.len(), true);
         let area = items.iter().find(|i| i.label == "area").unwrap();
-        assert_eq!(
-            area.insert_text.as_deref(),
-            Some("area(${1:int scale})$0")
-        );
+        assert_eq!(area.insert_text.as_deref(), Some("area(${1:int scale})$0"));
     }
 
     #[test]
@@ -2901,7 +3216,6 @@ mod tests {
         let items = Analysis::complete(src, off, false);
         assert_eq!(labels(&items), vec!["nnn"]);
     }
-
 
     #[test]
     fn definition_resolves_local_and_toppub() {
@@ -2919,7 +3233,11 @@ mod tests {
         );
         // `foo()` inside bar resolves to foo's declaration name_span.
         let foo_use = src.rfind("foo()").unwrap(); // the call inside bar
-        assert_eq!(a.resolve_definition_span(src, foo_use).map(|s| &src[s.start..s.end]), Some("foo"));
+        assert_eq!(
+            a.resolve_definition_span(src, foo_use)
+                .map(|s| &src[s.start..s.end]),
+            Some("foo")
+        );
     }
 
     #[test]
@@ -2946,7 +3264,11 @@ mod tests {
             panic!("expected markup hover");
         };
         assert!(m.value.contains("own User"), "type shown, got: {}", m.value);
-        assert!(m.value.contains("heap-owned"), "ownership note, got: {}", m.value);
+        assert!(
+            m.value.contains("heap-owned"),
+            "ownership note, got: {}",
+            m.value
+        );
     }
 
     #[test]
@@ -2956,13 +3278,10 @@ mod tests {
         let src = std::fs::read_to_string(&io).unwrap();
         let out = hella_compiler::lexer::lex(&src);
         assert!(out.errors.is_empty());
-        let prog = hella_compiler::parse::parse(out.tokens, src.clone()).unwrap();
+        let prog =
+            hella_compiler::parse::parse(out.tokens, src.clone()).unwrap();
         let a = Analysis::from_program_with_source(&prog, &src);
-        let print = a
-            .top_symbols()
-            .iter()
-            .find(|s| s.name == "print")
-            .unwrap();
+        let print = a.top_symbols().iter().find(|s| s.name == "print").unwrap();
         assert_eq!(
             print.doc.as_deref(),
             Some("Prints `s` to stdout with no trailing newline.")
@@ -2994,7 +3313,8 @@ mod tests {
         );
         let src = "import std::io\n\nvoid main() do\n  print(\"x\")\nend\n";
         let out = hella_compiler::lexer::lex(src);
-        let prog = hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
+        let prog =
+            hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
         let mut a = Analysis::from_program_with_source(&prog, src);
         a.load_imports(&entry, &prog);
         let use_off = src.find("print(\"x\")").unwrap();
@@ -3004,7 +3324,8 @@ mod tests {
 
     fn analyze_with_docs(src: &str) -> Analysis {
         let out = hella_compiler::lexer::lex(src);
-        let prog = hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
+        let prog =
+            hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
         Analysis::from_program_with_source(&prog, src)
     }
 
@@ -3031,7 +3352,10 @@ mod tests {
         let a = analyze_with_docs(src);
         let use_off = src.find("print(\"x\")").unwrap();
         let text = hover_text(&a, src, use_off);
-        assert!(!text.contains("Prints hello."), "normal // hidden, got: {text}");
+        assert!(
+            !text.contains("Prints hello."),
+            "normal // hidden, got: {text}"
+        );
     }
 
     #[test]
@@ -3046,12 +3370,16 @@ mod tests {
         let src = "import util\n\nvoid main() do\n  twice(1)\nend\n";
         std::fs::write(&main, src).unwrap();
         let out = hella_compiler::lexer::lex(src);
-        let prog = hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
+        let prog =
+            hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
         let mut a = Analysis::from_program_with_source(&prog, src);
         a.load_imports(&main, &prog);
         let use_off = src.find("twice(1)").unwrap();
         let text = hover_text(&a, src, use_off);
-        assert!(text.contains("Doubles `x`."), "imported doc shown, got: {text}");
+        assert!(
+            text.contains("Doubles `x`."),
+            "imported doc shown, got: {text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

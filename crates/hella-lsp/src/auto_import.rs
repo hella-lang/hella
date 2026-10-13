@@ -38,7 +38,8 @@ pub fn import_bases(
     } else if let Some(first) = workspace_roots.first() {
         // No open document path (untitled buffer) but we have a workspace:
         // still surface stdlib + project root via a synthetic entry.
-        for b in hella_compiler::modules::search_bases(&first.join("main.hll")) {
+        for b in hella_compiler::modules::search_bases(&first.join("main.hll"))
+        {
             push(b);
         }
     } else {
@@ -147,7 +148,9 @@ pub fn collect_hll_files(bases: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
                     continue;
                 }
                 stack.push((base.clone(), path));
-            } else if ft.is_file() && path.extension().is_some_and(|e| e == "hll") {
+            } else if ft.is_file()
+                && path.extension().is_some_and(|e| e == "hll")
+            {
                 if seen.insert(path.clone()) {
                     out.push((base.clone(), path));
                 } else {
@@ -174,22 +177,60 @@ fn top_names(src: &str) -> HashSet<String> {
     let mut names = HashSet::new();
     for item in &prog.items {
         match item {
-            Item::Function(f) => { names.insert(f.name.clone()); }
-            Item::Struct(s) => { names.insert(s.name.clone()); }
-            Item::Class(c) => { names.insert(c.name.clone()); }
-            Item::Enum(e) => { names.insert(e.name.clone()); }
-            Item::Trait(t) => { names.insert(t.name.clone()); }
-            Item::Typedef(t) => { names.insert(t.name.clone()); }
-            Item::Distinct(d) => { names.insert(d.name.clone()); }
-            Item::Const(c) => { names.insert(c.name.clone()); }
-            Item::Var(v) => { names.insert(v.name.clone()); }
+            Item::Function(f) => {
+                names.insert(f.name.clone());
+            }
+            Item::Struct(s) => {
+                names.insert(s.name.clone());
+            }
+            Item::Class(c) => {
+                names.insert(c.name.clone());
+            }
+            Item::Enum(e) => {
+                names.insert(e.name.clone());
+            }
+            Item::Trait(t) => {
+                names.insert(t.name.clone());
+            }
+            Item::Typedef(t) => {
+                names.insert(t.name.clone());
+            }
+            Item::Distinct(d) => {
+                names.insert(d.name.clone());
+            }
+            Item::Const(c) => {
+                names.insert(c.name.clone());
+            }
+            Item::Var(v) => {
+                names.insert(v.name.clone());
+            }
             Item::Extern(e) => {
                 for m in &e.members {
                     match m {
-                        hella_compiler::ast::ExternMember::Function { name, .. } => { names.insert(name.clone()); }
-                        hella_compiler::ast::ExternMember::Struct { name, .. } => { names.insert(name.clone()); }
-                        hella_compiler::ast::ExternMember::Enum { name, .. } => { names.insert(name.clone()); }
-                        hella_compiler::ast::ExternMember::Const { name, .. } => { names.insert(name.clone()); }
+                        hella_compiler::ast::ExternMember::Function {
+                            name,
+                            ..
+                        } => {
+                            names.insert(name.clone());
+                        }
+                        hella_compiler::ast::ExternMember::Struct {
+                            name,
+                            ..
+                        } => {
+                            names.insert(name.clone());
+                        }
+                        hella_compiler::ast::ExternMember::Enum {
+                            name,
+                            ..
+                        } => {
+                            names.insert(name.clone());
+                        }
+                        hella_compiler::ast::ExternMember::Const {
+                            name,
+                            ..
+                        } => {
+                            names.insert(name.clone());
+                        }
                     }
                 }
             }
@@ -290,7 +331,8 @@ mod tests {
     use std::path::PathBuf;
 
     fn tmp_root(name: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("hella-auto-import-{name}-{}", std::process::id()));
+        let p = std::env::temp_dir()
+            .join(format!("hella-auto-import-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
@@ -299,17 +341,38 @@ mod tests {
     #[test]
     fn import_path_derivation() {
         let base = PathBuf::from("/proj");
-        assert_eq!(import_path_for(&base, &PathBuf::from("/proj/utils.hll")).unwrap(), "utils");
-        assert_eq!(import_path_for(&base, &PathBuf::from("/proj/net/http.hll")).unwrap(), "net::http");
-        assert_eq!(import_path_for(&base, &PathBuf::from("/proj/net/mod.hll")).unwrap(), "net");
-        assert_eq!(import_path_for(&base, &PathBuf::from("/proj/main.hll")), None);
-        assert_eq!(import_path_for(&base, &PathBuf::from("/other/utils.hll")), None);
+        assert_eq!(
+            import_path_for(&base, &PathBuf::from("/proj/utils.hll")).unwrap(),
+            "utils"
+        );
+        assert_eq!(
+            import_path_for(&base, &PathBuf::from("/proj/net/http.hll"))
+                .unwrap(),
+            "net::http"
+        );
+        assert_eq!(
+            import_path_for(&base, &PathBuf::from("/proj/net/mod.hll"))
+                .unwrap(),
+            "net"
+        );
+        assert_eq!(
+            import_path_for(&base, &PathBuf::from("/proj/main.hll")),
+            None
+        );
+        assert_eq!(
+            import_path_for(&base, &PathBuf::from("/other/utils.hll")),
+            None
+        );
     }
 
     #[test]
     fn finds_provider_in_workspace() {
         let root = tmp_root("find");
-        std::fs::write(root.join("utils.hll"), "int helper(int x) do\n  return x\nend\n").unwrap();
+        std::fs::write(
+            root.join("utils.hll"),
+            "int helper(int x) do\n  return x\nend\n",
+        )
+        .unwrap();
         std::fs::write(root.join("main.hll"), "void main() do\nend\n").unwrap();
         let imp = root.join("main.hll");
         let got = find_import_for_symbol("helper", Some(&imp), &[root.clone()]);
@@ -324,7 +387,11 @@ mod tests {
         let root = tmp_root("nested");
         let std = root.join("stdlib");
         std::fs::create_dir_all(std.join("std").join("terminal")).unwrap();
-        std::fs::write(std.join("std").join("io.hll"), "void println(string s) do\nend\n").unwrap();
+        std::fs::write(
+            std.join("std").join("io.hll"),
+            "void println(string s) do\nend\n",
+        )
+        .unwrap();
         std::fs::write(
             std.join("std").join("terminal").join("ansi.hll"),
             "const string BOLD = \"x\"\n",
@@ -337,17 +404,32 @@ mod tests {
         let got = find_import_for_symbol("BOLD", Some(&imp), &[std.clone()]);
         assert_eq!(got.as_deref(), Some("std::terminal::ansi"));
         let existing = HashSet::new();
-        let got = candidates_with_prefix("print", Some(&imp), &[std.clone()], &existing);
-        assert!(got.iter().any(|(n, i)| n == "println" && i == "std::io"), "got {got:?}");
+        let got = candidates_with_prefix(
+            "print",
+            Some(&imp),
+            &[std.clone()],
+            &existing,
+        );
+        assert!(
+            got.iter().any(|(n, i)| n == "println" && i == "std::io"),
+            "got {got:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn no_self_import() {
         let root = tmp_root("self");
-        std::fs::write(root.join("main.hll"), "int helper(int x) do\n  return x\nend\nvoid main() do\nend\n").unwrap();
+        std::fs::write(
+            root.join("main.hll"),
+            "int helper(int x) do\n  return x\nend\nvoid main() do\nend\n",
+        )
+        .unwrap();
         let imp = root.join("main.hll");
-        assert_eq!(find_import_for_symbol("helper", Some(&imp), &[root.clone()]), None);
+        assert_eq!(
+            find_import_for_symbol("helper", Some(&imp), &[root.clone()]),
+            None
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -355,12 +437,20 @@ mod tests {
     fn prefix_candidates() {
         let root = tmp_root("prefix");
         std::fs::write(root.join("alpha.hll"), "int alpha_one() do\n  return 1\nend\nint alpha_two() do\n  return 2\nend\n").unwrap();
-        std::fs::write(root.join("beta.hll"), "int beta_one() do\n  return 1\nend\n").unwrap();
+        std::fs::write(
+            root.join("beta.hll"),
+            "int beta_one() do\n  return 1\nend\n",
+        )
+        .unwrap();
         let existing = HashSet::new();
-        let got = candidates_with_prefix("alp", None, &[root.clone()], &existing);
+        let got =
+            candidates_with_prefix("alp", None, &[root.clone()], &existing);
         assert!(got.iter().any(|(n, _)| n == "alpha_one"), "got {got:?}");
         assert!(got.iter().any(|(n, _)| n == "alpha_two"), "got {got:?}");
-        assert!(!got.iter().any(|(n, _)| n == "beta_one"), "prefix filtered {got:?}");
+        assert!(
+            !got.iter().any(|(n, _)| n == "beta_one"),
+            "prefix filtered {got:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

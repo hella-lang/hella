@@ -4,7 +4,9 @@
 //! works) plus symbol lookup for parameter lists. The server builds the
 //! most tolerant `Analysis` it can; this module handles the rest.
 
-use lsp_types::{ParameterInformation, ParameterLabel, SignatureHelp, SignatureInformation};
+use lsp_types::{
+    ParameterInformation, ParameterLabel, SignatureHelp, SignatureInformation,
+};
 
 use crate::analysis::Analysis;
 
@@ -140,14 +142,21 @@ pub fn enclosing_call(text: &str, offset: usize) -> Option<CallContext> {
     if frame.name.is_empty() {
         return None;
     }
-    Some(CallContext { name: frame.name, active: frame.commas })
+    Some(CallContext {
+        name: frame.name,
+        active: frame.commas,
+    })
 }
 
 /// Identifier (or `obj.method` tail) immediately before byte `open`.
 fn ident_before(bytes: &[u8], open: usize) -> String {
     let mut end = open;
     // Skip whitespace between the name and `(`.
-    while end > 0 && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t' || bytes[end - 1] == b'\n') {
+    while end > 0
+        && (bytes[end - 1] == b' '
+            || bytes[end - 1] == b'\t'
+            || bytes[end - 1] == b'\n')
+    {
         end -= 1;
     }
     let mut start = end;
@@ -169,7 +178,11 @@ fn is_ident(b: u8) -> bool {
 /// Build `SignatureHelp` at `offset`: text-scan the call, look up the
 /// callee, clamp the active parameter. `None` outside calls or for
 /// unknown callees.
-pub fn help(analysis: &Analysis, text: &str, offset: usize) -> Option<SignatureHelp> {
+pub fn help(
+    analysis: &Analysis,
+    text: &str,
+    offset: usize,
+) -> Option<SignatureHelp> {
     let ctx = enclosing_call(text, offset)?;
     let sym = analysis.lookup_callable(&ctx.name)?;
     let params: Vec<ParameterInformation> = sym
@@ -209,7 +222,8 @@ mod tests {
 
     fn analysis_of(src: &str) -> Analysis {
         let out = hella_compiler::lexer::lex(src);
-        let prog = hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
+        let prog =
+            hella_compiler::parse::parse(out.tokens, src.to_string()).unwrap();
         Analysis::from_program(&prog)
     }
 
@@ -243,7 +257,9 @@ mod tests {
     fn mid_typing_unclosed_call_works() {
         // No closing paren / no `end` — pure text scan still finds it.
         let src = "int add(int a, int b) do\n    return a + b\nend\n\nvoid main() do\n    int s = add(1, ";
-        let a = analysis_of("int add(int a, int b) do\n    return a + b\nend\n\nvoid main() do\nend\n");
+        let a = analysis_of(
+            "int add(int a, int b) do\n    return a + b\nend\n\nvoid main() do\nend\n",
+        );
         let h = help(&a, src, src.len()).expect("help");
         assert_eq!(h.active_parameter, Some(1));
     }

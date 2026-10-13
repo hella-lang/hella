@@ -12,8 +12,8 @@
 //! stays silent.
 
 use lsp_server::{Notification, Request, RequestId};
-use lsp_types::notification::Progress as ProgressNotif;
 use lsp_types::notification::Notification as _;
+use lsp_types::notification::Progress as ProgressNotif;
 use lsp_types::request::Request as _;
 use lsp_types::request::WorkDoneProgressCreate;
 use lsp_types::{
@@ -53,8 +53,10 @@ pub fn create_request(id: RequestId) -> Request {
     Request {
         id,
         method: WorkDoneProgressCreate::METHOD.to_string(),
-        params: serde_json::to_value(WorkDoneProgressCreateParams { token: token() })
-            .expect("progress create params serialize"),
+        params: serde_json::to_value(WorkDoneProgressCreateParams {
+            token: token(),
+        })
+        .expect("progress create params serialize"),
     }
 }
 
@@ -65,12 +67,17 @@ fn progress_notification(value: WorkDoneProgress) -> Notification {
     };
     Notification {
         method: ProgressNotif::METHOD.to_string(),
-        params: serde_json::to_value(params).expect("progress params serialize"),
+        params: serde_json::to_value(params)
+            .expect("progress params serialize"),
     }
 }
 
 /// `$/progress` `Begin`: shows the indicator with `title`.
-pub fn begin(title: &str, message: Option<&str>, percentage: Option<u32>) -> Notification {
+pub fn begin(
+    title: &str,
+    message: Option<&str>,
+    percentage: Option<u32>,
+) -> Notification {
     progress_notification(WorkDoneProgress::Begin(WorkDoneProgressBegin {
         title: title.to_string(),
         cancellable: Some(false),
@@ -130,7 +137,9 @@ pub fn count_hella_files(roots: &[std::path::PathBuf]) -> usize {
                     continue;
                 }
                 stack.push(path);
-            } else if ft.is_file() && path.extension().is_some_and(|e| e == "hll") {
+            } else if ft.is_file()
+                && path.extension().is_some_and(|e| e == "hll")
+            {
                 count += 1;
             }
         }
@@ -144,7 +153,8 @@ mod tests {
 
     #[test]
     fn create_request_shape() {
-        let req = create_request(RequestId::from("hella/progress/1".to_string()));
+        let req =
+            create_request(RequestId::from("hella/progress/1".to_string()));
         assert_eq!(req.method, "window/workDoneProgress/create");
         assert_eq!(
             req.params,
@@ -204,10 +214,8 @@ mod tests {
 
     #[test]
     fn count_hella_files_finds_nested_sources() {
-        let root = std::env::temp_dir().join(format!(
-            "hella-lsp-progress-test-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir()
+            .join(format!("hella-lsp-progress-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src/nested")).unwrap();
         std::fs::create_dir_all(root.join(".git")).unwrap();
@@ -220,10 +228,7 @@ mod tests {
 
         assert_eq!(count_hella_files(&[root.clone()]), 2);
         assert_eq!(count_hella_files(&[]), 0);
-        assert_eq!(
-            count_hella_files(&[root.join("does-not-exist")]),
-            0
-        );
+        assert_eq!(count_hella_files(&[root.join("does-not-exist")]), 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

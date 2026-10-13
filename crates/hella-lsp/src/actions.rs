@@ -11,8 +11,8 @@
 use std::collections::HashMap;
 
 use lsp_types::{
-    CodeAction, CodeActionKind, CodeActionOrCommand, Diagnostic, Position, Range, TextEdit, Uri,
-    WorkspaceEdit,
+    CodeAction, CodeActionKind, CodeActionOrCommand, Diagnostic, Position,
+    Range, TextEdit, Uri, WorkspaceEdit,
 };
 
 use crate::document::{offset_to_position, position_to_offset};
@@ -49,7 +49,9 @@ pub fn code_actions_with_imports(
             out.push(CodeActionOrCommand::CodeAction(a));
         } else if let Some(a) = insert_end(uri, text, diag) {
             out.push(CodeActionOrCommand::CodeAction(a));
-        } else if let Some(a) = auto_import(uri, text, diag, importer, workspace_roots) {
+        } else if let Some(a) =
+            auto_import(uri, text, diag, importer, workspace_roots)
+        {
             out.push(CodeActionOrCommand::CodeAction(a));
         }
     }
@@ -87,7 +89,10 @@ fn quickfix(
     let mut changes = HashMap::new();
     changes.insert(
         uri.clone(),
-        vec![TextEdit { range: edit_range, new_text }],
+        vec![TextEdit {
+            range: edit_range,
+            new_text,
+        }],
     );
     CodeAction {
         title,
@@ -105,7 +110,11 @@ fn quickfix(
 }
 
 /// `cannot resolve import \`foo::bar\`` → delete the `import …` line.
-fn remove_import(uri: &Uri, text: &str, diag: &Diagnostic) -> Option<CodeAction> {
+fn remove_import(
+    uri: &Uri,
+    text: &str,
+    diag: &Diagnostic,
+) -> Option<CodeAction> {
     let path = diag.message.strip_prefix("cannot resolve import `")?;
     let path = path.split('`').next()?;
     // Base path without selective suffix (`a::{x}` imports `a`).
@@ -113,15 +122,23 @@ fn remove_import(uri: &Uri, text: &str, diag: &Diagnostic) -> Option<CodeAction>
     // Import statements use `::` separators; source lines match verbatim.
     let line_idx = text.lines().position(|l| {
         let t = l.trim();
-        t == format!("import {base}") || t.starts_with(&format!("import {base}::")) || t == format!("import {path}")
+        t == format!("import {base}")
+            || t.starts_with(&format!("import {base}::"))
+            || t == format!("import {path}")
     })?;
     Some(quickfix(
         uri,
         format!("Remove import `{path}`"),
         diag,
         Range {
-            start: Position { line: line_idx as u32, character: 0 },
-            end: Position { line: line_idx as u32 + 1, character: 0 },
+            start: Position {
+                line: line_idx as u32,
+                character: 0,
+            },
+            end: Position {
+                line: line_idx as u32 + 1,
+                character: 0,
+            },
         },
         String::new(),
     ))
@@ -150,7 +167,10 @@ fn assign_own(uri: &Uri, text: &str, diag: &Diagnostic) -> Option<CodeAction> {
         uri,
         format!("Assign to new `own` variable `{var}`"),
         diag,
-        Range { start: offset_to_position(text, start), end: offset_to_position(text, start) },
+        Range {
+            start: offset_to_position(text, start),
+            end: offset_to_position(text, start),
+        },
         format!("own {ty} {var} = "),
     ))
 }
@@ -164,7 +184,10 @@ fn insert_end(uri: &Uri, text: &str, diag: &Diagnostic) -> Option<CodeAction> {
         uri,
         "Insert missing `end`".to_string(),
         diag,
-        Range { start: diag.range.start, end: diag.range.start },
+        Range {
+            start: diag.range.start,
+            end: diag.range.start,
+        },
         "end\n".to_string(),
     ))
 }
@@ -178,12 +201,22 @@ fn auto_import(
     workspace_roots: &[std::path::PathBuf],
 ) -> Option<CodeAction> {
     let name = extract_missing_symbol(&diag.message)?;
-    if text.contains(&format!("import {name}")) || text.contains(&format!("::{name}")) {
+    if text.contains(&format!("import {name}"))
+        || text.contains(&format!("::{name}"))
+    {
         // Already imported (selective or qualified) — no fix.
         return None;
     }
-    let import = crate::auto_import::find_import_for_symbol(&name, importer, workspace_roots)?;
-    if text.lines().any(|l| l.trim() == format!("import {import}") || l.trim().starts_with(&format!("import {import}::")) || l.trim().starts_with(&format!("import {import} "))) {
+    let import = crate::auto_import::find_import_for_symbol(
+        &name,
+        importer,
+        workspace_roots,
+    )?;
+    if text.lines().any(|l| {
+        l.trim() == format!("import {import}")
+            || l.trim().starts_with(&format!("import {import}::"))
+            || l.trim().starts_with(&format!("import {import} "))
+    }) {
         return None;
     }
     let insert_at = import_insertion_line(text);
@@ -192,18 +225,29 @@ fn auto_import(
         format!("Add import `{import}` for `{name}`"),
         diag,
         Range {
-            start: Position { line: insert_at, character: 0 },
-            end: Position { line: insert_at, character: 0 },
+            start: Position {
+                line: insert_at,
+                character: 0,
+            },
+            end: Position {
+                line: insert_at,
+                character: 0,
+            },
         },
         format!("import {import}\n"),
     ))
 }
 
 fn extract_missing_symbol(msg: &str) -> Option<String> {
-    for prefix in ["unknown type `", "undefined function `", "undefined variable `"] {
+    for prefix in [
+        "unknown type `",
+        "undefined function `",
+        "undefined variable `",
+    ] {
         if let Some(rest) = msg.strip_prefix(prefix) {
             let name = rest.split('`').next()?;
-            if !name.is_empty() && crate::analysis::Analysis::valid_ident(name) {
+            if !name.is_empty() && crate::analysis::Analysis::valid_ident(name)
+            {
                 return Some(name.to_string());
             }
         }
@@ -248,7 +292,10 @@ mod tests {
 
     fn whole(text: &str) -> Range {
         Range {
-            start: Position { line: 0, character: 0 },
+            start: Position {
+                line: 0,
+                character: 0,
+            },
             end: offset_to_position(text, text.len()),
         }
     }
@@ -256,7 +303,12 @@ mod tests {
     #[test]
     fn removes_unresolvable_import() {
         let text = "import nope::missing\n\nvoid main() do\nend\n";
-        let d = diag(text, 0, 7, "cannot resolve import `nope::missing` (looked in /tmp)");
+        let d = diag(
+            text,
+            0,
+            7,
+            "cannot resolve import `nope::missing` (looked in /tmp)",
+        );
         let actions = code_actions(&uri(), text, &whole(text), &[d]);
         assert_eq!(actions.len(), 1);
         let CodeActionOrCommand::CodeAction(a) = &actions[0] else {
@@ -266,12 +318,16 @@ mod tests {
         let edits = &a.edit.as_ref().unwrap().changes.as_ref().unwrap()[&uri()];
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].new_text, "");
-        assert_eq!((edits[0].range.start.line, edits[0].range.end.line), (0, 1));
+        assert_eq!(
+            (edits[0].range.start.line, edits[0].range.end.line),
+            (0, 1)
+        );
     }
 
     #[test]
     fn assigns_bare_new_to_own() {
-        let text = "open class Cat has\nend\nvoid main() do\n  new Cat()\nend\n";
+        let text =
+            "open class Cat has\nend\nvoid main() do\n  new Cat()\nend\n";
         let start = text.find("new Cat()").unwrap();
         let d = diag(
             text,
@@ -292,7 +348,12 @@ mod tests {
     #[test]
     fn inserts_missing_end() {
         let text = "void main() do\n  int x = 1\n";
-        let d = diag(text, text.len(), text.len(), "expected `end` to close block");
+        let d = diag(
+            text,
+            text.len(),
+            text.len(),
+            "expected `end` to close block",
+        );
         let actions = code_actions(&uri(), text, &whole(text), &[d]);
         assert_eq!(actions.len(), 1);
         let CodeActionOrCommand::CodeAction(a) = &actions[0] else {
@@ -303,23 +364,45 @@ mod tests {
 
     #[test]
     fn auto_import_for_unknown_type() {
-        let root = std::env::temp_dir().join(format!("hella-actions-auto-{}", std::process::id()));
+        let root = std::env::temp_dir()
+            .join(format!("hella-actions-auto-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("mymod.hll"), "int helper(int x) do\n  return x\nend\n").unwrap();
+        std::fs::write(
+            root.join("mymod.hll"),
+            "int helper(int x) do\n  return x\nend\n",
+        )
+        .unwrap();
         let text = "void main() do\n  int y = helper(1)\nend\n";
-        let d = diag(text, text.find("helper").unwrap(), text.find("helper").unwrap() + 6, "undefined function `helper`");
-        let actions = code_actions_with_imports(&uri(), text, &whole(text), &[d], Some(&root.join("main.hll")), &[root.clone()]);
-        assert!(actions.iter().any(|a| match a {
-            CodeActionOrCommand::CodeAction(c) => c.title.contains("mymod") && c.title.contains("helper"),
-            _ => false
-        }), "expected auto-import: {actions:?}");
+        let d = diag(
+            text,
+            text.find("helper").unwrap(),
+            text.find("helper").unwrap() + 6,
+            "undefined function `helper`",
+        );
+        let actions = code_actions_with_imports(
+            &uri(),
+            text,
+            &whole(text),
+            &[d],
+            Some(&root.join("main.hll")),
+            &[root.clone()],
+        );
+        assert!(
+            actions.iter().any(|a| match a {
+                CodeActionOrCommand::CodeAction(c) =>
+                    c.title.contains("mymod") && c.title.contains("helper"),
+                _ => false,
+            }),
+            "expected auto-import: {actions:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn cursor_anywhere_on_line_triggers_own_fix() {
-        let text = "open class Cat has\nend\nvoid main() do\n  new Cat()\nend\n";
+        let text =
+            "open class Cat has\nend\nvoid main() do\n  new Cat()\nend\n";
         let start = text.find("new Cat()").unwrap();
         let d = diag(
             text,
@@ -330,8 +413,14 @@ mod tests {
         // Zero-width cursor at column 0 (indentation, before the diagnostic
         // span): editors send this when `<leader>ca` is pressed on the line.
         let cursor = Range {
-            start: Position { line: 3, character: 0 },
-            end: Position { line: 3, character: 0 },
+            start: Position {
+                line: 3,
+                character: 0,
+            },
+            end: Position {
+                line: 3,
+                character: 0,
+            },
         };
         let actions = code_actions(&uri(), text, &cursor, &[d]);
         assert_eq!(actions.len(), 1);
@@ -344,8 +433,14 @@ mod tests {
         // Diagnostics outside the requested range are ignored.
         let d = diag(text, 0, 4, "expected `end` to close block");
         let far = Range {
-            start: Position { line: 2, character: 0 },
-            end: Position { line: 2, character: 1 },
+            start: Position {
+                line: 2,
+                character: 0,
+            },
+            end: Position {
+                line: 2,
+                character: 1,
+            },
         };
         assert!(code_actions(&uri(), text, &far, &[d]).is_empty());
     }

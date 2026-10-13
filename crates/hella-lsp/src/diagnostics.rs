@@ -39,7 +39,8 @@ pub fn diagnostics(source: &str, path: Option<&Path>) -> Vec<Diagnostic> {
         ));
     }
     // Parse (best-effort even with lex errors, so we catch more).
-    let parse = hella_compiler::parse::parse(lexed.tokens.clone(), source.to_string());
+    let parse =
+        hella_compiler::parse::parse(lexed.tokens.clone(), source.to_string());
     let parsed = match parse {
         Ok(p) => Some(p),
         Err(e) => {
@@ -81,7 +82,12 @@ pub fn diagnostics(source: &str, path: Option<&Path>) -> Vec<Diagnostic> {
         // failures belong to the imported file and appear when it is opened.
         if let Some(open) = path {
             for e in import_errors.iter().filter(|e| e.file.as_path() == open) {
-                out.push(diag(source, e.span.start, e.span.end, e.message.clone()));
+                out.push(diag(
+                    source,
+                    e.span.start,
+                    e.span.end,
+                    e.message.clone(),
+                ));
             }
         }
         for e in sema::check_with_options_and_imports(
@@ -154,11 +160,24 @@ mod tests {
         assert_eq!(d.code, Some(NumberOrString::String("H001".into())));
         assert_eq!(d.source.as_deref(), Some("hella-lsp"));
         let line = src.lines().nth(4).unwrap();
-        let column = line[..line.rfind("ref (x)").unwrap()].encode_utf16().count() as u32;
-        assert_eq!(d.range, lsp_types::Range::new(
-            lsp_types::Position::new(4, column),
-            lsp_types::Position::new(4, column + 7)));
-        assert!(diagnostics(&src.replace("ref (x)", "ref y").replace("int x = 0", "int x = 0\nint y = 0"), None).is_empty());
+        let column = line[..line.rfind("ref (x)").unwrap()]
+            .encode_utf16()
+            .count() as u32;
+        assert_eq!(
+            d.range,
+            lsp_types::Range::new(
+                lsp_types::Position::new(4, column),
+                lsp_types::Position::new(4, column + 7)
+            )
+        );
+        assert!(
+            diagnostics(
+                &src.replace("ref (x)", "ref y")
+                    .replace("int x = 0", "int x = 0\nint y = 0"),
+                None
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -168,18 +187,27 @@ mod tests {
         let library = "void pair(ref int a, ref int b) do\nend\nvoid exercise() do\nint x = 0\npair(ref x, ref x)\nend\n";
         std::fs::write(&util, library).unwrap();
         let main = dir.join("main.hll");
-        let src = "import util\nvoid main() do\nint y = 0\npair(ref y, ref y)\nend\n";
+        let src =
+            "import util\nvoid main() do\nint y = 0\npair(ref y, ref y)\nend\n";
         std::fs::write(&main, src).unwrap();
         let diags = diagnostics(src, Some(&main));
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(diags[0].severity, Some(DiagnosticSeverity::WARNING));
-        assert_eq!(diags[0].range, lsp_types::Range::new(
-            lsp_types::Position::new(3, 12), lsp_types::Position::new(3, 17)));
+        assert_eq!(
+            diags[0].range,
+            lsp_types::Range::new(
+                lsp_types::Position::new(3, 12),
+                lsp_types::Position::new(3, 17)
+            )
+        );
         let clean = "import util\nvoid main() do\nend\n";
         assert!(diagnostics(clean, Some(&main)).is_empty());
         let imported_diags = diagnostics(library, Some(&util));
         assert_eq!(imported_diags.len(), 1, "{imported_diags:?}");
-        assert_eq!(imported_diags[0].code, Some(NumberOrString::String("H001".into())));
+        assert_eq!(
+            imported_diags[0].code,
+            Some(NumberOrString::String("H001".into()))
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -187,21 +215,32 @@ mod tests {
     fn ownership_interpolation_error_has_exact_utf16_range() {
         for newline in ["\n", "\r\n"] {
             let src = [
-                "struct Pet has", "    string name", "end", "void main() do",
-                "    own Pet a = new Pet(\"x\")", "    delete a",
-                r#"    string s = "\n😀 {  a.name }""#, "end",
-            ].join(newline);
+                "struct Pet has",
+                "    string name",
+                "end",
+                "void main() do",
+                "    own Pet a = new Pet(\"x\")",
+                "    delete a",
+                r#"    string s = "\n😀 {  a.name }""#,
+                "end",
+            ]
+            .join(newline);
             let diags = diagnostics(&src, None);
             assert_eq!(diags.len(), 1, "{diags:?}");
             let diagnostic = &diags[0];
             assert_eq!(diagnostic.severity, Some(DiagnosticSeverity::ERROR));
             assert_eq!(diagnostic.message, "use of moved or deleted value `a`");
             let line = src.lines().nth(6).unwrap();
-            let column = line[..line.find("a.name").unwrap()].encode_utf16().count() as u32;
-            assert_eq!(diagnostic.range, lsp_types::Range::new(
-                lsp_types::Position::new(6, column),
-                lsp_types::Position::new(6, column + 1),
-            ));
+            let column = line[..line.find("a.name").unwrap()]
+                .encode_utf16()
+                .count() as u32;
+            assert_eq!(
+                diagnostic.range,
+                lsp_types::Range::new(
+                    lsp_types::Position::new(6, column),
+                    lsp_types::Position::new(6, column + 1),
+                )
+            );
         }
     }
 
@@ -226,7 +265,9 @@ mod tests {
         let src = std::fs::read_to_string(&main).unwrap();
         let diags = diagnostics(&src, Some(&main));
         assert!(
-            messages(&diags).iter().any(|m| m.contains("missing `main`")),
+            messages(&diags)
+                .iter()
+                .any(|m| m.contains("missing `main`")),
             "expected missing-main diagnostic: {diags:?}"
         );
     }
@@ -287,17 +328,16 @@ mod tests {
     fn dependency_import_resolves_through_lockfile() {
         // Hermetic home: the resolver must find the locked slot here and
         // nowhere else (no network, no real ~/.hella involvement).
-        let home = std::env::temp_dir().join(format!(
-            "hella-lsp-dep-home-{}",
-            std::process::id()
-        ));
+        let home = std::env::temp_dir()
+            .join(format!("hella-lsp-dep-home-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let _guard = EnvGuard::set(
             "HELLA_HOME",
             home.to_str().expect("temp dir must be UTF-8"),
         );
         let git = "example.com/test/lib";
-        std::fs::create_dir_all(home.join("pkg").join(git).join("1.0.0")).unwrap();
+        std::fs::create_dir_all(home.join("pkg").join(git).join("1.0.0"))
+            .unwrap();
         std::fs::write(
             home.join("pkg").join(git).join("1.0.0/mylib.hll"),
             "int answer() do\n    return 42\nend\n",

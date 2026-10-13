@@ -37,8 +37,10 @@ pub fn format_range(text: &str, range: &Range) -> Option<Vec<TextEdit>> {
     let fmt_lines: Vec<&str> = formatted.lines().collect();
     // Fast path: same line count — replace exactly the requested lines.
     if orig_lines.len() == fmt_lines.len() {
-        let start = (range.start.line as usize).min(orig_lines.len().saturating_sub(1));
-        let end = (range.end.line as usize).min(orig_lines.len().saturating_sub(1));
+        let start =
+            (range.start.line as usize).min(orig_lines.len().saturating_sub(1));
+        let end =
+            (range.end.line as usize).min(orig_lines.len().saturating_sub(1));
         let (start, end) = (start.min(end), start.max(end));
         let wanted: Vec<&str> = fmt_lines[start..=end].to_vec();
         let current: Vec<&str> = orig_lines[start..=end].to_vec();
@@ -47,10 +49,16 @@ pub fn format_range(text: &str, range: &Range) -> Option<Vec<TextEdit>> {
         }
         return Some(vec![TextEdit {
             range: Range {
-                start: Position { line: start as u32, character: 0 },
+                start: Position {
+                    line: start as u32,
+                    character: 0,
+                },
                 end: Position {
                     line: end as u32,
-                    character: current.last().map(|l| l.len() as u32).unwrap_or(0),
+                    character: current
+                        .last()
+                        .map(|l| l.len() as u32)
+                        .unwrap_or(0),
                 },
             },
             new_text: wanted.join("\n"),
@@ -66,7 +74,10 @@ pub fn format_range(text: &str, range: &Range) -> Option<Vec<TextEdit>> {
 
 fn full_range(text: &str) -> Range {
     Range {
-        start: Position { line: 0, character: 0 },
+        start: Position {
+            line: 0,
+            character: 0,
+        },
         end: offset_to_position(text, text.len()),
     }
 }
@@ -86,7 +97,13 @@ fn normalize(text: &str) -> String {
 
 #[allow(dead_code)]
 fn _assert_offset_helpers_used() {
-    let _ = position_to_offset("", &Position { line: 0, character: 0 });
+    let _ = position_to_offset(
+        "",
+        &Position {
+            line: 0,
+            character: 0,
+        },
+    );
 }
 
 #[cfg(test)]
@@ -102,7 +119,8 @@ mod tests {
 
     #[test]
     fn unformatted_source_returns_full_edit() {
-        let edits = format_document("void main() do\nint x=1\nend\n").expect("edit");
+        let edits =
+            format_document("void main() do\nint x=1\nend\n").expect("edit");
         assert_eq!(edits.len(), 1);
         assert!(edits[0].new_text.contains("    int x = 1"));
     }
@@ -114,8 +132,14 @@ mod tests {
             format_range(
                 "void main( do\n",
                 &Range {
-                    start: Position { line: 0, character: 0 },
-                    end: Position { line: 0, character: 5 },
+                    start: Position {
+                        line: 0,
+                        character: 0
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 5
+                    },
                 }
             ),
             None
@@ -128,8 +152,14 @@ mod tests {
         let edits = format_range(
             src,
             &Range {
-                start: Position { line: 1, character: 0 },
-                end: Position { line: 1, character: 7 },
+                start: Position {
+                    line: 1,
+                    character: 0,
+                },
+                end: Position {
+                    line: 1,
+                    character: 7,
+                },
             },
         )
         .expect("edit");
@@ -144,8 +174,14 @@ mod tests {
         let edits = format_range(
             CANON,
             &Range {
-                start: Position { line: 1, character: 0 },
-                end: Position { line: 1, character: 5 },
+                start: Position {
+                    line: 1,
+                    character: 0,
+                },
+                end: Position {
+                    line: 1,
+                    character: 5,
+                },
             },
         );
         assert_eq!(edits, None);
