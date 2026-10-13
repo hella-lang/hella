@@ -1133,24 +1133,37 @@ fn run_lint(args: LintArgs) -> miette::Result<()> {
 
     // Reparse the entry, NOT the import-expanded program: imported items carry
     // offsets from other files. Linting is deliberately entry-file-only.
-    let source = fs::read_to_string(&entry.path)
-        .map_err(|e| miette::miette!("failed to read {}: {e}", entry.path.display()))?;
+    let source = fs::read_to_string(&entry.path).map_err(|e| {
+        miette::miette!("failed to read {}: {e}", entry.path.display())
+    })?;
     let lexed = lex(&source);
     if !lexed.errors.is_empty() {
-        return Err(miette::miette!("source changed during lint; rerun the command"));
+        return Err(miette::miette!(
+            "source changed during lint; rerun the command"
+        ));
     }
     let program = hella_compiler::parse::parse(lexed.tokens, source.clone())
-        .map_err(|e| miette::miette!("{}: {}", entry.path.display(), e.message))?;
+        .map_err(|e| {
+            miette::miette!("{}: {}", entry.path.display(), e.message)
+        })?;
     let warnings = hella_compiler::lint::check(&program);
     for warning in &warnings {
         let before = &source[..warning.span.start];
         let line = before.bytes().filter(|b| *b == b'\n').count() + 1;
-        let column = before.rsplit('\n').next().unwrap_or("").chars().count() + 1;
-        eprintln!("{}:{line}:{column}: warning[{}]: {}",
-            entry.path.display(), warning.code, warning.message);
+        let column =
+            before.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+        eprintln!(
+            "{}:{line}:{column}: warning[{}]: {}",
+            entry.path.display(),
+            warning.code,
+            warning.message
+        );
     }
     if args.deny_warnings && !warnings.is_empty() {
-        return Err(miette::miette!("{} lint warning(s) (--deny-warnings)", warnings.len()));
+        return Err(miette::miette!(
+            "{} lint warning(s) (--deny-warnings)",
+            warnings.len()
+        ));
     }
     Ok(())
 }
@@ -1341,8 +1354,9 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // link at all) deliberately treats it as false so type analysis never
     // depends on which profile would have been built.
     let cfg_debug = !opts.release && !opts.check_only;
-    let expanded =
-        hella_compiler::modules::expand_imports_with_cfg(program, file, cfg_debug);
+    let expanded = hella_compiler::modules::expand_imports_with_cfg(
+        program, file, cfg_debug,
+    );
     if let Some(first) = expanded.errors.first() {
         let diag = hella_compiler::error::SingleDiagnostic::new(
             filename.clone(),
@@ -1492,14 +1506,24 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // only when declared (std::sync/chan/time/net/task-sleep). The async
     // runtime depends on it (TLS slot + sleep/yield live there), so async
     // implies sync.
-    let needs_sync = hella_compiler::async_req::uses_sync_runtime(&program) || needs_async;
+    let needs_sync =
+        hella_compiler::async_req::uses_sync_runtime(&program) || needs_async;
 
     // ── Freshness ────────────────────────────────────────────────────
     // Skip codegen+link when the binary is newer than every source file
     // (entry + resolved imports) and the build stamp still matches this
     // profile and toolchain version. `run` relies on this: its binary
     // persists between invocations and only rebuilds on change.
-    if !opts.force && is_fresh(&exe_path, &source_files, opts.release, needs_async, needs_sync, opts.target.as_deref()) {
+    if !opts.force
+        && is_fresh(
+            &exe_path,
+            &source_files,
+            opts.release,
+            needs_async,
+            needs_sync,
+            opts.target.as_deref(),
+        )
+    {
         pb.finish_with_message("Finished");
         status(
             &pb,
@@ -1578,14 +1602,10 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         if let Some(triple) = opts.target.as_deref() {
             rt_cc.arg(format!("--target={triple}"));
         }
-        let cc_status = rt_cc
-            .status()
-            .map_err(|e| {
-                pb.abandon();
-                miette::miette!(
-                    "failed to invoke {linker} for runtime shim: {e}"
-                )
-            })?;
+        let cc_status = rt_cc.status().map_err(|e| {
+            pb.abandon();
+            miette::miette!("failed to invoke {linker} for runtime shim: {e}")
+        })?;
         if !cc_status.success() {
             pb.abandon();
             return Err(miette::miette!(
@@ -1603,14 +1623,20 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         let a_obj = obj_path.with_file_name("hella_async_gen.o");
         if let Err(e) = fs::write(&a_src, HELLA_ASYNC_C) {
             pb.abandon();
-            return Err(miette::miette!("failed to write {}: {e}", a_src.display()));
+            return Err(miette::miette!(
+                "failed to write {}: {e}",
+                a_src.display()
+            ));
         }
         // Shared header for `#include "hella_task.h"` (same dir resolves;
         // cleaned with the other generated files below).
         let task_hdr = obj_path.with_file_name("hella_task.h");
         if let Err(e) = fs::write(&task_hdr, HELLA_TASK_H) {
             pb.abandon();
-            return Err(miette::miette!("failed to write {}: {e}", task_hdr.display()));
+            return Err(miette::miette!(
+                "failed to write {}: {e}",
+                task_hdr.display()
+            ));
         }
         extra_paths.push(task_hdr);
         extra_paths.push(a_src.clone());
@@ -1625,7 +1651,9 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         }
         let cc_status = cc.status().map_err(|e| {
             pb.abandon();
-            miette::miette!("failed to invoke {linker} for the async runtime: {e}")
+            miette::miette!(
+                "failed to invoke {linker} for the async runtime: {e}"
+            )
         })?;
         if !cc_status.success() {
             pb.abandon();
@@ -1646,14 +1674,20 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         let s_obj = obj_path.with_file_name("hella_sync_gen.o");
         if let Err(e) = fs::write(&s_src, HELLA_SYNC_C) {
             pb.abandon();
-            return Err(miette::miette!("failed to write {}: {e}", s_src.display()));
+            return Err(miette::miette!(
+                "failed to write {}: {e}",
+                s_src.display()
+            ));
         }
         // Shared header for `#include "hella_task.h"` (same contents in
         // both blocks; harmless to write twice when both runtimes link).
         let task_hdr = obj_path.with_file_name("hella_task.h");
         if let Err(e) = fs::write(&task_hdr, HELLA_TASK_H) {
             pb.abandon();
-            return Err(miette::miette!("failed to write {}: {e}", task_hdr.display()));
+            return Err(miette::miette!(
+                "failed to write {}: {e}",
+                task_hdr.display()
+            ));
         }
         extra_paths.push(task_hdr);
         extra_paths.push(s_src.clone());
@@ -1668,7 +1702,9 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
         }
         let cc_status = cc.status().map_err(|e| {
             pb.abandon();
-            miette::miette!("failed to invoke {linker} for the sync runtime: {e}")
+            miette::miette!(
+                "failed to invoke {linker} for the sync runtime: {e}"
+            )
         })?;
         if !cc_status.success() {
             pb.abandon();
@@ -1746,7 +1782,13 @@ fn compile(opts: CompileOptions<'_>) -> miette::Result<Option<PathBuf>> {
     // Record what produced this binary so a later invocation can prove
     // freshness without recompiling (profile + toolchain version; sources
     // are compared by mtime against the binary itself).
-    write_build_stamp(&exe_path, opts.release, needs_async, needs_sync, opts.target.as_deref());
+    write_build_stamp(
+        &exe_path,
+        opts.release,
+        needs_async,
+        needs_sync,
+        opts.target.as_deref(),
+    );
 
     pb.finish_with_message("Finished");
     status(
@@ -1837,7 +1879,8 @@ fn windows_legacy_stdio_lib() -> Option<PathBuf> {
         "C:/Program Files/Microsoft Visual Studio/2019",
         "C:/Program Files (x86)/Microsoft Visual Studio/2019",
     ] {
-        for edition in ["Enterprise", "Professional", "Community", "BuildTools"] {
+        for edition in ["Enterprise", "Professional", "Community", "BuildTools"]
+        {
             let lib_root = Path::new(prefix)
                 .join(edition)
                 .join("VC")
@@ -1876,7 +1919,12 @@ fn stamp_path(exe: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
-fn stamp_contents(release: bool, needs_async: bool, needs_sync: bool, target: Option<&str>) -> String {
+fn stamp_contents(
+    release: bool,
+    needs_async: bool,
+    needs_sync: bool,
+    target: Option<&str>,
+) -> String {
     format!(
         "profile={}\ntoolchain=hella {}\nasync={}\nsync={}\ntarget={}\n",
         if release { "release" } else { "debug" },
@@ -1890,20 +1938,39 @@ fn stamp_contents(release: bool, needs_async: bool, needs_sync: bool, target: Op
     )
 }
 
-fn write_build_stamp(exe: &Path, release: bool, needs_async: bool, needs_sync: bool, target: Option<&str>) {
-    let _ = fs::write(stamp_path(exe), stamp_contents(release, needs_async, needs_sync, target));
+fn write_build_stamp(
+    exe: &Path,
+    release: bool,
+    needs_async: bool,
+    needs_sync: bool,
+    target: Option<&str>,
+) {
+    let _ = fs::write(
+        stamp_path(exe),
+        stamp_contents(release, needs_async, needs_sync, target),
+    );
 }
 
 /// True when `exe` exists, is newer than every source file, and its stamp
 /// matches this profile + toolchain version. Anything else (missing binary
 /// or stamp, profile/version switch, touched source) means rebuild.
-fn is_fresh(exe: &Path, sources: &[PathBuf], release: bool, needs_async: bool, needs_sync: bool, target: Option<&str>) -> bool {
+fn is_fresh(
+    exe: &Path,
+    sources: &[PathBuf],
+    release: bool,
+    needs_async: bool,
+    needs_sync: bool,
+    target: Option<&str>,
+) -> bool {
     let exe_mtime = match fs::metadata(exe).and_then(|m| m.modified()) {
         Ok(t) => t,
         Err(_) => return false,
     };
     match fs::read_to_string(stamp_path(exe)) {
-        Ok(contents) if contents == stamp_contents(release, needs_async, needs_sync, target) => {}
+        Ok(contents)
+            if contents
+                == stamp_contents(release, needs_async, needs_sync, target) => {
+        }
         _ => return false,
     }
     sources.iter().all(|s| {

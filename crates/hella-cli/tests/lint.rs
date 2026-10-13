@@ -4,7 +4,8 @@ use std::process::{Command, Output};
 struct Fixture(PathBuf);
 impl Fixture {
     fn new(source: &str) -> Self {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        static NEXT: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "hella-cli-lint-{}-{}-{}",
             std::process::id(),
