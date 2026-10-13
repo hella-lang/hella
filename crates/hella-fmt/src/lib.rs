@@ -58,12 +58,12 @@ pub fn format_source_with_options(
             span: Some(first.span),
         });
     }
-    let program = hella_compiler::parse::parse(lexed.tokens, source.to_string()).map_err(|e| {
-        FormatError {
-            message: e.message,
-            span: Some(e.span),
-        }
-    })?;
+    let program =
+        hella_compiler::parse::parse(lexed.tokens, source.to_string())
+            .map_err(|e| FormatError {
+                message: e.message,
+                span: Some(e.span),
+            })?;
     let comments = collect_comments(source);
     let mut f = Formatter::new(source, comments, options);
     f.format_program(&program);
@@ -187,7 +187,9 @@ fn collect_comments(source: &str) -> Vec<Comment> {
             if bytes[i + 1] == b'*' {
                 let start = i;
                 let mut end = i + 2;
-                while end + 1 < bytes.len() && !(bytes[end] == b'*' && bytes[end + 1] == b'/') {
+                while end + 1 < bytes.len()
+                    && !(bytes[end] == b'*' && bytes[end + 1] == b'/')
+                {
                     end += 1;
                 }
                 end = (end + 2).min(bytes.len());
@@ -223,7 +225,11 @@ struct Formatter<'a> {
 }
 
 impl<'a> Formatter<'a> {
-    fn new(source: &'a str, comments: Vec<Comment>, opts: FormatOptions) -> Self {
+    fn new(
+        source: &'a str,
+        comments: Vec<Comment>,
+        opts: FormatOptions,
+    ) -> Self {
         let mut line_starts = vec![0usize];
         for (idx, b) in source.as_bytes().iter().enumerate() {
             if *b == b'\n' {
@@ -416,7 +422,9 @@ impl<'a> Formatter<'a> {
                 }
                 b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
                     i += 2;
-                    while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    while i + 1 < bytes.len()
+                        && !(bytes[i] == b'*' && bytes[i + 1] == b'/')
+                    {
                         i += 1;
                     }
                     i += 2;
@@ -425,7 +433,11 @@ impl<'a> Formatter<'a> {
             }
         }
         src[i..].starts_with("has")
-            && src[i + 3..].chars().next().map(|c| !c.is_alphanumeric() && c != '_').unwrap_or(true)
+            && src[i + 3..]
+                .chars()
+                .next()
+                .map(|c| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(true)
     }
 
     /// Drain consecutive trailing (`!own_line`) comments on the same source
@@ -435,7 +447,10 @@ impl<'a> Formatter<'a> {
         let mut parts: Vec<String> = Vec::new();
         while self.comment_idx < self.comments.len() {
             let c = &self.comments[self.comment_idx];
-            if c.span.start < end || self.line_of(c.span.start) != line || c.own_line {
+            if c.span.start < end
+                || self.line_of(c.span.start) != line
+                || c.own_line
+            {
                 break;
             }
             parts.push(c.text.trim().to_string());
@@ -585,10 +600,14 @@ impl<'a> Formatter<'a> {
             .iter()
             .map(|arg| match arg {
                 AttributeArg::Expr(e) => self.fmt_expr_compact(e),
-                AttributeArg::Named(n, _, v) => format!("{}: {}", n, self.fmt_expr_compact(v)),
+                AttributeArg::Named(n, _, v) => {
+                    format!("{}: {}", n, self.fmt_expr_compact(v))
+                }
                 // `@cfg(os = "macos")`: keep the author's `=` spelling so
                 // formatting is round-trip idempotent.
-                AttributeArg::Assign(n, _, v) => format!("{} = {}", n, self.fmt_expr_compact(v)),
+                AttributeArg::Assign(n, _, v) => {
+                    format!("{} = {}", n, self.fmt_expr_compact(v))
+                }
             })
             .collect();
         format!("@{}({})", a.name, args.join(", "))
@@ -629,17 +648,33 @@ impl<'a> Formatter<'a> {
             Type::Own(el, _) => format!("own {}", self.fmt_type(el)),
             Type::Named(n, _) => n.clone(),
             Type::Generic(n, args, _) => {
-                format!("{}<{}>", n, args.iter().map(|a| self.fmt_type(a)).collect::<Vec<_>>().join(", "))
+                format!(
+                    "{}<{}>",
+                    n,
+                    args.iter()
+                        .map(|a| self.fmt_type(a))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             }
             Type::FunctionType(ret, args, _) => {
                 format!(
                     "function<{}({})>",
                     self.fmt_type(ret),
-                    args.iter().map(|a| self.fmt_type(a)).collect::<Vec<_>>().join(", ")
+                    args.iter()
+                        .map(|a| self.fmt_type(a))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )
             }
             Type::Tuple(tys, _) => {
-                format!("({})", tys.iter().map(|t| self.fmt_type(t)).collect::<Vec<_>>().join(", "))
+                format!(
+                    "({})",
+                    tys.iter()
+                        .map(|t| self.fmt_type(t))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             }
             Type::Array(el, _) => format!("{}[]", self.fmt_type(el)),
             Type::FixedArray { elem, size, .. } => match size {
@@ -669,7 +704,11 @@ impl<'a> Formatter<'a> {
                     format!(
                         "{}: {}",
                         p.name,
-                        p.bounds.iter().map(|b| self.fmt_type(b)).collect::<Vec<_>>().join(", ")
+                        p.bounds
+                            .iter()
+                            .map(|b| self.fmt_type(b))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     )
                 }
             })
@@ -688,7 +727,11 @@ impl<'a> Formatter<'a> {
                         format!(
                             "{}: {}",
                             self.fmt_type(&c.ty),
-                            c.bounds.iter().map(|b| self.fmt_type(b)).collect::<Vec<_>>().join(", ")
+                            c.bounds
+                                .iter()
+                                .map(|b| self.fmt_type(b))
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         )
                     })
                     .collect();
@@ -756,15 +799,26 @@ impl<'a> Formatter<'a> {
             f.name,
         );
         let _ = head;
-        let params: Vec<String> = f.params.iter().map(|p| self.fmt_param(p)).collect();
+        let params: Vec<String> =
+            f.params.iter().map(|p| self.fmt_param(p)).collect();
         let generics = self.fmt_generic_params(&f.generic_params);
         if !generics.is_empty() {
             // insert generics before paren: "name<T>("
-            h = h.replacen(&format!("{}(", f.name), &format!("{}{}(", f.name, generics), 1);
+            h = h.replacen(
+                &format!("{}(", f.name),
+                &format!("{}{}(", f.name, generics),
+                1,
+            );
         }
         let where_s = self.fmt_where_clause(&f.where_clause);
         let async_s = if f.is_async { " async" } else { "" };
-        let compact = format!("{}{}{}){} do", h, params.join(", "), "", format!("{}{}", where_s, async_s));
+        let compact = format!(
+            "{}{}{}){} do",
+            h,
+            params.join(", "),
+            "",
+            format!("{}{}", where_s, async_s)
+        );
         // The skill's wrapped declaration example wraps generic params AND params.
         if fits(self.indent, &compact, self.opts.max_width) {
             let mut s = compact;
@@ -797,7 +851,11 @@ impl<'a> Formatter<'a> {
             }
             s.push('\n');
         }
-        s.push_str(&format!("{}){} do\n", self.pad_for(0), format!("{}{}", where_s, async_s)));
+        s.push_str(&format!(
+            "{}){} do\n",
+            self.pad_for(0),
+            format!("{}{}", where_s, async_s)
+        ));
         s.push_str(&self.fmt_block_inner(&f.body, 1));
         s.push_str(&format!("{}end", self.pad_for(0)));
         s
@@ -859,7 +917,9 @@ impl<'a> Formatter<'a> {
         for (idx, f) in fields.iter().enumerate() {
             let vis = f.visibility;
             let breaks = match (cur_vis, prev_end) {
-                (Some(v), Some(pe)) if v == vis => self.has_blank_between(pe, f.span.start),
+                (Some(v), Some(pe)) if v == vis => {
+                    self.has_blank_between(pe, f.span.start)
+                }
                 (Some(v), _) if v != vis => true,
                 _ => false,
             };
@@ -873,7 +933,8 @@ impl<'a> Formatter<'a> {
         if !cur.is_empty() {
             groups.push(cur);
         }
-        let field_pad = " ".repeat((self.indent + base_indent) * self.opts.indent_width);
+        let field_pad =
+            " ".repeat((self.indent + base_indent) * self.opts.indent_width);
         let mut s = String::new();
         for (gi, g) in groups.iter().enumerate() {
             if gi > 0 {
@@ -885,17 +946,31 @@ impl<'a> Formatter<'a> {
                 .iter()
                 .map(|idx| {
                     let f = &fields[*idx];
-                    format!("{}{}", vis_prefix(f.visibility), self.fmt_type(&f.ty))
+                    format!(
+                        "{}{}",
+                        vis_prefix(f.visibility),
+                        self.fmt_type(&f.ty)
+                    )
                 })
                 .collect();
             let max_ty = type_strs.iter().map(|t| t.len()).max().unwrap_or(0);
-            let max_name = g.iter().map(|idx| fields[*idx].name.len()).max().unwrap_or(0);
+            let max_name = g
+                .iter()
+                .map(|idx| fields[*idx].name.len())
+                .max()
+                .unwrap_or(0);
             for (k, idx) in g.iter().enumerate() {
                 let f = &fields[*idx];
                 // leading comments attached to this field
-                s.push_str(&self.emit_comments_at(&comments[*idx].0, self.indent + base_indent));
+                s.push_str(&self.emit_comments_at(
+                    &comments[*idx].0,
+                    self.indent + base_indent,
+                ));
                 let ty = &type_strs[k];
-                let init = f.default.as_ref().map(|e| self.fmt_expr_wrapped(e, base_indent));
+                let init = f
+                    .default
+                    .as_ref()
+                    .map(|e| self.fmt_expr_wrapped(e, base_indent));
                 let line = if pad_group {
                     let ty_pad = format!("{:width$}", ty, width = max_ty);
                     let nm_pad = format!("{:width$}", f.name, width = max_name);
@@ -939,7 +1014,8 @@ impl<'a> Formatter<'a> {
             head.push_str(&format!(" extends {}", self.fmt_type(e)));
         }
         if !d.implements.is_empty() {
-            let im: Vec<String> = d.implements.iter().map(|t| self.fmt_type(t)).collect();
+            let im: Vec<String> =
+                d.implements.iter().map(|t| self.fmt_type(t)).collect();
             head.push_str(&format!(" implements {}", im.join(", ")));
         }
         head.push_str(" has\n");
@@ -983,8 +1059,10 @@ impl<'a> Formatter<'a> {
         // Per-member attached comments: leading lines + same-line trailing.
         let mut field_c: Vec<(Vec<Comment>, Option<String>)> =
             (0..d.fields.len()).map(|_| (Vec::new(), None)).collect();
-        let mut other: std::collections::HashMap<(u8, usize), (Vec<Comment>, String, Option<String>)> =
-            std::collections::HashMap::new();
+        let mut other: std::collections::HashMap<
+            (u8, usize),
+            (Vec<Comment>, String, Option<String>),
+        > = std::collections::HashMap::new();
         let tag = |k: MK| match k {
             MK::Field => 0,
             MK::Ctor => 1,
@@ -997,12 +1075,25 @@ impl<'a> Formatter<'a> {
         for (_, kind, idx) in events {
             let (start, end) = match kind {
                 MK::Field => (d.fields[idx].span.start, d.fields[idx].span.end),
-                MK::Ctor => (d.constructors[idx].span.start, d.constructors[idx].span.end),
-                MK::Dtor => (d.destructors[idx].span.start, d.destructors[idx].span.end),
-                MK::Prop => (d.properties[idx].span.start, d.properties[idx].span.end),
-                MK::Op => (d.operators[idx].span.start, d.operators[idx].span.end),
-                MK::Conv => (d.conversions[idx].span.start, d.conversions[idx].span.end),
-                MK::Method => (d.methods[idx].span.start, d.methods[idx].span.end),
+                MK::Ctor => (
+                    d.constructors[idx].span.start,
+                    d.constructors[idx].span.end,
+                ),
+                MK::Dtor => {
+                    (d.destructors[idx].span.start, d.destructors[idx].span.end)
+                }
+                MK::Prop => {
+                    (d.properties[idx].span.start, d.properties[idx].span.end)
+                }
+                MK::Op => {
+                    (d.operators[idx].span.start, d.operators[idx].span.end)
+                }
+                MK::Conv => {
+                    (d.conversions[idx].span.start, d.conversions[idx].span.end)
+                }
+                MK::Method => {
+                    (d.methods[idx].span.start, d.methods[idx].span.end)
+                }
             };
             let leads = self.take_leading(start);
             // Format the member body now (source order) so inner comment
@@ -1014,12 +1105,16 @@ impl<'a> Formatter<'a> {
                 }
                 _ => {
                     let body = match kind {
-                        MK::Ctor => self.fmt_constructor(&d.constructors[idx], 1),
+                        MK::Ctor => {
+                            self.fmt_constructor(&d.constructors[idx], 1)
+                        }
                         MK::Dtor => self.fmt_destructor(&d.destructors[idx], 1),
                         MK::Prop => self.fmt_property(&d.properties[idx], 1),
                         MK::Op => self.fmt_operator(&d.operators[idx], 1),
                         MK::Conv => self.fmt_conversion(&d.conversions[idx], 1),
-                        MK::Method => self.fmt_function_indented(&d.methods[idx], 1),
+                        MK::Method => {
+                            self.fmt_function_indented(&d.methods[idx], 1)
+                        }
                         MK::Field => unreachable!(),
                     };
                     let trail = self.drain_same_line_trailing(end);
@@ -1028,10 +1123,16 @@ impl<'a> Formatter<'a> {
             }
         }
         // Phase 2: canonical emission.
-        let member = |store: &std::collections::HashMap<(u8, usize), (Vec<Comment>, String, Option<String>)>,
-                      this: &Formatter, kind: MK, idx: usize|
+        let member = |store: &std::collections::HashMap<
+            (u8, usize),
+            (Vec<Comment>, String, Option<String>),
+        >,
+                      this: &Formatter,
+                      kind: MK,
+                      idx: usize|
          -> String {
-            let (leads, body, trail) = store.get(&(tag(kind), idx)).cloned().unwrap_or_default();
+            let (leads, body, trail) =
+                store.get(&(tag(kind), idx)).cloned().unwrap_or_default();
             let mut s = this.emit_comments_at(&leads, this.indent + 1);
             s.push_str(&body);
             if let Some(t) = trail {
@@ -1113,12 +1214,21 @@ impl<'a> Formatter<'a> {
 
     fn fmt_constructor(&mut self, c: &ConstructorDecl, base: usize) -> String {
         let pad = " ".repeat((self.indent + base) * self.opts.indent_width);
-        let params: Vec<String> = c.params.iter().map(|p| self.fmt_param(p)).collect();
-        let mut head = format!("{}{}{}({}) initialize", pad, vis_prefix(c.visibility), c.name, params.join(", "));
+        let params: Vec<String> =
+            c.params.iter().map(|p| self.fmt_param(p)).collect();
+        let mut head = format!(
+            "{}{}{}({}) initialize",
+            pad,
+            vis_prefix(c.visibility),
+            c.name,
+            params.join(", ")
+        );
         // wrap long param lists
         if head.len() > self.opts.max_width && params.len() > 1 {
-            let mut s = format!("{}{}{}(\n", pad, vis_prefix(c.visibility), c.name);
-            let ip = " ".repeat((self.indent + base + 1) * self.opts.indent_width);
+            let mut s =
+                format!("{}{}{}(\n", pad, vis_prefix(c.visibility), c.name);
+            let ip =
+                " ".repeat((self.indent + base + 1) * self.opts.indent_width);
             for (i, p) in params.iter().enumerate() {
                 s.push_str(&ip);
                 s.push_str(p);
@@ -1146,7 +1256,8 @@ impl<'a> Formatter<'a> {
 
     fn fmt_destructor(&mut self, d: &DestructorDecl, base: usize) -> String {
         let pad = " ".repeat((self.indent + base) * self.opts.indent_width);
-        let mut s = format!("{}{}~{}() do\n", pad, vis_prefix(d.visibility), d.name);
+        let mut s =
+            format!("{}{}~{}() do\n", pad, vis_prefix(d.visibility), d.name);
         let saved = self.indent;
         self.indent += base;
         s.push_str(&self.fmt_block_inner(&d.body, 1));
@@ -1157,11 +1268,21 @@ impl<'a> Formatter<'a> {
 
     fn fmt_property(&mut self, p: &PropertyDecl, base: usize) -> String {
         let pad = " ".repeat((self.indent + base) * self.opts.indent_width);
-        let ipad = " ".repeat((self.indent + base + 1) * self.opts.indent_width);
-        let ty = p.ty.as_ref().map(|t| format!("{} ", self.fmt_type(t))).unwrap_or_default();
+        let ipad =
+            " ".repeat((self.indent + base + 1) * self.opts.indent_width);
+        let ty =
+            p.ty.as_ref()
+                .map(|t| format!("{} ", self.fmt_type(t)))
+                .unwrap_or_default();
         let mut s = String::new();
         if let Some(g) = &p.getter {
-            s.push_str(&format!("{}{}{}{} get do\n", pad, vis_prefix(p.visibility), ty, p.name));
+            s.push_str(&format!(
+                "{}{}{}{} get do\n",
+                pad,
+                vis_prefix(p.visibility),
+                ty,
+                p.name
+            ));
             let saved = self.indent;
             self.indent += base;
             s.push_str(&self.fmt_block_inner(g, 1));
@@ -1177,7 +1298,14 @@ impl<'a> Formatter<'a> {
             let header = if has_getter {
                 format!("{}set({}) do", pad, self.fmt_param(param))
             } else {
-                format!("{}{}{}{} set({}) do", pad, vis_prefix(p.visibility), ty, p.name, self.fmt_param(param))
+                format!(
+                    "{}{}{}{} set({}) do",
+                    pad,
+                    vis_prefix(p.visibility),
+                    ty,
+                    p.name,
+                    self.fmt_param(param)
+                )
             };
             s.push_str(&header);
             s.push('\n');
@@ -1193,7 +1321,8 @@ impl<'a> Formatter<'a> {
 
     fn fmt_operator(&mut self, o: &OperatorDecl, base: usize) -> String {
         let pad = " ".repeat((self.indent + base) * self.opts.indent_width);
-        let params: Vec<String> = o.params.iter().map(|p| self.fmt_param(p)).collect();
+        let params: Vec<String> =
+            o.params.iter().map(|p| self.fmt_param(p)).collect();
         let mut s = format!(
             "{}{}{}operator {}({}){} do\n",
             pad,
@@ -1238,11 +1367,15 @@ impl<'a> Formatter<'a> {
         );
         for v in &d.variants {
             let __leads = self.take_leading(v.span.start);
-;s.push_str(&self.emit_comments_at(&__leads, self.indent + 1));
+            s.push_str(&self.emit_comments_at(&__leads, self.indent + 1));
             let pad = " ".repeat((self.indent + 1) * self.opts.indent_width);
             let mut line = v.name.clone();
             if !v.payload_params.is_empty() {
-                let ps: Vec<String> = v.payload_params.iter().map(|p| self.fmt_param(p)).collect();
+                let ps: Vec<String> = v
+                    .payload_params
+                    .iter()
+                    .map(|p| self.fmt_param(p))
+                    .collect();
                 line.push_str(&format!("({})", ps.join(", ")));
             }
             if let Some(disc) = &v.discriminant {
@@ -1278,9 +1411,10 @@ impl<'a> Formatter<'a> {
                 s.push('\n');
             }
             let __leads = self.take_leading(m.span.start);
-;s.push_str(&self.emit_comments_at(&__leads, self.indent + 1));
+            s.push_str(&self.emit_comments_at(&__leads, self.indent + 1));
             let pad = " ".repeat((self.indent + 1) * self.opts.indent_width);
-            let params: Vec<String> = m.params.iter().map(|p| self.fmt_param(p)).collect();
+            let params: Vec<String> =
+                m.params.iter().map(|p| self.fmt_param(p)).collect();
             s.push_str(&format!(
                 "{}{}{} {}({}){}",
                 pad,
@@ -1316,17 +1450,24 @@ impl<'a> Formatter<'a> {
             first = false;
             let mspan = ext_member_span(m);
             let __leads = self.take_leading(mspan.start);
-;s.push_str(&self.emit_comments_at(&__leads, self.indent + 1));
+            s.push_str(&self.emit_comments_at(&__leads, self.indent + 1));
             let mut body = match m {
                 ExtensionMember::Field(f) => {
-                    let pad = " ".repeat((self.indent + 1) * self.opts.indent_width);
-                    let mut b = format!("{}{} {}", pad, self.fmt_type(&f.ty), f.name);
+                    let pad =
+                        " ".repeat((self.indent + 1) * self.opts.indent_width);
+                    let mut b =
+                        format!("{}{} {}", pad, self.fmt_type(&f.ty), f.name);
                     if let Some(init) = &f.default {
-                        b.push_str(&format!(" = {}", self.fmt_expr_compact(init)));
+                        b.push_str(&format!(
+                            " = {}",
+                            self.fmt_expr_compact(init)
+                        ));
                     }
                     b
                 }
-                ExtensionMember::Function(f) => self.fmt_function_indented(f, 1),
+                ExtensionMember::Function(f) => {
+                    self.fmt_function_indented(f, 1)
+                }
                 ExtensionMember::Operator(o) => self.fmt_operator(o, 1),
                 ExtensionMember::Property(p) => self.fmt_property(p, 1),
                 ExtensionMember::Conversion(c) => self.fmt_conversion(c, 1),
@@ -1353,10 +1494,12 @@ impl<'a> Formatter<'a> {
         for m in &d.members {
             let mspan = extern_member_span(m);
             let __leads = self.take_leading(mspan.start);
-;s.push_str(&self.emit_comments_at(&__leads, self.indent + 1));
+            s.push_str(&self.emit_comments_at(&__leads, self.indent + 1));
             let pad = " ".repeat((self.indent + 1) * self.opts.indent_width);
             match m {
-                ExternMember::Function { ty, name, params, .. } => {
+                ExternMember::Function {
+                    ty, name, params, ..
+                } => {
                     let ps: Vec<String> = params
                         .iter()
                         .map(|p| {
@@ -1370,12 +1513,22 @@ impl<'a> Formatter<'a> {
                                         return format!("...{}", p.name);
                                     }
                                 }
-                                return format!("...{} {}", self.fmt_type(&p.ty), p.name);
+                                return format!(
+                                    "...{} {}",
+                                    self.fmt_type(&p.ty),
+                                    p.name
+                                );
                             }
                             format!("{} {}", self.fmt_type(&p.ty), p.name)
                         })
                         .collect();
-                    s.push_str(&format!("{}{} {}({})", pad, self.fmt_type(ty), name, ps.join(", ")));
+                    s.push_str(&format!(
+                        "{}{} {}({})",
+                        pad,
+                        self.fmt_type(ty),
+                        name,
+                        ps.join(", ")
+                    ));
                     if let Some(t) = self.drain_same_line_trailing(mspan.end) {
                         s.push_str("  ");
                         s.push_str(&t);
@@ -1389,8 +1542,15 @@ impl<'a> Formatter<'a> {
                     } else {
                         s.push_str(" has\n");
                         for f in fields {
-                            let ip = " ".repeat((self.indent + 2) * self.opts.indent_width);
-                            s.push_str(&format!("{}{} {}\n", ip, self.fmt_type(&f.ty), f.name));
+                            let ip = " ".repeat(
+                                (self.indent + 2) * self.opts.indent_width,
+                            );
+                            s.push_str(&format!(
+                                "{}{} {}\n",
+                                ip,
+                                self.fmt_type(&f.ty),
+                                f.name
+                            ));
                         }
                         s.push_str(&format!("{}end\n", pad));
                     }
@@ -1398,13 +1558,19 @@ impl<'a> Formatter<'a> {
                 ExternMember::Enum { name, variants, .. } => {
                     s.push_str(&format!("{}enum {} has\n", pad, name));
                     for v in variants {
-                        let ip = " ".repeat((self.indent + 2) * self.opts.indent_width);
+                        let ip = " "
+                            .repeat((self.indent + 2) * self.opts.indent_width);
                         s.push_str(&format!("{}{}\n", ip, v.name));
                     }
                     s.push_str(&format!("{}end\n", pad));
                 }
                 ExternMember::Const { ty, name, .. } => {
-                    s.push_str(&format!("{}const {} {}", pad, self.fmt_type(ty), name));
+                    s.push_str(&format!(
+                        "{}const {} {}",
+                        pad,
+                        self.fmt_type(ty),
+                        name
+                    ));
                     if let Some(t) = self.drain_same_line_trailing(mspan.end) {
                         s.push_str("  ");
                         s.push_str(&t);
@@ -1426,7 +1592,12 @@ impl<'a> Formatter<'a> {
     // ── var / const ──
 
     fn fmt_var_decl_noalign(&mut self, d: &VarDecl) -> String {
-        let mut s = format!("{}{} {}", vis_prefix(d.visibility), self.fmt_type(&d.ty), d.name);
+        let mut s = format!(
+            "{}{} {}",
+            vis_prefix(d.visibility),
+            self.fmt_type(&d.ty),
+            d.name
+        );
         if let Some(init) = &d.init {
             s.push_str(&format!(" = {}", self.fmt_init_expr(init, d.span)));
         }
@@ -1437,10 +1608,14 @@ impl<'a> Formatter<'a> {
     /// (`User u = has ... end`) instead of inventing an explicit type.
     fn fmt_init_expr(&mut self, e: &Expr, var_span: Span) -> String {
         match &e.kind {
-            ExprKind::StructLit { ty, fields } if self.init_omits_type(var_span) => {
+            ExprKind::StructLit { ty, fields }
+                if self.init_omits_type(var_span) =>
+            {
                 self.fmt_struct_lit_wrapped(ty, fields, e.span, true)
             }
-            ExprKind::MapLit { ty, entries } if self.init_omits_type(var_span) => {
+            ExprKind::MapLit { ty, entries }
+                if self.init_omits_type(var_span) =>
+            {
                 self.fmt_map_wrapped(ty, entries, e.span, true)
             }
             _ => self.fmt_expr_wrapped(e, 0),
@@ -1452,7 +1627,11 @@ impl<'a> Formatter<'a> {
         if let Some(t) = &d.ty {
             s.push_str(&format!("{} ", self.fmt_type(t)));
         }
-        s.push_str(&format!("{} = {}", d.name, self.fmt_expr_wrapped(&d.init, 0)));
+        s.push_str(&format!(
+            "{} = {}",
+            d.name,
+            self.fmt_expr_wrapped(&d.init, 0)
+        ));
         s
     }
 
@@ -1475,21 +1654,28 @@ impl<'a> Formatter<'a> {
         let mut i = 0;
         let mut prev_end: Option<usize> = None;
         while i < stmts.len() {
-            let is_varlike = matches!(stmts[i], Stmt::VarDecl(_) | Stmt::Const(_));
+            let is_varlike =
+                matches!(stmts[i], Stmt::VarDecl(_) | Stmt::Const(_));
             if is_varlike {
                 // collect group (blank line in source terminates)
                 let mut group: Vec<usize> = vec![i];
                 let mut j = i + 1;
                 while j < stmts.len()
                     && matches!(stmts[j], Stmt::VarDecl(_) | Stmt::Const(_))
-                    && !self.has_blank_between(stmt_span(&stmts[j - 1]).end, stmt_span(&stmts[j]).start)
+                    && !self.has_blank_between(
+                        stmt_span(&stmts[j - 1]).end,
+                        stmt_span(&stmts[j]).start,
+                    )
                 {
                     group.push(j);
                     j += 1;
                 }
                 // blank before group (source had blank and not at block start)
                 if prev_end.is_some()
-                    && self.has_blank_between(prev_end.unwrap(), stmt_span(&stmts[i]).start)
+                    && self.has_blank_between(
+                        prev_end.unwrap(),
+                        stmt_span(&stmts[i]).start,
+                    )
                     && !s.is_empty()
                 {
                     s.push('\n');
@@ -1552,7 +1738,9 @@ impl<'a> Formatter<'a> {
                     if line.trim().is_empty() {
                         s.push('\n');
                     } else {
-                        s.push_str(&" ".repeat(self.indent * self.opts.indent_width));
+                        s.push_str(
+                            &" ".repeat(self.indent * self.opts.indent_width),
+                        );
                         s.push_str(line.trim_start());
                         s.push('\n');
                     }
@@ -1570,7 +1758,8 @@ impl<'a> Formatter<'a> {
         while self.comment_idx < self.comments.len()
             && self.line_of(self.comments[self.comment_idx].span.start) == line
             && !self.comments[self.comment_idx].own_line
-            && self.comments[self.comment_idx].span.start >= end.saturating_sub(1)
+            && self.comments[self.comment_idx].span.start
+                >= end.saturating_sub(1)
             && self.comments[self.comment_idx].span.start < end + 200
         {
             // only drain when the comment is on the same line and after `end`
@@ -1605,10 +1794,15 @@ impl<'a> Formatter<'a> {
             match &stmts[idx] {
                 Stmt::VarDecl(d) => {
                     let leads = self.take_leading(d.span.start);
-                    let init = d.init.as_ref().map(|e| self.fmt_init_expr(e, d.span));
+                    let init =
+                        d.init.as_ref().map(|e| self.fmt_init_expr(e, d.span));
                     let trail = self.drain_same_line_trailing(d.span.end);
                     rows.push(Row {
-                        ty: format!("{}{}", vis_prefix(d.visibility), self.fmt_type(&d.ty)),
+                        ty: format!(
+                            "{}{}",
+                            vis_prefix(d.visibility),
+                            self.fmt_type(&d.ty)
+                        ),
                         name: d.name.clone(),
                         init,
                         leads,
@@ -1623,7 +1817,9 @@ impl<'a> Formatter<'a> {
                         ty: format!(
                             "{}const {}",
                             vis_prefix(d.visibility),
-                            d.ty.as_ref().map(|t| format!("{} ", self.fmt_type(t))).unwrap_or_default()
+                            d.ty.as_ref()
+                                .map(|t| format!("{} ", self.fmt_type(t)))
+                                .unwrap_or_default()
                         )
                         .trim_end()
                         .to_string(),
@@ -1637,7 +1833,11 @@ impl<'a> Formatter<'a> {
             }
         }
         let pad0 = " ".repeat(self.indent * self.opts.indent_width);
-        let emit_row = |this: &Formatter, s: &mut String, r: &Row, ty_s: &str, nm_s: &str| {
+        let emit_row = |this: &Formatter,
+                        s: &mut String,
+                        r: &Row,
+                        ty_s: &str,
+                        nm_s: &str| {
             s.push_str(&this.emit_comments_at(&r.leads, this.indent));
             s.push_str(&pad0);
             match &r.init {
@@ -1704,25 +1904,52 @@ impl<'a> Formatter<'a> {
                         DestructureTarget::Wildcard(_) => "_".into(),
                     })
                     .collect();
-                format!("{} = {}", ts.join(", "), self.fmt_expr_wrapped(&d.expr, 0))
+                format!(
+                    "{} = {}",
+                    ts.join(", "),
+                    self.fmt_expr_wrapped(&d.expr, 0)
+                )
             }
             Stmt::Assert(a) => {
                 let kw = if a.is_debug { "debug_assert" } else { "assert" };
                 match &a.message {
-                    Some(m) => format!("{} {}, {}", kw, self.fmt_expr_compact(&a.cond), self.fmt_expr_compact(m)),
-                    None => format!("{} {}", kw, self.fmt_expr_compact(&a.cond)),
+                    Some(m) => format!(
+                        "{} {}, {}",
+                        kw,
+                        self.fmt_expr_compact(&a.cond),
+                        self.fmt_expr_compact(m)
+                    ),
+                    None => {
+                        format!("{} {}", kw, self.fmt_expr_compact(&a.cond))
+                    }
                 }
             }
             Stmt::If(v) => self.fmt_if(v),
             Stmt::While(v) => {
-                format!("while {} do\n{}end", self.fmt_expr_compact(&v.cond), self.fmt_block_contents(&v.body))
+                format!(
+                    "while {} do\n{}end",
+                    self.fmt_expr_compact(&v.cond),
+                    self.fmt_block_contents(&v.body)
+                )
             }
             Stmt::Loop(v) => {
-                let label = v.label.as_ref().map(|l| format!("{}: ", l)).unwrap_or_default();
-                format!("{}loop do\n{}end", label, self.fmt_block_contents(&v.body))
+                let label = v
+                    .label
+                    .as_ref()
+                    .map(|l| format!("{}: ", l))
+                    .unwrap_or_default();
+                format!(
+                    "{}loop do\n{}end",
+                    label,
+                    self.fmt_block_contents(&v.body)
+                )
             }
             Stmt::For(v) => {
-                let label = v.label.as_ref().map(|l| format!("{}: ", l)).unwrap_or_default();
+                let label = v
+                    .label
+                    .as_ref()
+                    .map(|l| format!("{}: ", l))
+                    .unwrap_or_default();
                 let vars = match &v.var2 {
                     Some((v2, _)) => format!("{}, {}", v.var, v2),
                     None => v.var.clone(),
@@ -1750,13 +1977,21 @@ impl<'a> Formatter<'a> {
                 None => "continue".into(),
             },
             Stmt::Defer(v) => match &v.inner {
-                DeferInner::Expr(e) => format!("defer {}", self.fmt_expr_compact(e)),
-                DeferInner::Block(b) => format!("defer do\n{}end", self.fmt_block_contents(b)),
+                DeferInner::Expr(e) => {
+                    format!("defer {}", self.fmt_expr_compact(e))
+                }
+                DeferInner::Block(b) => {
+                    format!("defer do\n{}end", self.fmt_block_contents(b))
+                }
             },
-            Stmt::Delete(d) => format!("delete {}", self.fmt_expr_wrapped(&d.target, 0)),
+            Stmt::Delete(d) => {
+                format!("delete {}", self.fmt_expr_wrapped(&d.target, 0))
+            }
             // `async` preserved immediately before `do` (Async-11): the
             // formatter must never move it onto its own line.
-            Stmt::Scope(b) => format!("scope do\n{}end", self.fmt_block_contents(b)),
+            Stmt::Scope(b) => {
+                format!("scope do\n{}end", self.fmt_block_contents(b))
+            }
             Stmt::Yield(_) => "yield".into(),
         }
     }
@@ -1787,11 +2022,20 @@ impl<'a> Formatter<'a> {
         let outer = self.indent;
         let mut s = format!("if {} do\n", self.fmt_expr_compact(&v.cond));
         s.push_str(&self.fmt_block_inner(&v.then_block, 1));
-        s.push_str(&format!("{}end", " ".repeat(outer * self.opts.indent_width)));
+        s.push_str(&format!(
+            "{}end",
+            " ".repeat(outer * self.opts.indent_width)
+        ));
         if let Some(else_b) = &v.else_block {
-            s.push_str(&format!("\n{}else do\n", " ".repeat(outer * self.opts.indent_width)));
+            s.push_str(&format!(
+                "\n{}else do\n",
+                " ".repeat(outer * self.opts.indent_width)
+            ));
             s.push_str(&self.fmt_block_inner(else_b, 1));
-            s.push_str(&format!("{}end", " ".repeat(outer * self.opts.indent_width)));
+            s.push_str(&format!(
+                "{}end",
+                " ".repeat(outer * self.opts.indent_width)
+            ));
         }
         s
     }
@@ -1825,9 +2069,17 @@ impl<'a> Formatter<'a> {
             ExprKind::This => "this".into(),
             ExprKind::Super => "super".into(),
             ExprKind::Null => "null".into(),
-            ExprKind::Paren(inner) => format!("({})", self.fmt_expr_compact(inner)),
+            ExprKind::Paren(inner) => {
+                format!("({})", self.fmt_expr_compact(inner))
+            }
             ExprKind::Tuple(es) => {
-                format!("({})", es.iter().map(|x| self.fmt_expr_compact(x)).collect::<Vec<_>>().join(", "))
+                format!(
+                    "({})",
+                    es.iter()
+                        .map(|x| self.fmt_expr_compact(x))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             }
             ExprKind::Unary { op, expr } => {
                 format!("{}{}", unary_prefix(*op), self.fmt_expr_compact(expr))
@@ -1844,7 +2096,11 @@ impl<'a> Formatter<'a> {
                 )
             }
             ExprKind::Assign { lhs, value } => {
-                format!("{} = {}", self.fmt_expr_compact(lhs), self.fmt_expr_compact(value))
+                format!(
+                    "{} = {}",
+                    self.fmt_expr_compact(lhs),
+                    self.fmt_expr_compact(value)
+                )
             }
             ExprKind::CompoundAssign { op, lhs, value } => {
                 format!(
@@ -1854,7 +2110,11 @@ impl<'a> Formatter<'a> {
                     self.fmt_expr_compact(value)
                 )
             }
-            ExprKind::Conditional { cond, then_branch, else_branch } => {
+            ExprKind::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 format!(
                     "{} ? {} : {}",
                     self.fmt_expr_compact(cond),
@@ -1862,64 +2122,127 @@ impl<'a> Formatter<'a> {
                     self.fmt_expr_compact(else_branch)
                 )
             }
-            ExprKind::Range { start, end, inclusive } => {
+            ExprKind::Range {
+                start,
+                end,
+                inclusive,
+            } => {
                 let op = if *inclusive { "..=" } else { ".." };
                 format!(
                     "{}{}{}",
-                    start.as_ref().map(|x| self.fmt_expr_compact(x)).unwrap_or_default(),
+                    start
+                        .as_ref()
+                        .map(|x| self.fmt_expr_compact(x))
+                        .unwrap_or_default(),
                     op,
-                    end.as_ref().map(|x| self.fmt_expr_compact(x)).unwrap_or_default()
+                    end.as_ref()
+                        .map(|x| self.fmt_expr_compact(x))
+                        .unwrap_or_default()
                 )
             }
             ExprKind::NullableMemberAccess { object, field, .. } => {
                 format!("{}?.{}", self.fmt_expr_compact(object), field)
             }
-            ExprKind::Call { callee, args, type_args, .. } => {
+            ExprKind::Call {
+                callee,
+                args,
+                type_args,
+                ..
+            } => {
                 let ta = if type_args.is_empty() {
                     String::new()
                 } else {
                     format!(
                         "<{}>",
-                        type_args.iter().map(|t| self.fmt_type(t)).collect::<Vec<_>>().join(", ")
+                        type_args
+                            .iter()
+                            .map(|t| self.fmt_type(t))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     )
                 };
-                let ac: Vec<String> = args.iter().map(|a| self.fmt_call_arg(a)).collect();
+                let ac: Vec<String> =
+                    args.iter().map(|a| self.fmt_call_arg(a)).collect();
                 format!("{}{}({})", callee, ta, ac.join(", "))
             }
-            ExprKind::MethodCall { object, method, args, .. } => {
-                let ac: Vec<String> = args.iter().map(|a| self.fmt_call_arg(a)).collect();
-                format!("{}.{}({})", self.fmt_expr_compact(object), method, ac.join(", "))
+            ExprKind::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => {
+                let ac: Vec<String> =
+                    args.iter().map(|a| self.fmt_call_arg(a)).collect();
+                format!(
+                    "{}.{}({})",
+                    self.fmt_expr_compact(object),
+                    method,
+                    ac.join(", ")
+                )
             }
             ExprKind::New { ty, args, .. } => {
-                let ac: Vec<String> = args.iter().map(|a| self.fmt_call_arg(a)).collect();
+                let ac: Vec<String> =
+                    args.iter().map(|a| self.fmt_call_arg(a)).collect();
                 format!("new {}({})", self.fmt_type(ty), ac.join(", "))
             }
-            ExprKind::Await { task, .. } => format!("await {}", self.fmt_expr_compact(task)),
-            ExprKind::Spawn { task, .. } => format!("spawn {}", self.fmt_expr_compact(task)),
+            ExprKind::Await { task, .. } => {
+                format!("await {}", self.fmt_expr_compact(task))
+            }
+            ExprKind::Spawn { task, .. } => {
+                format!("spawn {}", self.fmt_expr_compact(task))
+            }
             ExprKind::MemberAccess { object, field, .. } => {
                 format!("{}.{}", self.fmt_expr_compact(object), field)
             }
             ExprKind::Index { object, index } => {
-                format!("{}[{}]", self.fmt_expr_compact(object), self.fmt_expr_compact(index))
+                format!(
+                    "{}[{}]",
+                    self.fmt_expr_compact(object),
+                    self.fmt_expr_compact(index)
+                )
             }
             ExprKind::ArrayLit(es) => {
-                format!("[{}]", es.iter().map(|x| self.fmt_expr_compact(x)).collect::<Vec<_>>().join(", "))
+                format!(
+                    "[{}]",
+                    es.iter()
+                        .map(|x| self.fmt_expr_compact(x))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             }
             ExprKind::VecEmpty(_) => "vec[]".into(),
             ExprKind::MapLit { .. } => self.fmt_expr_compact_multiline_hint(e),
-            ExprKind::Slice { object, start, end, inclusive } => {
+            ExprKind::Slice {
+                object,
+                start,
+                end,
+                inclusive,
+            } => {
                 let op = if *inclusive { "..=" } else { ".." };
                 format!(
                     "{}[{}{}{}]",
                     self.fmt_expr_compact(object),
-                    start.as_ref().map(|x| self.fmt_expr_compact(x)).unwrap_or_default(),
+                    start
+                        .as_ref()
+                        .map(|x| self.fmt_expr_compact(x))
+                        .unwrap_or_default(),
                     op,
-                    end.as_ref().map(|x| self.fmt_expr_compact(x)).unwrap_or_default()
+                    end.as_ref()
+                        .map(|x| self.fmt_expr_compact(x))
+                        .unwrap_or_default()
                 )
             }
-            ExprKind::StructLit { .. } => self.fmt_expr_compact_multiline_hint(e),
-            ExprKind::EnumVariant { enum_name, variant, args, .. } => {
-                let ac: Vec<String> = args.iter().map(|a| self.fmt_call_arg(a)).collect();
+            ExprKind::StructLit { .. } => {
+                self.fmt_expr_compact_multiline_hint(e)
+            }
+            ExprKind::EnumVariant {
+                enum_name,
+                variant,
+                args,
+                ..
+            } => {
+                let ac: Vec<String> =
+                    args.iter().map(|a| self.fmt_call_arg(a)).collect();
                 let base = match enum_name {
                     Some(n) => format!("{}.{}", n, variant),
                     None => format!(".{}", variant),
@@ -1932,10 +2255,17 @@ impl<'a> Formatter<'a> {
             }
             ExprKind::Match(m) => self.fmt_match_compact(m),
             ExprKind::Closure { params, body, .. } => {
-                let ps: Vec<String> = params.iter().map(|p| self.fmt_param(p)).collect();
+                let ps: Vec<String> =
+                    params.iter().map(|p| self.fmt_param(p)).collect();
                 match body.as_ref() {
-                    ClosureBody::Expr(e) => format!("|{}| => {}", ps.join(", "), self.fmt_expr_compact(e)),
-                    ClosureBody::Block(_) => format!("|{}| do ... end", ps.join(", ")),
+                    ClosureBody::Expr(e) => format!(
+                        "|{}| => {}",
+                        ps.join(", "),
+                        self.fmt_expr_compact(e)
+                    ),
+                    ClosureBody::Block(_) => {
+                        format!("|{}| do ... end", ps.join(", "))
+                    }
                 }
             }
         }
@@ -1947,14 +2277,22 @@ impl<'a> Formatter<'a> {
             ExprKind::MapLit { ty, entries } => {
                 let es: Vec<String> = entries
                     .iter()
-                    .map(|(k, v)| format!("{}: {}", self.fmt_expr_compact(k), self.fmt_expr_compact(v)))
+                    .map(|(k, v)| {
+                        format!(
+                            "{}: {}",
+                            self.fmt_expr_compact(k),
+                            self.fmt_expr_compact(v)
+                        )
+                    })
                     .collect();
                 format!("{} has {} end", self.fmt_type(ty), es.join(", "))
             }
             ExprKind::StructLit { ty, fields } => {
                 let es: Vec<String> = fields
                     .iter()
-                    .map(|(n, _, v)| format!("{} = {}", n, self.fmt_expr_compact(v)))
+                    .map(|(n, _, v)| {
+                        format!("{} = {}", n, self.fmt_expr_compact(v))
+                    })
                     .collect();
                 // `;` separators keep the single-line hint parseable
                 // (field initializers require statement terminators).
@@ -1971,18 +2309,30 @@ impl<'a> Formatter<'a> {
     fn fmt_call_arg(&self, a: &CallArg) -> String {
         match a {
             CallArg::Expr(e) => self.fmt_expr_compact(e),
-            CallArg::Named { name, value, .. } => format!("{}: {}", name, self.fmt_expr_compact(value)),
+            CallArg::Named { name, value, .. } => {
+                format!("{}: {}", name, self.fmt_expr_compact(value))
+            }
             CallArg::Out { ty, name, .. } => match ty {
                 Some(t) => format!("out {} {}", self.fmt_type(t), name),
                 None => format!("out {}", name),
             },
-            CallArg::Ref { expr, .. } => format!("ref {}", self.fmt_expr_compact(expr)),
+            CallArg::Ref { expr, .. } => {
+                format!("ref {}", self.fmt_expr_compact(expr))
+            }
         }
     }
 
     fn fmt_match_compact(&self, m: &MatchExpr) -> String {
-        let arms: Vec<String> = m.arms.iter().map(|a| self.fmt_match_arm_compact(a)).collect();
-        format!("match {} do {} end", self.fmt_expr_compact(&m.scrutinee), arms.join(", "))
+        let arms: Vec<String> = m
+            .arms
+            .iter()
+            .map(|a| self.fmt_match_arm_compact(a))
+            .collect();
+        format!(
+            "match {} do {} end",
+            self.fmt_expr_compact(&m.scrutinee),
+            arms.join(", ")
+        )
     }
 
     fn fmt_match_arm_compact(&self, a: &MatchArm) -> String {
@@ -2004,23 +2354,36 @@ impl<'a> Formatter<'a> {
             Pattern::Var(n, _) => n.clone(),
             Pattern::LitInt(v, _) => v.to_string(),
             Pattern::LitBool(v, _) => v.to_string(),
-            Pattern::Enum { variant, payload, .. } => {
+            Pattern::Enum {
+                variant, payload, ..
+            } => {
                 if let Some(pl) = payload {
                     format!(
                         ".{}({})",
                         variant,
-                        pl.iter().map(|x| self.fmt_pattern(x)).collect::<Vec<_>>().join(", ")
+                        pl.iter()
+                            .map(|x| self.fmt_pattern(x))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     )
                 } else {
                     format!(".{}", variant)
                 }
             }
             Pattern::Tuple(ps, _) => {
-                format!("({})", ps.iter().map(|x| self.fmt_pattern(x)).collect::<Vec<_>>().join(", "))
+                format!(
+                    "({})",
+                    ps.iter()
+                        .map(|x| self.fmt_pattern(x))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             }
-            Pattern::Alternative(ps, _) => {
-                ps.iter().map(|x| self.fmt_pattern(x)).collect::<Vec<_>>().join(" | ")
-            }
+            Pattern::Alternative(ps, _) => ps
+                .iter()
+                .map(|x| self.fmt_pattern(x))
+                .collect::<Vec<_>>()
+                .join(" | "),
         }
     }
 
@@ -2038,29 +2401,53 @@ impl<'a> Formatter<'a> {
             }
         }
         match &e.kind {
-            ExprKind::Call { callee, args, type_args, .. } => {
+            ExprKind::Call {
+                callee,
+                args,
+                type_args,
+                ..
+            } => {
                 self.fmt_call_wrapped(callee, type_args, args, None, base_width)
             }
-            ExprKind::MethodCall { object, method, args, .. } => {
+            ExprKind::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => {
                 let recv = self.fmt_expr_compact(object);
-                self.fmt_call_wrapped(method, &[], args, Some(&recv), base_width)
+                self.fmt_call_wrapped(
+                    method,
+                    &[],
+                    args,
+                    Some(&recv),
+                    base_width,
+                )
             }
             ExprKind::ArrayLit(es) => self.fmt_array_wrapped(es, base_width),
-            ExprKind::MapLit { ty, entries } => self.fmt_map_wrapped(ty, entries, e.span, false),
-            ExprKind::StructLit { ty, fields } => self.fmt_struct_lit_wrapped(ty, fields, e.span, false),
+            ExprKind::MapLit { ty, entries } => {
+                self.fmt_map_wrapped(ty, entries, e.span, false)
+            }
+            ExprKind::StructLit { ty, fields } => {
+                self.fmt_struct_lit_wrapped(ty, fields, e.span, false)
+            }
             ExprKind::Match(m) => self.fmt_match_wrapped(m),
             ExprKind::Await { task, .. } => {
                 format!("await {}", self.fmt_expr_wrapped(task, extra))
             }
             ExprKind::Spawn { task, .. } => {
                 format!("spawn {}", self.fmt_expr_wrapped(task, extra))
-            },
+            }
             ExprKind::Closure { params, body, .. } => match body.as_ref() {
                 ClosureBody::Block(b) => {
-                    let ps: Vec<String> = params.iter().map(|p| self.fmt_param(p)).collect();
+                    let ps: Vec<String> =
+                        params.iter().map(|p| self.fmt_param(p)).collect();
                     let mut s = format!("|{}| do\n", ps.join(", "));
                     s.push_str(&self.fmt_block_inner(b, 1));
-                    s.push_str(&format!("{}end", " ".repeat(self.indent * self.opts.indent_width)));
+                    s.push_str(&format!(
+                        "{}end",
+                        " ".repeat(self.indent * self.opts.indent_width)
+                    ));
                     s
                 }
                 _ => compact,
@@ -2084,7 +2471,14 @@ impl<'a> Formatter<'a> {
             let ta = if type_args.is_empty() {
                 String::new()
             } else {
-                format!("<{}>", type_args.iter().map(|t| self.fmt_type(t)).collect::<Vec<_>>().join(", "))
+                format!(
+                    "<{}>",
+                    type_args
+                        .iter()
+                        .map(|t| self.fmt_type(t))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             };
             return match receiver {
                 Some(r) => format!("{}.{}{}()", r, name, ta),
@@ -2096,7 +2490,14 @@ impl<'a> Formatter<'a> {
         let ta = if type_args.is_empty() {
             String::new()
         } else {
-            format!("<{}>", type_args.iter().map(|t| self.fmt_type(t)).collect::<Vec<_>>().join(", "))
+            format!(
+                "<{}>",
+                type_args
+                    .iter()
+                    .map(|t| self.fmt_type(t))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         };
         let head = match receiver {
             Some(r) => format!("{}.{}{}(", r, name, ta),
@@ -2118,7 +2519,10 @@ impl<'a> Formatter<'a> {
             }
             s.push('\n');
         }
-        s.push_str(&format!("{})", " ".repeat(self.indent * self.opts.indent_width)));
+        s.push_str(&format!(
+            "{})",
+            " ".repeat(self.indent * self.opts.indent_width)
+        ));
         s
     }
 
@@ -2128,9 +2532,14 @@ impl<'a> Formatter<'a> {
         }
         let compact = format!(
             "[{}]",
-            es.iter().map(|x| self.fmt_expr_compact(x)).collect::<Vec<_>>().join(", ")
+            es.iter()
+                .map(|x| self.fmt_expr_compact(x))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
-        if (self.indent) * self.opts.indent_width + compact.len() <= self.opts.max_width {
+        if (self.indent) * self.opts.indent_width + compact.len()
+            <= self.opts.max_width
+        {
             return compact;
         }
         let mut s = String::from("[\n");
@@ -2140,7 +2549,10 @@ impl<'a> Formatter<'a> {
             s.push_str(&self.fmt_expr_compact(e));
             s.push_str(",\n");
         }
-        s.push_str(&format!("{}]", " ".repeat(self.indent * self.opts.indent_width)));
+        s.push_str(&format!(
+            "{}]",
+            " ".repeat(self.indent * self.opts.indent_width)
+        ));
         s
     }
 
@@ -2161,8 +2573,13 @@ impl<'a> Formatter<'a> {
         let mut s = format!("{}has\n", prefix);
         for (k, v) in entries {
             let __leads = self.take_leading(k.span.start);
-;s.push_str(&self.emit_comments_at(&__leads, self.indent + 1));
-            s.push_str(&format!("{}{}: {}", ipad, self.fmt_expr_compact(k), self.fmt_expr_compact(v)));
+            s.push_str(&self.emit_comments_at(&__leads, self.indent + 1));
+            s.push_str(&format!(
+                "{}{}: {}",
+                ipad,
+                self.fmt_expr_compact(k),
+                self.fmt_expr_compact(v)
+            ));
             if let Some(t) = self.drain_same_line_trailing(v.span.end) {
                 s.push_str("  ");
                 s.push_str(&t);
@@ -2196,7 +2613,7 @@ impl<'a> Formatter<'a> {
         let mut s = format!("{}has\n", prefix);
         for (n, fspan, v) in fields {
             let __leads = self.take_leading(fspan.start);
-;s.push_str(&self.emit_comments_at(&__leads, self.indent + 1));
+            s.push_str(&self.emit_comments_at(&__leads, self.indent + 1));
             // nested struct/map literals need indent context
             let saved = self.indent;
             self.indent += 1;
@@ -2234,10 +2651,11 @@ impl<'a> Formatter<'a> {
 
     fn fmt_match_wrapped(&mut self, m: &MatchExpr) -> String {
         let outer = self.indent;
-        let mut s = format!("match {} do\n", self.fmt_expr_compact(&m.scrutinee));
+        let mut s =
+            format!("match {} do\n", self.fmt_expr_compact(&m.scrutinee));
         for arm in &m.arms {
             let __leads = self.take_leading(arm.span.start);
-;s.push_str(&self.emit_comments_at(&__leads, outer + 1));
+            s.push_str(&self.emit_comments_at(&__leads, outer + 1));
             let apad = " ".repeat((outer + 1) * self.opts.indent_width);
             let mut head = self.fmt_pattern(&arm.pattern);
             if let Some(g) = &arm.guard {
@@ -2245,8 +2663,14 @@ impl<'a> Formatter<'a> {
             }
             match &arm.body {
                 MatchArmBody::Expr(e) => {
-                    s.push_str(&format!("{}{} -> {}", apad, head, self.fmt_expr_compact(e)));
-                    if let Some(t) = self.drain_same_line_trailing(arm.span.end) {
+                    s.push_str(&format!(
+                        "{}{} -> {}",
+                        apad,
+                        head,
+                        self.fmt_expr_compact(e)
+                    ));
+                    if let Some(t) = self.drain_same_line_trailing(arm.span.end)
+                    {
                         s.push_str("  ");
                         s.push_str(&t);
                     }
@@ -2268,7 +2692,10 @@ impl<'a> Formatter<'a> {
         self.drain_until_into(m.span.end, &mut tail);
         self.indent = saved;
         s.push_str(&tail);
-        s.push_str(&format!("{}end", " ".repeat(outer * self.opts.indent_width)));
+        s.push_str(&format!(
+            "{}end",
+            " ".repeat(outer * self.opts.indent_width)
+        ));
         s
     }
 }
@@ -2430,12 +2857,12 @@ fn escape_char(c: char) -> String {
     }
 }
 
-
-
 // ── File / directory driver ────────────────────────────────────────────────
 
 /// Collect `.hll` files from `paths` (files + recursive directories).
-pub fn collect_sources(paths: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+pub fn collect_sources(
+    paths: &[std::path::PathBuf],
+) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
     for p in paths {
         collect_one(p, &mut files);
@@ -2455,7 +2882,9 @@ fn collect_one(p: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
         return;
     }
     if p.is_dir() {
-        let entries = std::fs::read_dir(p).map(|r| r.collect::<Vec<_>>()).unwrap_or_default();
+        let entries = std::fs::read_dir(p)
+            .map(|r| r.collect::<Vec<_>>())
+            .unwrap_or_default();
         for e in entries {
             if let Ok(e) = e {
                 collect_one(&e.path(), files);
@@ -2518,7 +2947,10 @@ mod tests {
     fn imports_two_blanks() {
         let src = "import foo\nimport bar\nconst int X = 1\n";
         let out = fmt(src);
-        assert!(out.contains("import foo\nimport bar\n\n\nconst int X = 1"), "got: {out:?}");
+        assert!(
+            out.contains("import foo\nimport bar\n\n\nconst int X = 1"),
+            "got: {out:?}"
+        );
     }
 
     #[test]
@@ -2534,7 +2966,8 @@ mod tests {
 
     #[test]
     fn comments_preserved() {
-        let src = "// header\nint main() do\n// inner\nreturn 1 // trailing\nend\n";
+        let src =
+            "// header\nint main() do\n// inner\nreturn 1 // trailing\nend\n";
         let out = fmt(src);
         assert!(out.contains("// header"), "got: {out}");
         assert!(out.contains("// inner"), "got: {out}");
@@ -2561,7 +2994,11 @@ mod tests {
     #[test]
     fn examples_idempotent() {
         for name in [
-            "basics", "hello_io", "data_control", "abstraction", "advanced",
+            "basics",
+            "hello_io",
+            "data_control",
+            "abstraction",
+            "advanced",
         ] {
             let path = format!("../..//examples/{}.hll", name);
             // tests run with CWD = crates/hella-fmt
@@ -2571,7 +3008,8 @@ mod tests {
                 continue;
             }
             let src = std::fs::read_to_string(&p).unwrap();
-            let once = format_source(&src).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let once =
+                format_source(&src).unwrap_or_else(|e| panic!("{name}: {e}"));
             let twice = format_source(&once).expect("second pass failed");
             assert_eq!(once, twice, "not idempotent: {name}");
             let _ = path;
