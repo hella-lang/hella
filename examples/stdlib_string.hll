@@ -22,6 +22,10 @@ int main() do
     assert equals(sub, "world") is true
     string cl = clone("hi")
     assert equals(cl, "hi") is true
+    freeString(ref sub)
+    assert isEmpty(sub)
+    freeString(ref cl)
+    assert isEmpty(cl)
     assert indexOf("", "") is 0
     assert indexOf("abc", "abcd") is -1
     assert indexOf("ababa", "aba") is 0

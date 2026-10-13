@@ -1,0 +1,158 @@
+// std::bytes — mutable binary buffers backed by `u8 vec`.
+// Import via: import std::bytes
+//
+// Byte buffers may contain zero and invalid UTF-8. Conversion to Hella's
+// NUL-terminated string is checked; use std::utf8 separately for text validity.
+import std::str
+
+
+/// Returns the number of bytes in the buffer.
+int length(u8 vec data) do
+    return data.len()
+end
+
+/// Returns true when the buffer contains no bytes.
+bool isEmptyBytes(u8 vec data) do
+    return data.is_empty()
+end
+
+/// Appends one byte. Values outside 0..255 are rejected.
+void push(ref u8 vec data, int value) do
+    assert value >= 0 and value <= 255
+    assert data.len() < 256
+    data.push(value)
+end
+
+/// Removes the final byte, returning false when empty.
+bool pop(ref u8 vec data, ref int value) do
+    value = 0
+    if data.is_empty() do
+        return false
+    end
+    value = data.pop()
+    value = value & 255
+    return true
+end
+
+/// Copies the byte at index into value; returns false for an invalid index.
+bool tryGet(u8 vec data, int index, ref int value) do
+    value = 0
+    if index < 0 or index >= data.len() do
+        return false
+    end
+    value = data[index]
+    value = value & 255
+    return true
+end
+
+/// Replaces a byte. Returns false for an invalid index/value.
+bool trySet(ref u8 vec data, int index, int value) do
+    if index < 0 or index >= data.len() or value < 0 or value > 255 do
+        return false
+    end
+    data[index] = value
+    return true
+end
+
+/// Appends every byte in source. Appending a buffer to itself duplicates its
+/// original contents once.
+void append(ref u8 vec data, u8 vec source) do
+    int count = source.len()
+    int i     = 0
+    assert count <= 256 - data.len()
+    while i < count do
+        data.push(source[i])
+        i = i + 1
+    end
+end
+
+/// Creates a byte buffer containing the bytes of s (excluding its terminator).
+u8 vec fromString(string s) do
+    u8 vec result = vec[]
+    int    i      = 0
+    int    count  = len(s)
+    assert count <= 256
+    while i < count do
+        int value = s[i]
+        result.push(value & 255)
+        i = i + 1
+    end
+    return result
+end
+
+/// Appends the bytes of s to an existing buffer.
+void appendString(ref u8 vec data, string s) do
+    int i     = 0
+    int count = len(s)
+    assert count <= 256 - data.len()
+    while i < count do
+        int value = s[i]
+        data.push(value & 255)
+        i = i + 1
+    end
+end
+
+/// Searches for a byte and returns its first index, or -1.
+int indexOfByte(u8 vec data, int value) do
+    int i       = 0
+    int count   = data.len()
+    int current = 0
+    if value < 0 or value > 255 do
+        return -1
+    end
+    while i < count do
+        current = data[i]
+        current = current & 255
+        if current is value do
+            return i
+        end
+        i = i + 1
+    end
+    return -1
+end
+
+/// Returns true when both buffers contain the same bytes.
+bool buffersEqual(u8 vec a, u8 vec b) do
+    int count = a.len()
+    int i     = 0
+    int byteA = 0
+    int byteB = 0
+    if count is not b.len() do
+        return false
+    end
+    while i < count do
+        byteA = a[i]
+        byteB = b[i]
+        if byteA is not byteB do
+            return false
+        end
+        i = i + 1
+    end
+    return true
+end
+
+/// Converts bytes to a new string. Fails and resets result for embedded NUL
+/// bytes; the returned string may contain invalid UTF-8.
+bool tryToString(u8 vec data, ref string result) do
+    int count = data.len()
+    int i     = 0
+    int value = 0
+    result = ""
+    while i < count do
+        value = data[i]
+        value = value & 255
+        if value is 0 do
+            return false
+        end
+        i = i + 1
+    end
+    result = allocateString(count)
+    i = 0
+    while i < count do
+        value = data[i]
+        value = value & 255
+        result[i] = value
+        i = i + 1
+    end
+    return true
+end

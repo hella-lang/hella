@@ -1,0 +1,70 @@
+// stdlib_csv.hll — regression for streaming CSV parsing.
+
+import std::csv
+import std::str
+import std::io
+
+int main() do
+    string input = "a,\"b,c\",\"quote \"\"inside\"\"\",\"line1\nline2\"\r\nx,,z,"
+    string field = ""
+    string expected = ""
+    int cursor = 0
+    int separator = -1
+    assert tryNextField(input, ref cursor, ref field, ref separator)
+    assert equals(field, "a")
+    assert separator is 44
+    freeString(ref field)
+    assert tryNextField(input, ref cursor, ref field, ref separator)
+    assert equals(field, "b,c")
+    assert separator is 44
+    freeString(ref field)
+    assert tryNextField(input, ref cursor, ref field, ref separator)
+    assert equals(field, "quote \"inside\"")
+    assert separator is 44
+    freeString(ref field)
+    assert tryNextField(input, ref cursor, ref field, ref separator)
+    assert equals(field, "line1\nline2")
+    assert separator is 10
+    freeString(ref field)
+    assert tryNextField(input, ref cursor, ref field, ref separator)
+    assert equals(field, "x")
+    assert separator is 44
+    freeString(ref field)
+    assert tryNextField(input, ref cursor, ref field, ref separator)
+    assert isEmpty(field)
+    assert separator is 44
+    freeString(ref field)
+    assert tryNextField(input, ref cursor, ref field, ref separator)
+    assert equals(field, "z")
+    assert separator is 44
+    freeString(ref field)
+    assert tryNextField(input, ref cursor, ref field, ref separator)
+    assert isEmpty(field)
+    assert separator is 0
+    assert cursor is -1
+    freeString(ref field)
+    assert tryNextField(input, ref cursor, ref field, ref separator) is false
+
+    cursor = 0
+    assert tryNextField("", ref cursor, ref field, ref separator)
+    assert isEmpty(field)
+    assert separator is 0
+    freeString(ref field)
+    cursor = 0
+    assert tryNextField("\"closed\"", ref cursor, ref field, ref separator)
+    assert equals(field, "closed")
+    freeString(ref field)
+    cursor = 0
+    assert tryNextField("\"unterminated", ref cursor, ref field, ref separator) is false
+    assert cursor is -2
+    assert separator is -1
+    assert isEmpty(field)
+    cursor = 0
+    assert tryNextField("bad\"quote", ref cursor, ref field, ref separator) is false
+    assert cursor is -2
+    cursor = 0
+    assert tryNextField("\"closed\"x", ref cursor, ref field, ref separator) is false
+    assert cursor is -2
+    println("csv ok")
+    return 0
+end

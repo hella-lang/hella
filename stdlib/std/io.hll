@@ -2,8 +2,8 @@
 // Import via: import std::io
 // or selective: import std::io::{print, println}
 //
-// Contract (REAL_STDLIB.md): the compiler knows only `extern "c"` lowering
-// and internal libc helpers for its own codegen (assert, interpolation).
+// User-facing IO is defined here; the compiler only supplies `extern "c"`
+// lowering and internal libc helpers for assert and interpolation.
 // Every user-facing IO name below is an ordinary Hella function defined here.
 // If you call `print` without `import std::io`, sema must report an
 // undefined name — that is the intended boundary, not a bug.
@@ -18,7 +18,7 @@ extern "c" from "libc" do
     i32 printf(string fmt, ...)
     int write(int fd, string buf, int count)
     string calloc(int n, int size)
-    int scanf(string fmt, ...)
+    int getchar()
     void free(string buf)
 end
 
@@ -43,38 +43,67 @@ void eprintln(string s) do
     eprint("\n")
 end
 
-/// Reads a line without LF, including blank lines and lines longer than 255 bytes.
-/// EOF/error yields the bytes read so far (empty string if none); not distinguishable.
-/// Embedded NUL input is not supported by Hella strings. Caller owns the heap buffer.
-string readLine() do
+/// Reads one line without LF. Returns true for a newline-terminated line,
+/// including an empty line, and for a nonempty final line ending at EOF.
+/// Returns false at EOF/read failure before any bytes or when the line
+/// contains NUL; the latter is consumed through its line ending. Both cases
+/// reset line to "". CR bytes are preserved. EOF and read errors cannot
+/// currently be distinguished. The caller owns a returned heap buffer.
+bool tryReadLine(ref string line) do
     int capacity = 256
     int size = 0
     string buf = calloc(1, capacity)
     assert buf is not null
-    string byte = calloc(1, 2)
-    assert byte is not null
-    // Only success (1) is accepted; C scanf returns a 32-bit int.
-    // Current extern lowering requires Hella int rather than i32 here.
-    while scanf("%1c", byte) is 1 do
-        if byte[0] is '\n' do
+    bool sawInput = false
+    line = ""
+    while true do
+        int byte = getchar()
+        if byte < 0 do
             break
         end
-        if size is capacity - 1 do
-            assert capacity <= 4611686018427387903
-            capacity = capacity * 2
-            string grown = calloc(1, capacity)
-            assert grown is not null
-            int i = 0
-            while i < size do
-                grown[i] = buf[i]
-                i = i + 1
+        sawInput = true
+        if byte is 10 do
+            break
+        end
+        if byte is 0 do
+            while true do
+                byte = getchar()
+                if byte < 0 or byte is 10 do
+                    break
+                end
             end
             free(buf)
-            buf = grown
+            return false
+        end else do
+            if size is capacity - 1 do
+                assert capacity <= 4611686018427387903
+                capacity = capacity * 2
+                string grown = calloc(1, capacity)
+                assert grown is not null
+                int i = 0
+                while i < size do
+                    grown[i] = buf[i]
+                    i = i + 1
+                end
+                free(buf)
+                buf = grown
+            end
+            buf[size] = byte
+            size = size + 1
         end
-        buf[size] = byte[0]
-        size = size + 1
     end
-    free(byte)
-    return buf
+    if not sawInput do
+        free(buf)
+        return false
+    end
+    line = buf
+    return true
+end
+
+/// Reads a line without LF. At EOF/read failure before any bytes, or for a line containing
+/// NUL, returns "". Use tryReadLine when those cases must be distinguished.
+string readLine() do
+    string line = ""
+    tryReadLine(ref line)
+    return line
 end

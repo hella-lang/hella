@@ -8,6 +8,8 @@
 import std::fs
 import std::io
 import std::str
+import std::bytes
+import std::fmt::{repeat}
 
 int main() do
     string path = "hella_fs_test_tmp.txt"
@@ -15,6 +17,64 @@ int main() do
     string content = ""
     string content2 = ""
     string missing = ""
+    assert tryWriteFile(path, data)
+    assert tryReadFile(path, ref content)
+    assert equals(content, data)
+    int measured = -1
+    assert tryFileSize(path, ref measured)
+    assert measured is 8
+    string checkedCopyPath = "hella_fs_checked_copy_tmp.txt"
+    assert tryCopyFile(path, checkedCopyPath)
+    assert tryReadFile(checkedCopyPath, ref content2)
+    assert equals(content2, data)
+    assert tryRemoveFile(checkedCopyPath)
+    assert tryCopyFile("hella_no_such_file_xyz.txt", checkedCopyPath) is false
+    assert exists(checkedCopyPath) is false
+    assert tryAppendFile(path, "!")
+    assert tryReadFile(path, ref content2)
+    assert equals(content2, "hello fs!")
+    assert tryRemoveFile(path)
+    content = "sentinel"
+    assert tryReadFile("hella_no_such_file_xyz.txt", ref content) is false
+    assert isEmpty(content)
+    measured = 99
+    assert tryFileSize("hella_no_such_file_xyz.txt", ref measured) is false
+    assert measured is -1
+    assert tryReadFile(path, ref content) is false
+    assert tryWriteFile(path, "")
+    assert tryReadFile(path, ref content)
+    assert isEmpty(content)
+    assert tryFileSize(path, ref measured)
+    assert measured is 0
+    assert tryRemoveFile(path)
+    string binaryPath = "hella_fs_binary_tmp.bin"
+    u8 vec binary = vec[]
+    u8 vec binaryRead = vec[]
+    u8 vec emptyBytes = vec[]
+    push(ref binary, 0)
+    push(ref binary, 65)
+    push(ref binary, 255)
+    assert tryWriteFileBytes(binaryPath, binary)
+    assert fileSize(binaryPath) is 3
+    assert tryReadFileBytes(binaryPath, ref binaryRead)
+    assert buffersEqual(binary, binaryRead)
+    assert tryAppendFileBytes(binaryPath, binary)
+    assert fileSize(binaryPath) is 6
+    assert tryReadFileBytes(binaryPath, ref binaryRead)
+    assert length(binaryRead) is 6
+    assert tryRemoveFile(binaryPath)
+    assert tryReadFileBytes("hella_missing_binary_tmp.bin", ref binaryRead) is false
+    assert isEmptyBytes(binaryRead)
+    string oversizedPath = "hella_fs_oversized_tmp.bin"
+    assert tryWriteFile(oversizedPath, repeat("x", 257))
+    binaryRead = fromString("old")
+    assert tryReadFileBytes(oversizedPath, ref binaryRead) is false
+    assert isEmptyBytes(binaryRead)
+    assert tryRemoveFile(oversizedPath)
+    assert tryWriteFileBytes(binaryPath, emptyBytes)
+    assert tryReadFileBytes(binaryPath, ref binaryRead)
+    assert isEmptyBytes(binaryRead)
+    assert tryRemoveFile(binaryPath)
     writeFile(path, data)
     assert exists(path) is true
     assert fileSize(path) is 8

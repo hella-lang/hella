@@ -1,0 +1,541 @@
+// std::json — strict JSON syntax validation (pure Hella).
+// Import via: import std::json
+//
+// This layer validates complete JSON documents and quotes string literals.
+// It does not deserialize values; Hella lacks a safe general dynamic-value
+// representation for JSON objects and arrays.
+
+extern "c" from "libc" do
+    void free(string value)
+end
+
+import std::utf8
+import std::str
+
+int jsonByte(string s, int pos) do
+    return s[pos]
+end
+
+int jsonHexValue(int c) do
+    if c >= 48 and c <= 57 do
+        return c - 48
+    end
+    if c >= 97 and c <= 102 do
+        return c - 97 + 10
+    end
+    if c >= 65 and c <= 70 do
+        return c - 65 + 10
+    end
+    return -1
+end
+
+void jsonSkipWhitespace(string s, ref int pos) do
+    int n = len(s)
+    while pos < n do
+        int c = jsonByte(s, pos)
+        if c is 32 or c is 9 or c is 10 or c is 13 do
+            pos = pos + 1
+        end else do
+            break
+        end
+    end
+end
+
+bool jsonReadString(string s, ref int pos) do
+    int n = len(s)
+    if pos >= n or jsonByte(s, pos) is not 34 do
+        return false
+    end
+    pos = pos + 1
+    while pos < n do
+        int c = jsonByte(s, pos)
+        pos = pos + 1
+        if c is 34 do
+            return true
+        end
+        if c < 32 do
+            return false
+        end
+        if c is 92 do
+            if pos >= n do
+                return false
+            end
+            c = jsonByte(s, pos)
+            pos = pos + 1
+            if c is 34 or c is 92 or c is 47 or c is 98 or c is 102 or c is 110 or c is 114 or c is 116 do
+                continue
+            end
+            if c is not 117 do
+                return false
+            end
+            int digits = 0
+            while digits < 4 do
+                if pos >= n or jsonHexValue(jsonByte(s, pos)) < 0 do
+                    return false
+                end
+                pos = pos + 1
+                digits = digits + 1
+            end
+        end
+    end
+    return false
+end
+
+bool jsonReadNumber(string s, ref int pos) do
+    int n = len(s)
+    if pos < n and jsonByte(s, pos) is 45 do
+        pos = pos + 1
+    end
+    if pos >= n do
+        return false
+    end
+    if jsonByte(s, pos) is 48 do
+        pos = pos + 1
+        if pos < n and jsonByte(s, pos) >= 48 and jsonByte(s, pos) <= 57 do
+            return false
+        end
+    end else do
+        if jsonByte(s, pos) < 49 or jsonByte(s, pos) > 57 do
+            return false
+        end
+        while pos < n and jsonByte(s, pos) >= 48 and jsonByte(s, pos) <= 57 do
+            pos = pos + 1
+        end
+    end
+    if pos < n and jsonByte(s, pos) is 46 do
+        pos = pos + 1
+        int start = pos
+        while pos < n and jsonByte(s, pos) >= 48 and jsonByte(s, pos) <= 57 do
+            pos = pos + 1
+        end
+        if pos is start do
+            return false
+        end
+    end
+    if pos < n and (jsonByte(s, pos) is 101 or jsonByte(s, pos) is 69) do
+        pos = pos + 1
+        if pos < n and (jsonByte(s, pos) is 43 or jsonByte(s, pos) is 45) do
+            pos = pos + 1
+        end
+        int start = pos
+        while pos < n and jsonByte(s, pos) >= 48 and jsonByte(s, pos) <= 57 do
+            pos = pos + 1
+        end
+        if pos is start do
+            return false
+        end
+    end
+    return true
+end
+
+bool jsonReadLiteral(string s, ref int pos, string literal) do
+    int n = len(s)
+    int size = len(literal)
+    if size > n - pos do
+        return false
+    end
+    int i = 0
+    while i < size do
+        int got = jsonByte(s, pos + i)
+        int wanted = jsonByte(literal, i)
+        if got is not wanted do
+            return false
+        end
+        i = i + 1
+    end
+    pos = pos + size
+    return true
+end
+
+bool jsonReadValue(string s, ref int pos, int depth) do
+    if depth > 128 do
+        return false
+    end
+    jsonSkipWhitespace(s, ref pos)
+    int n = len(s)
+    if pos >= n do
+        return false
+    end
+    int c = jsonByte(s, pos)
+    if c is 34 do
+        return jsonReadString(s, ref pos)
+    end
+    if c is 116 do
+        return jsonReadLiteral(s, ref pos, "true")
+    end
+    if c is 102 do
+        return jsonReadLiteral(s, ref pos, "false")
+    end
+    if c is 110 do
+        return jsonReadLiteral(s, ref pos, "null")
+    end
+    if c is 91 do
+        pos = pos + 1
+        jsonSkipWhitespace(s, ref pos)
+        if pos < n and jsonByte(s, pos) is 93 do
+            pos = pos + 1
+            return true
+        end
+        while true do
+            if not jsonReadValue(s, ref pos, depth + 1) do
+                return false
+            end
+            jsonSkipWhitespace(s, ref pos)
+            if pos >= n do
+                return false
+            end
+            if jsonByte(s, pos) is 93 do
+                pos = pos + 1
+                return true
+            end
+            if jsonByte(s, pos) is not 44 do
+                return false
+            end
+            pos = pos + 1
+        end
+    end
+    if c is 123 do
+        pos = pos + 1
+        jsonSkipWhitespace(s, ref pos)
+        if pos < n and jsonByte(s, pos) is 125 do
+            pos = pos + 1
+            return true
+        end
+        while true do
+            jsonSkipWhitespace(s, ref pos)
+            if not jsonReadString(s, ref pos) do
+                return false
+            end
+            jsonSkipWhitespace(s, ref pos)
+            if pos >= n or jsonByte(s, pos) is not 58 do
+                return false
+            end
+            pos = pos + 1
+            if not jsonReadValue(s, ref pos, depth + 1) do
+                return false
+            end
+            jsonSkipWhitespace(s, ref pos)
+            if pos >= n do
+                return false
+            end
+            if jsonByte(s, pos) is 125 do
+                pos = pos + 1
+                return true
+            end
+            if jsonByte(s, pos) is not 44 do
+                return false
+            end
+            pos = pos + 1
+        end
+    end
+    return jsonReadNumber(s, ref pos)
+end
+
+/// Returns true only when `s` is one complete RFC 8259 JSON value.
+/// Rejects malformed UTF-8 and nesting deeper than 128 containers.
+bool isValid(string s) do
+    if not validate(s) do
+        return false
+    end
+    int pos = 0
+    jsonSkipWhitespace(s, ref pos)
+    if not jsonReadValue(s, ref pos, 0) do
+        return false
+    end
+    jsonSkipWhitespace(s, ref pos)
+    return pos is len(s)
+end
+
+int jsonHexDigit(int value) do
+    if value < 10 do
+        return value + 48
+    end
+    return value - 10 + 97
+end
+
+/// Encodes `s` as a JSON string literal. Returns false and clears `quoted`
+/// when `s` is not valid UTF-8 or the output length would overflow.
+bool tryQuoteString(string s, ref string quoted) do
+    quoted = ""
+    if not validate(s) do
+        return false
+    end
+    int n = len(s)
+    int total = 2
+    int i = 0
+    while i < n do
+        int c = jsonByte(s, i)
+        int extra = 1
+        if c is 34 or c is 92 or c is 8 or c is 9 or c is 10 or c is 12 or c is 13 do
+            extra = 2
+        end else do
+            if c < 32 do
+                extra = 6
+            end
+        end
+        if extra > 9223372036854775806 - total do
+            return false
+        end
+        total = total + extra
+        i = i + 1
+    end
+    string result = allocateString(total)
+    int pos = 0
+    result[pos] = 34
+    pos = pos + 1
+    i = 0
+    while i < n do
+        int c = jsonByte(s, i)
+        if c is 34 or c is 92 do
+            result[pos] = 92
+            result[pos + 1] = c
+            pos = pos + 2
+        end else do
+            if c is 8 or c is 9 or c is 10 or c is 12 or c is 13 do
+                result[pos] = 92
+                if c is 8 do
+                    result[pos + 1] = 98
+                end else do
+                    if c is 9 do
+                        result[pos + 1] = 116
+                    end else do
+                        if c is 10 do
+                            result[pos + 1] = 110
+                        end else do
+                            if c is 12 do
+                                result[pos + 1] = 102
+                            end else do
+                                result[pos + 1] = 114
+                            end
+                        end
+                    end
+                end
+                pos = pos + 2
+            end else do
+                if c < 32 do
+                    result[pos] = 92
+                    result[pos + 1] = 117
+                    result[pos + 2] = 48
+                    result[pos + 3] = 48
+                    result[pos + 4] = jsonHexDigit(c >> 4)
+                    result[pos + 5] = jsonHexDigit(c & 15)
+                    pos = pos + 6
+                end else do
+                    result[pos] = c
+                    pos = pos + 1
+                end
+            end
+        end
+        i = i + 1
+    end
+    result[pos] = 34
+    quoted = result
+    return true
+end
+
+int jsonReadHex4(string s, ref int pos) do
+    int value = 0
+    int digit = 0
+    int i = 0
+    while i < 4 do
+        if pos >= len(s) do
+            return -1
+        end
+        digit = jsonHexValue(jsonByte(s, pos))
+        if digit < 0 do
+            return -1
+        end
+        value = value * 16 + digit
+        pos = pos + 1
+        i = i + 1
+    end
+    return value
+end
+
+void jsonWriteRune(string output, ref int pos, int rune) do
+    if rune < 128 do
+        output[pos] = rune
+        pos = pos + 1
+    end else do
+        if rune < 2048 do
+            output[pos] = 192 | (rune >> 6)
+            output[pos + 1] = 128 | (rune & 63)
+            pos = pos + 2
+        end else do
+            if rune < 65536 do
+                output[pos] = 224 | (rune >> 12)
+                output[pos + 1] = 128 | ((rune >> 6) & 63)
+                output[pos + 2] = 128 | (rune & 63)
+                pos = pos + 3
+            end else do
+                output[pos] = 240 | (rune >> 18)
+                output[pos + 1] = 128 | ((rune >> 12) & 63)
+                output[pos + 2] = 128 | ((rune >> 6) & 63)
+                output[pos + 3] = 128 | (rune & 63)
+                pos = pos + 4
+            end
+        end
+    end
+end
+
+/// Decodes one JSON string literal into UTF-8. Returns false and resets
+/// `value` for malformed input, invalid Unicode surrogate pairs, or U+0000
+/// (which Hella strings cannot represent).
+bool tryUnquoteString(string quoted, ref string value) do
+    value = ""
+    if not isValid(quoted) or len(quoted) < 2 do
+        return false
+    end
+    if jsonByte(quoted, 0) is not 34 or jsonByte(quoted, len(quoted) - 1) is not 34 do
+        return false
+    end
+    int n = len(quoted)
+    string result = allocateString(n)
+    int source = 1
+    int endIndex = n - 1
+    int dest = 0
+    while source < endIndex do
+        int c = jsonByte(quoted, source)
+        source = source + 1
+        if c is not 92 do
+            result[dest] = c
+            dest = dest + 1
+        end else do
+            c = jsonByte(quoted, source)
+            source = source + 1
+            if c is 34 or c is 92 or c is 47 do
+                result[dest] = c
+                dest = dest + 1
+            end else do
+                if c is 98 do
+                    result[dest] = 8
+                    dest = dest + 1
+                end else do
+                    if c is 102 do
+                        result[dest] = 12
+                        dest = dest + 1
+                    end else do
+                        if c is 110 do
+                            result[dest] = 10
+                            dest = dest + 1
+                        end else do
+                            if c is 114 do
+                                result[dest] = 13
+                                dest = dest + 1
+                            end else do
+                                if c is 116 do
+                                    result[dest] = 9
+                                    dest = dest + 1
+                                end else do
+                                    int rune = jsonReadHex4(quoted, ref source)
+                                    if rune < 0 do
+                                        free(result)
+                                        return false
+                                    end
+                                    if rune >= 55296 and rune <= 56319 do
+                                        if source + 6 > endIndex do
+                                            free(result)
+                                            return false
+                                        end
+                                        if jsonByte(quoted, source) is not 92 or jsonByte(quoted, source + 1) is not 117 do
+                                            free(result)
+                                            return false
+                                        end
+                                        source = source + 2
+                                        int low = jsonReadHex4(quoted, ref source)
+                                        if low < 56320 or low > 57343 do
+                                            free(result)
+                                            return false
+                                        end
+                                        rune = 65536 + (rune - 55296) * 1024 + low - 56320
+                                    end else do
+                                        if rune >= 56320 and rune <= 57343 do
+                                            free(result)
+                                            return false
+                                        end
+                                    end
+                                    if rune is 0 do
+                                        free(result)
+                                        return false
+                                    end
+                                    jsonWriteRune(result, ref dest, rune)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    value = result
+    return true
+end
+
+/// Finds the first occurrence of `name` in a top-level JSON object and copies
+/// its value as raw JSON into `rawValue`. Returns false and resets output when
+/// input is invalid, not an object, or the field is absent. JSON escapes in
+/// object keys are decoded before comparison.
+bool tryGetRawField(string object, string name, ref string rawValue) do
+    rawValue = ""
+    if not isValid(object) do
+        return false
+    end
+    int size = len(object)
+    int pos = 0
+    jsonSkipWhitespace(object, ref pos)
+    if pos >= size or jsonByte(object, pos) is not 123 do
+        return false
+    end
+    pos = pos + 1
+    jsonSkipWhitespace(object, ref pos)
+    if pos < size and jsonByte(object, pos) is 125 do
+        return false
+    end
+    while pos < size do
+        jsonSkipWhitespace(object, ref pos)
+        int keyStart = pos
+        if not jsonReadString(object, ref pos) do
+            return false
+        end
+        string keyLiteral = substring(object, keyStart, pos)
+        string keyValue = ""
+        bool keyDecoded = tryUnquoteString(keyLiteral, ref keyValue)
+        free(keyLiteral)
+        jsonSkipWhitespace(object, ref pos)
+        if pos >= size or jsonByte(object, pos) is not 58 do
+            if keyDecoded do
+                free(keyValue)
+            end
+            return false
+        end
+        pos = pos + 1
+        jsonSkipWhitespace(object, ref pos)
+        int valueStart = pos
+        if keyDecoded and equals(keyValue, name) do
+            free(keyValue)
+            if not jsonReadValue(object, ref pos, 1) do
+                return false
+            end
+            rawValue = substring(object, valueStart, pos)
+            return true
+        end
+        if keyDecoded do
+            free(keyValue)
+        end
+        if not jsonReadValue(object, ref pos, 1) do
+            return false
+        end
+        jsonSkipWhitespace(object, ref pos)
+        if pos >= size do
+            return false
+        end
+        if jsonByte(object, pos) is 125 do
+            return false
+        end
+        if jsonByte(object, pos) is not 44 do
+            return false
+        end
+        pos = pos + 1
+    end
+    return false
+end

@@ -1,0 +1,34 @@
+// stdlib_array.hll — regression for fixed-array intrinsic operations.
+
+import std::io
+import std::str
+
+int main() do
+    int arr values = [1, 2, 3, 4]
+    string arr names = ["Ada", "Grace"]
+    int sum = 0
+    assert values.len() is 4
+    assert values.is_empty() is false
+    assert values.contains(3)
+    assert values.contains(9) is false
+    assert values.first() is 1
+    assert values.last() is 4
+    assert values.at_or(0, -1) is 1
+    assert values.at_or(3, -1) is 4
+    assert values.at_or(-1, -1) is -1
+    assert values.at_or(4, -1) is -1
+    assert names.len() is 2
+    assert names.contains("Grace")
+    assert names.contains("Linus") is false
+    assert equals(names.first(), "Ada")
+    assert equals(names.last(), "Grace")
+    assert equals(names.at_or(1, "missing"), "Grace")
+    assert equals(names.at_or(-1, "missing"), "missing")
+    assert equals(names.at_or(2, "missing"), "missing")
+    for value in values do
+        sum = sum + value
+    end
+    assert sum is 10
+    println("array ok")
+    return 0
+end

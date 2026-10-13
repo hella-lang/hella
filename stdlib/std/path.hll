@@ -112,6 +112,38 @@ bool isAbsolute(string p) do
     return startsWith(p, "/")
 end
 
+/// Converts Windows `\\` separators to `/` without otherwise changing p.
+string normalizeSeparators(string p) do
+    int size = len(p)
+    string result = allocateString(size)
+    int i = 0
+    while i < size do
+        if p[i] is '\\' do
+            result[i] = '/'
+        end else do
+            result[i] = p[i]
+        end
+        i = i + 1
+    end
+    return result
+end
+
+/// Detects rooted POSIX paths, rooted Windows paths, and drive-rooted paths
+/// (`C:/x` or `C:\\x`). A drive-relative path like `C:x` is not absolute.
+bool isAbsolutePortable(string p) do
+    int size = len(p)
+    if size is 0 do
+        return false
+    end
+    if p[0] is '/' or p[0] is '\\' do
+        return true
+    end
+    if size >= 3 and isAlpha(p[0]) and p[1] is ':' do
+        return p[2] is '/' or p[2] is '\\'
+    end
+    return false
+end
+
 /// Lexically normalizes `p` (Go `path.Clean` parity, `/`-separated only):
 /// repeated slashes collapse, `.` segments drop, `..` pops the preceding
 /// segment (never above the root; survivors stay relative), trailing

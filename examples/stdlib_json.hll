@@ -1,0 +1,109 @@
+// stdlib_json.hll — regression for strict JSON document validation.
+
+import std::json
+import std::str
+import std::io
+import std::bytes
+
+int main() do
+    string object = concat("{", "\"name\":\"Ada\", \"ok\":true}")
+    string nested = concat("[1, false, null, ", concat(object, "]"))
+    string trailingCommaObject = concat("{", "\"x\":1,}")
+    u8 vec invalidBytes = vec[]
+    u8 vec controls = vec[]
+    string invalidUtf8 = ""
+    string rawControl = ""
+    string quoted = "stale"
+    string decoded = "stale"
+    string rawField = "stale"
+    string innerObject = concat("{", concat("\"score\":12", "}"))
+    string nestedObject = concat("{", concat("\"profile\":", concat(innerObject, "}")))
+    string expectedProfile = concat("{", "\"score\":12}")
+    string duplicateKeys = concat("{", "\"k\":1, \"k\":2}")
+    string escapedKey = concat("{", concat("\"\\u006eame\":\"Escaped\"", "}"))
+    invalidBytes.push(255)
+    assert tryToString(invalidBytes, ref invalidUtf8)
+    controls.push(1)
+    assert tryToString(controls, ref rawControl)
+    string deep = ""
+    int depth = 0
+    while depth < 129 do
+        deep = concat(deep, "[")
+        depth = depth + 1
+    end
+    deep = concat(deep, "null")
+    while depth > 0 do
+        deep = concat(deep, "]")
+        depth = depth - 1
+    end
+    assert isValid("null")
+    assert isValid(" true ")
+    assert isValid("-12.50e+3")
+    assert isValid(nested)
+    assert isValid("\"escaped: \\\" \\\\ \\/ \\b \\f \\n \\r \\t \\u0041\"")
+    assert isValid("\"unicode: \\u00a2\"")
+    assert isValid("[]")
+    assert isValid("{}")
+    assert isValid(concat(" \t\r\n ", concat(object, "  ")))
+    assert isValid("") is false
+    assert isValid("01") is false
+    assert isValid("+1") is false
+    assert isValid("1.") is false
+    assert isValid("1e") is false
+    assert isValid("NaN") is false
+    assert isValid("[1,]") is false
+    assert isValid(trailingCommaObject) is false
+    assert isValid("\"bad\\q\"") is false
+    assert isValid("\"bad\\u12xz\"") is false
+    assert isValid("\"bad\\u123\"") is false
+    assert isValid("\"raw\nnewline\"") is false
+    assert isValid(invalidUtf8) is false
+    assert isValid("true false") is false
+    assert isValid("[") is false
+    assert isValid(deep) is false
+    assert isValid(substring(deep, 1, len(deep) - 1))
+    bool simpleDecoded = tryUnquoteString("\"hello\"", ref decoded)
+    assert simpleDecoded
+    assert equals(decoded, "hello")
+    assert tryQuoteString("line\n\"\\", ref quoted)
+    assert equals(quoted, "\"line\\n\\\"\\\\\"")
+    assert isValid(quoted)
+    assert tryQuoteString(rawControl, ref quoted)
+    assert equals(quoted, "\"\\u0001\"")
+    assert isValid(quoted)
+    bool decodedOk = tryUnquoteString("\"line\\n\\u00a2\"", ref decoded)
+    assert decodedOk
+    assert equals(decoded, "line\n¢")
+    assert tryUnquoteString("\"\\ud83d\\ude00\"", ref decoded)
+    assert equals(decoded, "😀")
+    assert tryUnquoteString("\"\\ud83d\"", ref decoded) is false
+    assert equals(decoded, "")
+    assert tryUnquoteString("\"\\u0000\"", ref decoded) is false
+    assert equals(decoded, "")
+    assert tryGetRawField(object, "name", ref rawField)
+    assert equals(rawField, "\"Ada\"")
+    assert tryUnquoteString(rawField, ref decoded)
+    assert equals(decoded, "Ada")
+    freeString(ref rawField)
+    freeString(ref decoded)
+    assert tryGetRawField(object, "ok", ref rawField)
+    assert equals(rawField, "true")
+    freeString(ref rawField)
+    assert isValid(nestedObject)
+    assert tryGetRawField(nestedObject, "profile", ref rawField)
+    assert equals(rawField, expectedProfile)
+    freeString(ref rawField)
+    assert tryGetRawField(escapedKey, "name", ref rawField)
+    assert equals(rawField, "\"Escaped\"")
+    freeString(ref rawField)
+    assert tryGetRawField(duplicateKeys, "k", ref rawField)
+    assert equals(rawField, "1")
+    freeString(ref rawField)
+    assert tryGetRawField(object, "missing", ref rawField) is false
+    assert equals(rawField, "")
+    assert tryGetRawField("[]", "name", ref rawField) is false
+    assert tryQuoteString(invalidUtf8, ref quoted) is false
+    assert equals(quoted, "")
+    println("json ok")
+    return 0
+end

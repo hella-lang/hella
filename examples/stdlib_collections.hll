@@ -5,15 +5,44 @@ import std::map
 import std::io
 import std::str
 
+void setMapValue(ref string:int values, string key, int value) do
+    values[key] = value
+end
+
 int main() do
     int vec nums = [1, 2, 3]
+    int vec noNums = vec[]
     string vec names = ["John"]
+    string vec repeatedNames = ["John", "Jane", "John"]
+    int vec clonedNums = vec[]
+    int vec popNums = vec[]
+    int vec editNums = [10, 20, 30]
+    string vec editNames = ["a", "b", "c"]
+    int vec sortNums = [4, 1, 3, 1, 2]
+    string vec sortNames = ["pear", "apple", "orange", "apple"]
     string:int ages = has "John": 25 end
     int:int squares = has 2: 4 end
     string:string caps = has "us": "dc" end
+    string:int clearAges = has "a": 1, "b": 2 end
+    int:int clearSquares = has 1: 1, 2: 4 end
+    string:string clearCaps = has "a": "A", "b": "B" end
     double vec ds = [1.5]
+    string vec ageKeys = vec[]
+    int vec ageValues = vec[]
+    int vec squareKeys = vec[]
+    int vec squareValues = vec[]
+    string vec capKeys = vec[]
+    string vec capValues = vec[]
     string joined = ""
     int total = 0
+    int bound = -1
+    int mapValue = -1
+    int removed = -1
+    string poppedName = "stale"
+    string mapText = "stale"
+    double measured = 0.0
+    assert iCapacity(nums) is 256
+    assert iRemainingCapacity(nums) is 253
     assert iLen(nums) is 3
     assert iContains(nums, 2) is true
     assert iContains(nums, 9) is false
@@ -22,42 +51,272 @@ int main() do
     assert iSum(nums) is 6
     assert iIndexOf(nums, 2) is 1
     assert iIndexOf(nums, 9) is -1
+    assert iCount(nums, 2) is 1
+    assert iCount(nums, 9) is 0
+    assert iTryGet(nums, 1, ref bound)
+    assert bound is 2
+    bound = 42
+    assert iTryGet(nums, -1, ref bound) is false
+    assert bound is 0
+    assert iTryGet(nums, 3, ref bound) is false
+    assert iTryMin(nums, ref bound)
+    assert bound is 1
+    assert iTryMax(nums, ref bound)
+    assert bound is 3
+    bound = 42
+    assert iTryMin(noNums, ref bound) is false
+    assert bound is 0
+    assert iTryMax(noNums, ref bound) is false
+    assert bound is 0
+    clonedNums = iClone(nums)
+    assert iLen(clonedNums) is 3
+    assert iSum(clonedNums) is 6
+    iPush(ref clonedNums, 99)
+    assert iLen(nums) is 3
+    iClear(ref clonedNums)
+    assert iIsEmpty(clonedNums)
+    int vec truncNums = [1, 2, 3, 4]
+    assert iTryTruncate(ref truncNums, 2)
+    assert iLen(truncNums) is 2
+    assert truncNums[1] is 2
+    assert iTryTruncate(ref truncNums, 8)
+    assert iLen(truncNums) is 2
+    assert iTryTruncate(ref truncNums, -1) is false
+    assert iLen(truncNums) is 2
+    int vec safeRead = [7, 8]
+    assert safeRead.at_or(0, -1) is 7
+    assert safeRead.at_or(2, -1) is -1
     iPush(ref nums, 4)
     assert iLen(nums) is 4
     assert iSum(nums) is 10
     assert iPop(ref nums) is 4
     assert iLen(nums) is 3
+    popNums = iClone(nums)
+    assert iTryPop(ref popNums, ref bound)
+    assert bound is 3
+    assert iLen(nums) is 3
+    iClear(ref noNums)
+    bound = 42
+    assert iTryPop(ref noNums, ref bound) is false
+    assert bound is 0
+    assert iTryInsert(ref editNums, 1, 15)
+    assert iLen(editNums) is 4
+    assert editNums[0] is 10
+    assert editNums[1] is 15
+    assert editNums[2] is 20
+    assert editNums[3] is 30
+    assert iTryInsert(ref editNums, 6, 99) is false
+    assert iTryRemoveAt(ref editNums, 2, ref removed)
+    assert removed is 20
+    assert editNums[0] is 10
+    assert editNums[1] is 15
+    assert editNums[2] is 30
+    assert iTryRemoveAt(ref editNums, -1, ref removed) is false
+    assert removed is 0
+    assert iTrySwapRemoveAt(ref editNums, 0, ref removed)
+    assert removed is 10
+    assert editNums[0] is 30
+    assert editNums[1] is 15
+    iReverse(ref editNums)
+    assert editNums[0] is 15
+    assert editNums[1] is 30
+    int vec appendedNums = [40, 50]
+    assert iTryAppend(ref editNums, appendedNums)
+    assert editNums[2] is 40
+    assert editNums[3] is 50
+    iSort(ref sortNums)
+    assert sortNums[0] is 1
+    assert sortNums[1] is 1
+    assert sortNums[2] is 2
+    assert sortNums[3] is 3
+    assert sortNums[4] is 4
+    int vec selfAppend = [1, 2, 3]
+    assert iTryAppend(ref selfAppend, selfAppend)
+    assert iLen(selfAppend) is 6
+    assert selfAppend[3] is 1
+    assert selfAppend[4] is 2
+    assert selfAppend[5] is 3
+    assert iTryInsert(ref editNums, 2, 35)
+    assert iTryRemoveAt(ref editNums, 2, ref removed)
+    assert removed is 35
+    int vec fullNums = vec[]
+    while iLen(fullNums) < 256 do
+        iPush(ref fullNums, iLen(fullNums))
+    end
+    assert iTryInsert(ref fullNums, 0, -1) is false
+    int vec oneMore = [999]
+    assert iTryAppend(ref fullNums, oneMore) is false
+    assert iLen(fullNums) is 256
+    assert fullNums[255] is 255
+    assert sTryInsert(ref editNames, 1, "x")
+    assert equals(editNames[0], "a")
+    assert equals(editNames[1], "x")
+    assert equals(editNames[2], "b")
+    assert equals(editNames[3], "c")
+    string removedName = ""
+    assert sTryRemoveAt(ref editNames, 2, ref removedName)
+    assert equals(removedName, "b")
+    assert equals(editNames[2], "c")
+    assert sTrySwapRemoveAt(ref editNames, 0, ref removedName)
+    assert equals(removedName, "a")
+    assert equals(editNames[0], "c")
+    sReverse(ref editNames)
+    assert equals(editNames[0], "x")
+    assert equals(editNames[1], "c")
+    string vec appendedNames = ["d", "e"]
+    assert sTryAppend(ref editNames, appendedNames)
+    assert equals(editNames[2], "d")
+    assert equals(editNames[3], "e")
+    sSort(ref sortNames)
+    assert equals(sortNames[0], "apple")
+    assert equals(sortNames[1], "apple")
+    assert equals(sortNames[2], "orange")
+    assert equals(sortNames[3], "pear")
     assert sLen(names) is 1
+    assert sCapacity(names) is 256
+    assert sRemainingCapacity(names) is 255
     assert sContains(names, "John") is true
     assert sContains(names, "Jane") is false
+    assert sIndexOf(repeatedNames, "Jane") is 1
+    assert sIndexOf(repeatedNames, "Nobody") is -1
+    assert sCount(repeatedNames, "John") is 2
+    assert sCount(repeatedNames, "Jane") is 1
     assert equals(sFirst(names), "John") is true
+    assert sTryGet(names, 0, ref poppedName)
+    assert equals(poppedName, "John")
+    assert sTryGet(names, 1, ref poppedName) is false
+    assert equals(poppedName, "")
     sPush(ref names, "Jane")
     assert sLen(names) is 2
     assert equals(sLast(names), "Jane") is true
     joined = sJoin(names, ",")
     assert equals(joined, "John,Jane") is true
     assert sPop(ref names) is "Jane"
+    assert sTryPop(ref names, ref poppedName)
+    assert equals(poppedName, "John")
+    assert sTryPop(ref names, ref poppedName) is false
+    assert equals(poppedName, "")
+    sClear(ref names)
+    assert sIsEmpty(names)
+    string vec truncNames = ["first", "middle", "last"]
+    assert sTryTruncate(ref truncNames, 1)
+    assert sLen(truncNames) is 1
+    assert equals(truncNames[0], "first")
     assert dLen(ds) is 1
+    assert dCapacity(ds) is 256
+    assert dRemainingCapacity(ds) is 255
     dPush(ref ds, 2.5)
     assert dLen(ds) is 2
+    assert dTryGet(ds, 1, ref measured)
+    assert measured is 2.5
+    assert dTryGet(ds, 2, ref measured) is false
+    assert measured is 0.0
+    assert dTryPop(ref ds, ref measured)
+    assert measured is 2.5
+    assert dLen(ds) is 1
+    assert dIsEmpty(ds) is false
+    assert dFirst(ds) is 1.5
+    assert dLast(ds) is 1.5
+    double vec clonedDoubles = dClone(ds)
+    dPush(ref clonedDoubles, 2.5)
+    assert dLen(ds) is 1
+    assert dLen(clonedDoubles) is 2
+    assert dPop(ref clonedDoubles) is 2.5
+    dClear(ref clonedDoubles)
+    assert dIsEmpty(clonedDoubles)
+    double vec editDoubles = [1.5, 3.5]
+    assert dTryInsert(ref editDoubles, 1, 2.5)
+    assert editDoubles[0] is 1.5
+    assert editDoubles[1] is 2.5
+    assert editDoubles[2] is 3.5
+    assert dTryRemoveAt(ref editDoubles, 1, ref measured)
+    assert measured is 2.5
+    assert editDoubles[1] is 3.5
+    assert dTrySwapRemoveAt(ref editDoubles, 0, ref measured)
+    assert measured is 1.5
+    assert editDoubles[0] is 3.5
+    double vec appendedDoubles = [4.5, 5.5]
+    assert dTryAppend(ref editDoubles, appendedDoubles)
+    assert editDoubles[1] is 4.5
+    dReverse(ref editDoubles)
+    assert editDoubles[0] is 5.5
+    assert editDoubles[2] is 3.5
+    assert dTryTruncate(ref editDoubles, 2)
+    assert dLen(editDoubles) is 2
+    assert dTryTruncate(ref editDoubles, -1) is false
+    assert dLen(editDoubles) is 2
     assert siLen(ages) is 1
     assert siHas(ages, "John") is true
     assert siHas(ages, "Bob") is false
     assert siGetOr(ages, "John", 0) is 25
     assert siGetOr(ages, "Bob", 99) is 99
+    assert siTryGet(ages, "John", ref mapValue)
+    assert mapValue is 25
+    mapValue = 42
+    assert siTryGet(ages, "Bob", ref mapValue) is false
+    assert mapValue is 0
+    ageKeys = siKeys(ages)
+    ageValues = siValues(ages)
+    assert sLen(ageKeys) is 1
+    assert sContains(ageKeys, "John")
+    assert iLen(ageValues) is 1
+    assert iContains(ageValues, 25)
     assert iiHas(squares, 2) is true
     assert iiHas(squares, 3) is false
     assert iiGetOr(squares, 3, 7) is 7
+    assert iiTryGet(squares, 2, ref mapValue)
+    assert mapValue is 4
+    assert iiTryGet(squares, 3, ref mapValue) is false
+    assert mapValue is 0
     assert iiLen(squares) is 1
     assert iiIsEmpty(squares) is false
+    squareKeys = iiKeys(squares)
+    squareValues = iiValues(squares)
+    assert iLen(squareKeys) is 1
+    assert iContains(squareKeys, 2)
+    assert iContains(squareValues, 4)
     assert ssLen(caps) is 1
     assert ssHas(caps, "us") is true
     assert ssHas(caps, "fr") is false
     assert equals(ssGetOr(caps, "us", "?"), "dc") is true
     assert equals(ssGetOr(caps, "fr", "?"), "?") is true
+    assert ssTryGet(caps, "us", ref mapText)
+    assert equals(mapText, "dc")
+    assert ssTryGet(caps, "fr", ref mapText) is false
+    assert equals(mapText, "")
     assert ssIsEmpty(caps) is false
+    capKeys = ssKeys(caps)
+    capValues = ssValues(caps)
+    assert sLen(capKeys) is 1
+    assert sContains(capKeys, "us")
+    assert sContains(capValues, "dc")
     assert siHas(ages, "John") is true
     assert siIsEmpty(ages) is false
+    siPut(ref ages, "John", 26)
+    siPut(ref ages, "Jane", 30)
+    assert siGetOr(ages, "John", 0) is 26
+    assert siGetOr(ages, "Jane", 0) is 30
+    assert siRemove(ref ages, "John")
+    assert siRemove(ref ages, "John") is false
+    assert siLen(ages) is 1
+    assert siRemove(ref ages, "Jane")
+    iiPut(ref squares, 4, 16)
+    assert iiTryGet(squares, 4, ref mapValue)
+    assert mapValue is 16
+    assert iiRemove(ref squares, 4)
+    assert iiRemove(ref squares, 4) is false
+    ssPut(ref caps, "ca", "ott")
+    assert ssTryGet(caps, "ca", ref mapText)
+    assert equals(mapText, "ott")
+    assert ssRemove(ref caps, "ca")
+    assert ssRemove(ref caps, "ca") is false
+    siPut(ref ages, "John", 25)
+    siClear(ref clearAges)
+    iiClear(ref clearSquares)
+    ssClear(ref clearCaps)
+    assert siIsEmpty(clearAges)
+    assert iiIsEmpty(clearSquares)
+    assert ssIsEmpty(clearCaps)
     // Direct local mutation (facades cannot carry keyed/ref calls, so no
     // siPut exists): subscript insert/update/read, contains/get_or/len
     // methods, remove. NOTE: m.clear() miscompiles (LLVM verification) —
@@ -75,6 +334,9 @@ int main() do
     m2.remove("x")
     assert siHas(m2, "x") is false
     assert siLen(m2) is 1
+    setMapValue(ref m2, "z", 9)
+    assert m2["z"] is 9
+    assert siLen(m2) is 2
     total = iSum(nums) + siGetOr(ages, "Bob", 99) + iiGetOr(squares, 2, 0)
     assert total is 109
     println("collections ok")

@@ -13,89 +13,304 @@ extern "c" from "libc" do
     int access(string path, int mode)
     string calloc(int n, int size)
     int strlen(string s)
+    void free(string p)
 end
+
+import std::bytes
 
 /// Returns true when `path` exists (via `access` mode 0).
 bool exists(string path) do
     return access(path, 0) is 0
 end
 
+/// Reads a text file into a new heap string. Returns false and resets content
+/// to "" on open, seek, read, close, allocation, or embedded-NUL failure.
+/// Empty files succeed. Hella strings cannot represent embedded NUL bytes.
+bool tryReadFile(string path, ref string content) do
+    string f = null
+    int size = 0
+    string buf = null
+    int read = 0
+    int closeStatus = 0
+    int i = 0
+    content = ""
+    f = fopen(path, "rb")
+    if f is null do
+        return false
+    end
+    if fseek(f, 0, 2) is not 0 do
+        fclose(f)
+        return false
+    end
+    size = ftell(f)
+    if size < 0 or size > 9223372036854775806 do
+        fclose(f)
+        return false
+    end
+    if fseek(f, 0, 0) is not 0 do
+        fclose(f)
+        return false
+    end
+    buf = calloc(1, size + 1)
+    if buf is null do
+        fclose(f)
+        return false
+    end
+    if size > 0 do
+        read = fread(buf, 1, size, f)
+    end
+    closeStatus = fclose(f)
+    if read is not size or closeStatus is not 0 do
+        free(buf)
+        return false
+    end
+    while i < size do
+        if buf[i] is '\0' do
+            free(buf)
+            return false
+        end
+        i = i + 1
+    end
+    content = buf
+    return true
+end
+
+/// Writes a text string to path, truncating it. Returns false if the file
+/// cannot be opened, completely written, or successfully closed.
+bool tryWriteFile(string path, string data) do
+    string f = fopen(path, "wb")
+    int size = strlen(data)
+    int written = 0
+    int closeStatus = 0
+    if f is null do
+        return false
+    end
+    if size > 0 do
+        written = fwrite(data, 1, size, f)
+    end
+    closeStatus = fclose(f)
+    return written is size and closeStatus is 0
+end
+
+/// Appends a text string to path, creating it if needed.
+bool tryAppendFile(string path, string data) do
+    string f = fopen(path, "ab")
+    int size = strlen(data)
+    int written = 0
+    int closeStatus = 0
+    if f is null do
+        return false
+    end
+    if size > 0 do
+        written = fwrite(data, 1, size, f)
+    end
+    closeStatus = fclose(f)
+    return written is size and closeStatus is 0
+end
+
+/// Copies a text file and reports failures. The destination is created or
+/// truncated before writing; on a later failure it may contain partial data.
+/// Embedded NUL bytes are rejected because this operation copies Hella text,
+/// not arbitrary binary data.
+bool tryCopyFile(string src, string dst) do
+    string content = ""
+    int expectedSize = 0
+    int actualSize = -1
+    if not tryReadFile(src, ref content) do
+        return false
+    end
+    expectedSize = strlen(content)
+    if not tryWriteFile(dst, content) do
+        return false
+    end
+    if not tryFileSize(dst, ref actualSize) do
+        return false
+    end
+    return actualSize is expectedSize
+end
+
+/// Removes path and reports whether the operation succeeded.
+bool tryRemoveFile(string path) do
+    return remove(path) is 0
+end
+
+/// Stores the file size in bytes, or resets size to -1 and returns false.
+bool tryFileSize(string path, ref int size) do
+    string f = fopen(path, "rb")
+    size = -1
+    if f is null do
+        return false
+    end
+    if fseek(f, 0, 2) is not 0 do
+        fclose(f)
+        return false
+    end
+    size = ftell(f)
+    if size < 0 do
+        fclose(f)
+        size = -1
+        return false
+    end
+    if fclose(f) is not 0 do
+        size = -1
+        return false
+    end
+    return true
+end
+
+/// Reads arbitrary bytes from path. Returns false and resets data to an empty
+/// vector on open, seek, read, close, or allocation failure.
+bool tryReadFileBytes(string path, ref u8 vec data) do
+    string f = fopen(path, "rb")
+    int size = 0
+    string buf = null
+    int read = 0
+    int closeStatus = 0
+    u8 vec result = vec[]
+    int i = 0
+    int oldCount = length(data)
+    int discarded = 0
+    while oldCount > 0 do
+        discarded = data.pop()
+        oldCount = oldCount - 1
+    end
+    if f is null do
+        return false
+    end
+    if fseek(f, 0, 2) is not 0 do
+        fclose(f)
+        return false
+    end
+    size = ftell(f)
+    if size < 0 or size > 256 do
+        fclose(f)
+        return false
+    end
+    if fseek(f, 0, 0) is not 0 do
+        fclose(f)
+        return false
+    end
+    if size > 0 do
+        buf = calloc(1, size)
+        if buf is null do
+            fclose(f)
+            return false
+        end
+        read = fread(buf, 1, size, f)
+    end
+    closeStatus = fclose(f)
+    if read is not size or closeStatus is not 0 do
+        if buf is not null do
+            free(buf)
+        end
+        return false
+    end
+    while i < size do
+        int value = buf[i]
+        push(ref result, value & 255)
+        i = i + 1
+    end
+    if buf is not null do
+        free(buf)
+    end
+    data = result
+    return true
+end
+
+/// Writes a byte buffer exactly, including NUL and invalid UTF-8. Returns
+/// false if open, allocation, write, or close fails.
+bool tryWriteFileBytes(string path, u8 vec data) do
+    string f = fopen(path, "wb")
+    int size = data.len()
+    string buf = null
+    int written = 0
+    int closeStatus = 0
+    int i = 0
+    int value = 0
+    if f is null do
+        return false
+    end
+    if size > 0 do
+        buf = calloc(1, size)
+        if buf is null do
+            fclose(f)
+            return false
+        end
+        while i < size do
+            value = data[i]
+            buf[i] = value & 255
+            i = i + 1
+        end
+        written = fwrite(buf, 1, size, f)
+        free(buf)
+    end
+    closeStatus = fclose(f)
+    return written is size and closeStatus is 0
+end
+
+/// Appends a byte buffer exactly, including NUL and invalid UTF-8.
+bool tryAppendFileBytes(string path, u8 vec data) do
+    string f = fopen(path, "ab")
+    int size = data.len()
+    string buf = null
+    int written = 0
+    int closeStatus = 0
+    int i = 0
+    int value = 0
+    if f is null do
+        return false
+    end
+    if size > 0 do
+        buf = calloc(1, size)
+        if buf is null do
+            fclose(f)
+            return false
+        end
+        while i < size do
+            value = data[i]
+            buf[i] = value & 255
+            i = i + 1
+        end
+        written = fwrite(buf, 1, size, f)
+        free(buf)
+    end
+    closeStatus = fclose(f)
+    return written is size and closeStatus is 0
+end
+
 /// Reads the whole file at `path` as a string.
 /// Returns `""` when the file cannot be opened or is empty.
 string readFile(string path) do
-    string f = fopen(path, "r")
-    int size = 0
-    string buf = ""
-    if f is null do
-        return ""
-    end
-    fseek(f, 0, 2)
-    size = ftell(f)
-    fseek(f, 0, 0)
-    if size < 0 do
-        size = 0
-    end
-    if size is 0 do
-        fclose(f)
-        return ""
-    end
-    buf = calloc(1, size + 1)
-    fread(buf, 1, size, f)
-    fclose(f)
-    return buf
+    string content = ""
+    tryReadFile(path, ref content)
+    return content
 end
 
 /// Writes `data` to the file at `path`, truncating it.
 /// Does nothing when the file cannot be opened.
 void writeFile(string path, string data) do
-    string f = fopen(path, "w")
-    int len = 0
-    if f is null do
-        return
-    end
-    len = strlen(data)
-    if len is 0 do
-        fclose(f)
-        return
-    end
-    fwrite(data, 1, len, f)
-    fclose(f)
+    tryWriteFile(path, data)
 end
 
 /// Appends `data` to the file at `path`, creating it when missing.
 /// Does nothing when the file cannot be opened.
 void appendFile(string path, string data) do
-    string f = fopen(path, "a")
-    int len = 0
-    if f is null do
-        return
-    end
-    len = strlen(data)
-    if len is 0 do
-        fclose(f)
-        return
-    end
-    fwrite(data, 1, len, f)
-    fclose(f)
+    tryAppendFile(path, data)
 end
 
 /// Returns the size of the file at `path` in bytes, or `-1` when the
 /// file cannot be opened.
 int fileSize(string path) do
-    string f = fopen(path, "r")
-    int size = 0
-    if f is null do
+    int size = -1
+    if not tryFileSize(path, ref size) do
         return -1
     end
-    fseek(f, 0, 2)
-    size = ftell(f)
-    fclose(f)
     return size
 end
 
 /// Removes the file at `path`.
 void removeFile(string path) do
-    remove(path)
+    tryRemoveFile(path)
 end
 
 /// Renames `oldPath` to `newPath` (ISO C `rename`, portable across
@@ -110,11 +325,5 @@ end
 /// permissions are not preserved and a concurrent writer can race the
 /// verification. Empty files copy fine (size 0 verifies as 0).
 bool copyFile(string src, string dst) do
-    int size = fileSize(src)
-    if size < 0 do
-        return false
-    end
-    string data = readFile(src)
-    writeFile(dst, data)
-    return fileSize(dst) is size
+    return tryCopyFile(src, dst)
 end

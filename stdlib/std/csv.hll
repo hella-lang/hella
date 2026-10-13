@@ -1,0 +1,118 @@
+// std::csv — byte-oriented CSV field parsing (pure Hella).
+// Import via: import std::csv
+//
+// Reads one field per call without allocating a vector. RFC 4180 doubled
+// quotes and CRLF records are supported; output is a caller-owned heap string.
+
+import std::str
+
+int csvByte(string input, int pos) do
+    return input[pos]
+end
+
+bool csvScanField(string input, int start, ref int contentStart, ref int contentEnd, ref int nextPos, ref int separator, ref bool quoted) do
+    int size = len(input)
+    int pos = start
+    bool closed = false
+    contentStart = start
+    contentEnd = start
+    nextPos = -1
+    separator = 0
+    quoted = false
+    if start > size do
+        return false
+    end
+    if pos < size and csvByte(input, pos) is 34 do
+        quoted = true
+        pos = pos + 1
+        contentStart = pos
+        while pos < size do
+            if csvByte(input, pos) is 34 do
+                if pos + 1 < size and csvByte(input, pos + 1) is 34 do
+                    pos = pos + 2
+                end else do
+                    contentEnd = pos
+                    pos = pos + 1
+                    closed = true
+                    break
+                end
+            end else do
+                pos = pos + 1
+            end
+        end
+        if not closed do
+            return false
+        end
+    end else do
+        contentStart = start
+        while pos < size do
+            int c = csvByte(input, pos)
+            if c is 34 do
+                return false
+            end
+            if c is 44 or c is 10 or c is 13 do
+                break
+            end
+            pos = pos + 1
+        end
+        contentEnd = pos
+    end
+    if pos >= size do
+        nextPos = -1
+        separator = 0
+        return true
+    end
+    int c = csvByte(input, pos)
+    if c is 44 do
+        nextPos = pos + 1
+        separator = 44
+        return true
+    end
+    if c is 13 or c is 10 do
+        if c is 13 and pos + 1 < size and csvByte(input, pos + 1) is 10 do
+            nextPos = pos + 2
+        end else do
+            nextPos = pos + 1
+        end
+        separator = 10
+        return true
+    end
+    return false
+end
+
+/// Parses the field at `cursor` and advances it. `separator` is 44 for comma,
+/// 10 for a record ending (LF, CR, or CRLF), and 0 for end of input.
+/// Returns false for malformed quoting or a negative cursor. On malformed
+/// input, cursor becomes -2 and separator -1; normal end uses cursor -1.
+/// After a final record separator, stop when cursor equals len(input).
+bool tryNextField(string input, ref int cursor, ref string field, ref int separator) do
+    field = ""
+    separator = -1
+    if cursor < 0 do
+        return false
+    end
+    int contentStart = 0
+    int contentEnd = 0
+    int nextPos = -1
+    bool quoted = false
+    if not csvScanField(input, cursor, ref contentStart, ref contentEnd, ref nextPos, ref separator, ref quoted) do
+        cursor = -2
+        separator = -1
+        return false
+    end
+    string result = allocateString(contentEnd - contentStart)
+    int src = contentStart
+    int dst = 0
+    while src < contentEnd do
+        int c = csvByte(input, src)
+        if quoted and c is 34 do
+            src = src + 1
+        end
+        result[dst] = c
+        dst = dst + 1
+        src = src + 1
+    end
+    field = result
+    cursor = nextPos
+    return true
+end

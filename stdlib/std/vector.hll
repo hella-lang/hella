@@ -7,15 +7,26 @@ import std::str
 //
 // Thin facades over the compiler's vector methods (`len`, `is_empty`,
 // `push`, `pop`, `contains`, `first`, `last`) plus loop-based extras
-// the method surface lacks (`iSum`, `iIndexOf`, `sJoin`).
+// the method surface lacks (checked indexed edits, sorting, `iSum`,
+// `iIndexOf`, `sJoin`).
 // No overloading in Hella, so one prefix per element type:
 // `i*` = int vec, `s*` = string vec, `d*` = double vec.
-// Mutating helpers (`*Push`, `*Pop`, `*Clear`) take `ref` so the
-// caller's length/capacity header is updated.
+// Mutating helpers take `ref` so the caller's length/capacity header and
+// elements are updated. Container capacity is currently fixed at 256.
 
 /// Returns the length of int vec `v`.
 int iLen(int vec v) do
     return v.len()
+end
+
+/// Returns the current fixed storage capacity of int vectors.
+int iCapacity(int vec v) do
+    return 256
+end
+
+/// Returns the number of unused slots in the fixed int vector storage.
+int iRemainingCapacity(int vec v) do
+    return 256 - v.len()
 end
 
 /// Returns true when int vec `v` is empty.
@@ -43,15 +54,151 @@ void iPush(ref int vec v, int x) do
     v.push(x)
 end
 
+/// Removes every element from int vec `v` using supported pop operations.
+void iClear(ref int vec v) do
+    while not v.is_empty() do
+        v.pop()
+    end
+end
+
 /// Pops and returns the last element of int vec `v`.
 int iPop(ref int vec v) do
     return v.pop()
 end
 
-// NOTE: no `iClear`/`sClear` facades: the compiler's `clear()` method
-// fails LLVM verification even on locals (dangling idx loop), so it is
-// unusable through any wrapper until codegen is fixed. `pop` in a loop
-// or rebinding to a fresh literal covers the need.
+/// Stores `v[index]`; returns false and resets value when index is out of range.
+bool iTryGet(int vec v, int index, ref int value) do
+    value = 0
+    if index < 0 or index >= v.len() do
+        return false
+    end
+    value = v[index]
+    return true
+end
+
+/// Pops the last int; returns false and resets value when the vector is empty.
+bool iTryPop(ref int vec v, ref int value) do
+    value = 0
+    if v.is_empty() do
+        return false
+    end
+    value = v.pop()
+    return true
+end
+
+/// Inserts x before index. Returns false without mutation for invalid indices
+/// or when the fixed-capacity backing store is full.
+bool iTryInsert(ref int vec v, int index, int x) do
+    int n = v.len()
+    if index < 0 or index > n or n >= 256 do
+        return false
+    end
+    v.push(x)
+    int i = n
+    while i > index do
+        v[i] = v[i - 1]
+        i = i - 1
+    end
+    v[index] = x
+    return true
+end
+
+/// Removes the element at index, shifts the suffix left, and stores the
+/// removed value. Returns false without mutation for an invalid index.
+bool iTryRemoveAt(ref int vec v, int index, ref int value) do
+    value = 0
+    int n = v.len()
+    if index < 0 or index >= n do
+        return false
+    end
+    value = v[index]
+    int i = index
+    while i + 1 < n do
+        v[i] = v[i + 1]
+        i = i + 1
+    end
+    v.pop()
+    return true
+end
+
+/// Removes the element at index by replacing it with the last element.
+/// Order is not preserved. Returns false for an invalid index.
+bool iTrySwapRemoveAt(ref int vec v, int index, ref int value) do
+    value = 0
+    int n = v.len()
+    if index < 0 or index >= n do
+        return false
+    end
+    value = v[index]
+    if index < n - 1 do
+        v[index] = v[n - 1]
+    end
+    v.pop()
+    return true
+end
+
+/// Reverses int vector elements in place.
+void iReverse(ref int vec v) do
+    int left = 0
+    int right = v.len()
+    while left < right do
+        right = right - 1
+        if left < right do
+            int tmp = v[left]
+            v[left] = v[right]
+            v[right] = tmp
+        end
+
+        left = left + 1
+    end
+end
+
+/// Stable ascending sort for int vector elements.
+void iSort(ref int vec v) do
+    int n = v.len()
+    int i = 1
+    while i < n do
+        int value = v[i]
+        int j = i
+        while j > 0 do
+            if v[j - 1] <= value do
+                break
+            end
+            v[j] = v[j - 1]
+            j = j - 1
+        end
+        v[j] = value
+        i = i + 1
+    end
+end
+
+/// Appends all source elements. Returns false and leaves v unchanged when
+/// the combined length exceeds the current fixed capacity.
+bool iTryAppend(ref int vec v, int vec source) do
+    int sourceLen = source.len()
+    int n = v.len()
+    if sourceLen > 256 - n do
+        return false
+    end
+    int i = 0
+    while i < sourceLen do
+        v.push(source[i])
+        i = i + 1
+    end
+    return true
+end
+
+/// Removes elements from the end until length is at most `newLen`.
+/// Returns false for a negative length; larger lengths are a no-op.
+bool iTryTruncate(ref int vec v, int newLen) do
+    if newLen < 0 do
+        return false
+    end
+    while v.len() > newLen do
+        v.pop()
+    end
+    return true
+end
 
 /// Returns the sum of int vec `v`.
 int iSum(int vec v) do
@@ -78,9 +225,83 @@ int iIndexOf(int vec v, int x) do
     return -1
 end
 
+/// Counts occurrences of `x` in int vec `v`.
+int iCount(int vec v, int x) do
+    int count = 0
+    int i = 0
+    int n = v.len()
+    while i < n do
+        if v[i] is x do
+            count = count + 1
+        end
+        i = i + 1
+    end
+    return count
+end
+
+/// Stores the minimum element in `value`; returns false and resets value to
+/// zero for an empty vector.
+bool iTryMin(int vec v, ref int value) do
+    int i = 1
+    int n = v.len()
+    value = 0
+    if n is 0 do
+        return false
+    end
+    value = v[0]
+    while i < n do
+        if v[i] < value do
+            value = v[i]
+        end
+        i = i + 1
+    end
+    return true
+end
+
+/// Stores the maximum element in `value`; returns false and resets value to
+/// zero for an empty vector.
+bool iTryMax(int vec v, ref int value) do
+    int i = 1
+    int n = v.len()
+    value = 0
+    if n is 0 do
+        return false
+    end
+    value = v[0]
+    while i < n do
+        if v[i] > value do
+            value = v[i]
+        end
+        i = i + 1
+    end
+    return true
+end
+
+/// Returns an independent shallow copy of int vec `v`.
+int vec iClone(int vec v) do
+    int vec result = vec[]
+    int i = 0
+    int n = v.len()
+    while i < n do
+        result.push(v[i])
+        i = i + 1
+    end
+    return result
+end
+
 /// Returns the length of string vec `v`.
 int sLen(string vec v) do
     return v.len()
+end
+
+/// Returns the current fixed storage capacity of string vectors.
+int sCapacity(string vec v) do
+    return 256
+end
+
+/// Returns the number of unused slots in the fixed string vector storage.
+int sRemainingCapacity(string vec v) do
+    return 256 - v.len()
 end
 
 /// Returns true when string vec `v` is empty.
@@ -104,6 +325,33 @@ bool sContains(string vec v, string x) do
     return false
 end
 
+/// Returns the index of the first string equal to x, or -1.
+int sIndexOf(string vec v, string x) do
+    int i = 0
+    int n = v.len()
+    while i < n do
+        if equals(v[i], x) do
+            return i
+        end
+        i = i + 1
+    end
+    return -1
+end
+
+/// Counts string elements equal to x using bytewise string equality.
+int sCount(string vec v, string x) do
+    int count = 0
+    int i = 0
+    int n = v.len()
+    while i < n do
+        if equals(v[i], x) do
+            count = count + 1
+        end
+        i = i + 1
+    end
+    return count
+end
+
 /// Returns the first element of string vec `v`.
 string sFirst(string vec v) do
     return v.first()
@@ -119,9 +367,150 @@ void sPush(ref string vec v, string x) do
     v.push(x)
 end
 
+/// Removes every element from string vec `v` using supported pop operations.
+void sClear(ref string vec v) do
+    while not v.is_empty() do
+        v.pop()
+    end
+end
+
 /// Pops and returns the last element of string vec `v`.
 string sPop(ref string vec v) do
     return v.pop()
+end
+
+/// Stores `v[index]`; returns false and resets value when index is out of range.
+bool sTryGet(string vec v, int index, ref string value) do
+    value = ""
+    if index < 0 or index >= v.len() do
+        return false
+    end
+    value = v[index]
+    return true
+end
+
+/// Pops the last string; returns false and resets value when the vector is empty.
+bool sTryPop(ref string vec v, ref string value) do
+    value = ""
+    if v.is_empty() do
+        return false
+    end
+    value = v.pop()
+    return true
+end
+
+/// Inserts x before index. Returns false without mutation for invalid indices
+/// or when the fixed-capacity backing store is full.
+bool sTryInsert(ref string vec v, int index, string x) do
+    int n = v.len()
+    if index < 0 or index > n or n >= 256 do
+        return false
+    end
+    v.push(x)
+    int i = n
+    while i > index do
+        v[i] = v[i - 1]
+        i = i - 1
+    end
+    v[index] = x
+    return true
+end
+
+/// Removes the element at index, shifts the suffix left, and stores the
+/// removed value. Returns false without mutation for an invalid index.
+bool sTryRemoveAt(ref string vec v, int index, ref string value) do
+    value = ""
+    int n = v.len()
+    if index < 0 or index >= n do
+        return false
+    end
+    value = v[index]
+    int i = index
+    while i + 1 < n do
+        v[i] = v[i + 1]
+        i = i + 1
+    end
+    v.pop()
+    return true
+end
+
+/// Removes the element at index by replacing it with the last element.
+/// Order is not preserved. Returns false for an invalid index.
+bool sTrySwapRemoveAt(ref string vec v, int index, ref string value) do
+    value = ""
+    int n = v.len()
+    if index < 0 or index >= n do
+        return false
+    end
+    value = v[index]
+    if index < n - 1 do
+        v[index] = v[n - 1]
+    end
+    v.pop()
+    return true
+end
+
+/// Reverses string vector elements in place.
+void sReverse(ref string vec v) do
+    int left = 0
+    int right = v.len()
+    while left < right do
+        right = right - 1
+        if left < right do
+            string tmp = v[left]
+            v[left] = v[right]
+            v[right] = tmp
+        end
+
+        left = left + 1
+    end
+end
+
+/// Stable lexicographic byte-order sort for string vector elements.
+void sSort(ref string vec v) do
+    int n = v.len()
+    int i = 1
+    while i < n do
+        string value = v[i]
+        int j = i
+        while j > 0 do
+            if compare(v[j - 1], value) <= 0 do
+                break
+            end
+            v[j] = v[j - 1]
+            j = j - 1
+        end
+        v[j] = value
+        i = i + 1
+    end
+end
+
+/// Appends all source elements. Returns false and leaves v unchanged when
+/// the combined length exceeds the current fixed capacity.
+bool sTryAppend(ref string vec v, string vec source) do
+    int sourceLen = source.len()
+    int n = v.len()
+    if sourceLen > 256 - n do
+        return false
+    end
+    int i = 0
+    while i < sourceLen do
+        v.push(source[i])
+        i = i + 1
+    end
+    return true
+end
+
+/// Removes elements from the end until length is at most `newLen`.
+/// Returns false for a negative length; larger lengths are a no-op.
+bool sTryTruncate(ref string vec v, int newLen) do
+    if newLen < 0 do
+        return false
+    end
+    while v.len() > newLen do
+        v.pop()
+    end
+    return true
 end
 
 /// Joins string vec `v` with `sep` between elements.
@@ -173,7 +562,170 @@ int dLen(double vec v) do
     return v.len()
 end
 
+/// Returns true when double vec `v` is empty.
+bool dIsEmpty(double vec v) do
+    return v.is_empty()
+end
+
+/// Returns the current fixed storage capacity of double vectors.
+int dCapacity(double vec v) do
+    return 256
+end
+
+/// Returns the number of unused slots in the fixed double vector storage.
+int dRemainingCapacity(double vec v) do
+    return 256 - v.len()
+end
+
 /// Pushes `x` onto double vec `v`.
 void dPush(ref double vec v, double x) do
     v.push(x)
+end
+
+/// Pops and returns the last element of double vec `v`.
+double dPop(ref double vec v) do
+    return v.pop()
+end
+
+/// Removes every element from double vec `v` using supported pop operations.
+void dClear(ref double vec v) do
+    while not v.is_empty() do
+        v.pop()
+    end
+end
+
+/// Returns the first element of double vec `v`.
+double dFirst(double vec v) do
+    return v.first()
+end
+
+/// Returns the last element of double vec `v`.
+double dLast(double vec v) do
+    return v.last()
+end
+
+/// Stores `v[index]`; returns false and resets value when index is out of range.
+bool dTryGet(double vec v, int index, ref double value) do
+    value = 0.0
+    if index < 0 or index >= v.len() do
+        return false
+    end
+    value = v[index]
+    return true
+end
+
+/// Pops the last double; returns false and resets value when the vector is empty.
+bool dTryPop(ref double vec v, ref double value) do
+    value = 0.0
+    if v.is_empty() do
+        return false
+    end
+    value = v.pop()
+    return true
+end
+
+/// Inserts x before index. Returns false without mutation for invalid indices
+/// or when the fixed-capacity backing store is full.
+bool dTryInsert(ref double vec v, int index, double x) do
+    int n = v.len()
+    if index < 0 or index > n or n >= 256 do
+        return false
+    end
+    v.push(x)
+    int i = n
+    while i > index do
+        v[i] = v[i - 1]
+        i = i - 1
+    end
+    v[index] = x
+    return true
+end
+
+/// Removes the element at index, shifts the suffix left, and stores the
+/// removed value. Returns false without mutation for an invalid index.
+bool dTryRemoveAt(ref double vec v, int index, ref double value) do
+    value = 0.0
+    int n = v.len()
+    if index < 0 or index >= n do
+        return false
+    end
+    value = v[index]
+    int i = index
+    while i + 1 < n do
+        v[i] = v[i + 1]
+        i = i + 1
+    end
+    v.pop()
+    return true
+end
+
+/// Removes the element at index by replacing it with the last element.
+/// Order is not preserved. Returns false for an invalid index.
+bool dTrySwapRemoveAt(ref double vec v, int index, ref double value) do
+    value = 0.0
+    int n = v.len()
+    if index < 0 or index >= n do
+        return false
+    end
+    value = v[index]
+    if index < n - 1 do
+        v[index] = v[n - 1]
+    end
+    v.pop()
+    return true
+end
+
+/// Appends all source elements. Returns false and leaves v unchanged when
+/// the combined length exceeds the current fixed capacity.
+bool dTryAppend(ref double vec v, double vec source) do
+    int sourceLen = source.len()
+    int n = v.len()
+    if sourceLen > 256 - n do
+        return false
+    end
+    int i = 0
+    while i < sourceLen do
+        v.push(source[i])
+        i = i + 1
+    end
+    return true
+end
+
+/// Reverses double vector elements in place.
+void dReverse(ref double vec v) do
+    int left = 0
+    int right = v.len()
+    while left < right do
+        right = right - 1
+        if left < right do
+            double tmp = v[left]
+            v[left] = v[right]
+            v[right] = tmp
+        end
+        left = left + 1
+    end
+end
+
+/// Removes elements from the end until length is at most `newLen`.
+/// Returns false for a negative length; larger lengths are a no-op.
+bool dTryTruncate(ref double vec v, int newLen) do
+    if newLen < 0 do
+        return false
+    end
+    while v.len() > newLen do
+        v.pop()
+    end
+    return true
+end
+
+/// Returns an independent shallow copy of double vec `v`.
+double vec dClone(double vec v) do
+    double vec result = vec[]
+    int i = 0
+    int n = v.len()
+    while i < n do
+        result.push(v[i])
+        i = i + 1
+    end
+    return result
 end

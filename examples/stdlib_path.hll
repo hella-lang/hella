@@ -36,6 +36,14 @@ int main() do
     assert isAbsolute("a") is false
     assert isAbsolute("") is false
     assert isAbsolute("C:/x") is false
+    assert isAbsolutePortable("/x")
+    assert isAbsolutePortable("\\x")
+    assert isAbsolutePortable("C:/x")
+    assert isAbsolutePortable("C:\\x")
+    assert isAbsolutePortable("\\\\server\\share")
+    assert isAbsolutePortable("C:x") is false
+    assert equals(normalizeSeparators("C:\\a\\b"), "C:/a/b")
+    assert equals(normalizeSeparators("/a/b"), "/a/b")
     assert equals(clean(""), ".")
     assert equals(clean("/"), "/")
     assert equals(clean("."), ".")

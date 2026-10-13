@@ -7,6 +7,17 @@ extern "c" from "libc" do
     int strncmp(string a, string b, int n)
     string strdup(string s)
     string calloc(int n, int size)
+    void free(string s)
+end
+
+/// Frees an owned heap string and resets its variable to `""`.
+/// Do not pass string literals, borrowed environment values, or any pointer
+/// not returned as caller-owned storage by an API.
+void freeString(ref string value) do
+    if value is not null do
+        free(value)
+        value = ""
+    end
 end
 
 /// Returns the byte length of `s` (via `strlen`).

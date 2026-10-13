@@ -1,0 +1,241 @@
+// std::utf8 — strict UTF-8 primitives for Hella strings.
+// Import via: import std::utf8
+//
+// String offsets and widths are bytes. Invalid input is consumed one byte at
+// a time; decoded invalid bytes become U+FFFD. Hella strings are NUL-terminated
+// and cannot represent embedded NUL bytes.
+import std::str
+
+
+/// Returns true for a UTF-8 continuation byte.
+bool isContinuation(int b) do
+    return b >= 128 and b <= 191
+end
+
+int byteValue(char c) do
+    return c
+end
+
+/// Decodes one scalar at byte offset. Returns false at an invalid offset or
+/// for malformed UTF-8; width is 0 outside the string and 1 for malformed
+/// input. Malformed input sets rune to U+FFFD so callers can make progress.
+bool decodeAt(string s, int offset, ref int rune, ref int width) do
+    int size = len(s)
+    int b0   = 0
+    int b1   = 0
+    int b2   = 0
+    int b3   = 0
+    rune = 65533
+    width = 0
+    if offset < 0 or offset >= size do
+        return false
+    end
+    b0 = byteValue(s[offset]) & 255
+    if b0 < 128 do
+        rune = b0
+        width = 1
+        return true
+    end
+    if b0 >= 194 and b0 <= 223 do
+        width = 1
+        if offset + 1 >= size do
+            return false
+        end
+        b1 = byteValue(s[offset + 1]) & 255
+        if not isContinuation(b1) do
+            return false
+        end
+        rune = ((b0 & 31) << 6) | (b1 & 63)
+        width = 2
+        return true
+    end
+    if b0 >= 224 and b0 <= 239 do
+        width = 1
+        if offset + 2 >= size do
+            return false
+        end
+        b1 = byteValue(s[offset + 1]) & 255
+        b2 = byteValue(s[offset + 2]) & 255
+        if not isContinuation(b1) or not isContinuation(b2) do
+            return false
+        end
+        if b0 is 224 and b1 < 160 do
+            return false
+        end
+        if b0 is 237 and b1 > 159 do
+            return false
+        end
+        rune = ((b0 & 15) << 12) | ((b1 & 63) << 6) | (b2 & 63)
+        width = 3
+        return true
+    end
+    if b0 >= 240 and b0 <= 244 do
+        width = 1
+        if offset + 3 >= size do
+            return false
+        end
+        b1 = byteValue(s[offset + 1]) & 255
+        b2 = byteValue(s[offset + 2]) & 255
+        b3 = byteValue(s[offset + 3]) & 255
+        if not isContinuation(b1) or not isContinuation(b2) or not isContinuation(b3) do
+            return false
+        end
+        if b0 is 240 and b1 < 144 do
+            return false
+        end
+        if b0 is 244 and b1 > 143 do
+            return false
+        end
+        rune = ((b0 & 7) << 18) | ((b1 & 63) << 12) | ((b2 & 63) << 6) | (b3 & 63)
+        width = 4
+        return true
+    end
+    width = 1
+    return false
+end
+
+/// Decodes a rune at a byte offset. Returns its byte width, or 0 at EOF.
+/// Malformed input yields U+FFFD and consumes one byte.
+int decodeRuneAt(string s, int offset, ref int rune) do
+    int width = 0
+    decodeAt(s, offset, ref rune, ref width)
+    return width
+end
+
+/// Reads the rune at a rune index. Returns false when the index is out of
+/// bounds. Invalid bytes decode as U+FFFD, one byte per replacement rune.
+bool runeAt(string s, int runeIndex, ref int rune) do
+    int offset = byteOffset(s, runeIndex)
+    if offset < 0 or offset >= len(s) do
+        rune = 0
+        return false
+    end
+    decodeRuneAt(s, offset, ref rune)
+    return true
+end
+
+/// Returns true if every byte in s forms valid UTF-8.
+bool validate(string s) do
+    int offset = 0
+    int rune   = 0
+    int width  = 0
+    while offset < len(s) do
+        if not decodeAt(s, offset, ref rune, ref width) do
+            return false
+        end
+        offset = offset + width
+    end
+    return true
+end
+
+/// Counts decoded values; each malformed byte counts as one replacement rune.
+int runeCount(string s) do
+    int offset = 0
+    int count  = 0
+    int rune   = 0
+    int width  = 0
+    while offset < len(s) do
+        decodeAt(s, offset, ref rune, ref width)
+        offset = offset + width
+        count = count + 1
+    end
+    return count
+end
+
+/// Returns the byte offset of a rune index, or -1 when it is out of range.
+/// The index equal to runeCount(s) maps to len(s).
+int byteOffset(string s, int runeIndex) do
+    int offset = 0
+    int count  = 0
+    int rune   = 0
+    int width  = 0
+    if runeIndex < 0 do
+        return -1
+    end
+    while offset < len(s) and count < runeIndex do
+        decodeAt(s, offset, ref rune, ref width)
+        offset = offset + width
+        count = count + 1
+    end
+    if count is runeIndex do
+        return offset
+    end
+    return -1
+end
+
+/// Copies the rune-indexed range [start, stop) into result. Returns false
+/// and resets result when indexes are negative, reversed, or beyond the end.
+/// Malformed bytes count as one rune each and are copied unchanged.
+bool substringRunes(string s, int start, int stop, ref string result) do
+    int firstByte = 0
+    int lastByte  = 0
+    result = ""
+    if start < 0 or stop < start do
+        return false
+    end
+    firstByte = byteOffset(s, start)
+    lastByte = byteOffset(s, stop)
+    if firstByte < 0 or lastByte < 0 do
+        return false
+    end
+    result = substring(s, firstByte, lastByte)
+    return true
+end
+
+/// Encodes a Unicode scalar value into a new string. Returns false for
+/// surrogates, values above U+10FFFF, and U+0000 (not representable in Hella's
+/// NUL-terminated strings); on failure result is reset to "".
+bool encodeRune(int rune, ref string result) do
+    int width = 0
+    int b0    = 0
+    int b1    = 0
+    int b2    = 0
+    int b3    = 0
+    result = ""
+    if rune <= 0 or rune > 1114111 or (rune >= 55296 and rune <= 57343) do
+        return false
+    end
+    if rune < 128 do
+        width = 1
+    end else do
+        if rune < 2048 do
+            width = 2
+        end else do
+            if rune < 65536 do
+                width = 3
+            end else do
+                width = 4
+            end
+        end
+    end
+    result = allocateString(width)
+    if width is 1 do
+        result[0] = rune
+        return true
+    end
+    if width is 2 do
+        b0 = 192 | (rune >> 6)
+        b1 = 128 | (rune & 63)
+        result[0] = b0
+        result[1] = b1
+        return true
+    end
+    if width is 3 do
+        b0 = 224 | (rune >> 12)
+        b1 = 128 | ((rune >> 6) & 63)
+        b2 = 128 | (rune & 63)
+        result[0] = b0
+        result[1] = b1
+        result[2] = b2
+        return true
+    end
+    b0 = 240 | (rune >> 18)
+    b1 = 128 | ((rune >> 12) & 63)
+    b2 = 128 | ((rune >> 6) & 63)
+    b3 = 128 | (rune & 63)
+    result[0] = b0
+    result[1] = b1
+    result[2] = b2
+    result[3] = b3
+    return true
+end

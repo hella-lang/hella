@@ -1,23 +1,41 @@
 // std::map — map helpers for Hella (real stdlib: pure Hella).
 // Import via: import std::map
 //
-// Read-only facades (`len`, `is_empty` via methods; `*Has`, `*GetOr`
-// via `for`-in iteration). No overloading in Hella, so one prefix per
+// Read-only facades (`len`, `is_empty` via methods; `*Has`, `*GetOr`,
+// `*TryGet`, `*Keys`, and `*Values` via `for`-in iteration). No overloading in Hella, so one prefix per
 // key/value pair: `si*` = string:int, `ii*` = int:int,
 // `ss*` = string:string.
 //
-// NOTE: no mutating facades (`remove`/`clear`, keyed `contains`/
-// `get_or` methods, `m[k]` subscript): key-taking map operations fail
-// LLVM verification through by-value params, and `ref` params cannot
-// carry map method calls (`cannot infer type`) until codegen is fixed.
-// Mutate maps with direct calls on locals instead — subscript
-// insert/update/read (`m[k] = v`, `m[k]`), `contains`/`get_or`/`len`/
-// `is_empty` methods, `m.remove(k)` — except `m.clear()`, which
-// miscompiles (LLVM verification): pop in a loop or rebind.
+// Mutating facades take `ref` and work through subscript stores and `remove`.
+// Keyed reads (`m[k]`) through a by-value parameter still have codegen
+// limitations; read facades use map iteration. `m.clear()` miscompiles
+// (LLVM verification): remove keys in a caller-controlled loop or rebind.
 // See `examples/stdlib_collections.hll` for the working pattern.
-// Missing-key reads yield the zero value; `*GetOr` supplies a fallback.
+// Missing-key reads yield the zero value; `*GetOr` supplies a fallback and
+// `*TryGet` distinguishes a missing key from a stored zero value.
 
 import std::str
+import std::vector
+
+/// Inserts or replaces key `k` in a string:int map.
+void siPut(ref string:int m, string k, int value) do
+    m[k] = value
+end
+
+/// Removes key `k` from a string:int map; returns false when it was absent.
+bool siRemove(ref string:int m, string k) do
+    return m.remove(k)
+end
+
+/// Removes every key from a string:int map.
+void siClear(ref string:int m) do
+    string vec keys = siKeys(m)
+    int i = 0
+    while i < keys.len() do
+        m.remove(keys[i])
+        i = i + 1
+    end
+end
 
 /// Returns the number of entries in string:int map `m`.
 int siLen(string:int m) do
@@ -47,6 +65,56 @@ int siGetOr(string:int m, string k, int d) do
         end
     end
     return d
+end
+
+/// Stores the value for `k`; returns false and resets value when missing.
+bool siTryGet(string:int m, string k, ref int value) do
+    value = 0
+    for key, val in m do
+        if equals(key, k) do
+            value = val
+            return true
+        end
+    end
+    return false
+end
+
+/// Returns the keys from a string:int map in iteration order.
+string vec siKeys(string:int m) do
+    string vec result = vec[]
+    for key in m do
+        result.push(key)
+    end
+    return result
+end
+
+/// Returns the values from a string:int map in iteration order.
+int vec siValues(string:int m) do
+    int vec result = vec[]
+    for key, val in m do
+        result.push(val)
+    end
+    return result
+end
+
+/// Inserts or replaces key `k` in an int:int map.
+void iiPut(ref int:int m, int k, int value) do
+    m[k] = value
+end
+
+/// Removes key `k` from an int:int map; returns false when it was absent.
+bool iiRemove(ref int:int m, int k) do
+    return m.remove(k)
+end
+
+/// Removes every key from an int:int map.
+void iiClear(ref int:int m) do
+    int vec keys = iiKeys(m)
+    int i = 0
+    while i < keys.len() do
+        m.remove(keys[i])
+        i = i + 1
+    end
 end
 
 /// Returns the number of entries in int:int map `m`.
@@ -79,6 +147,56 @@ int iiGetOr(int:int m, int k, int d) do
     return d
 end
 
+/// Stores the value for `k`; returns false and resets value when missing.
+bool iiTryGet(int:int m, int k, ref int value) do
+    value = 0
+    for key, val in m do
+        if key is k do
+            value = val
+            return true
+        end
+    end
+    return false
+end
+
+/// Returns the keys from an int:int map in iteration order.
+int vec iiKeys(int:int m) do
+    int vec result = vec[]
+    for key in m do
+        result.push(key)
+    end
+    return result
+end
+
+/// Returns the values from an int:int map in iteration order.
+int vec iiValues(int:int m) do
+    int vec result = vec[]
+    for key, val in m do
+        result.push(val)
+    end
+    return result
+end
+
+/// Returns the number of entries in string:string map `m`.
+void ssPut(ref string:string m, string k, string value) do
+    m[k] = value
+end
+
+/// Removes key `k` from a string:string map; returns false when it was absent.
+bool ssRemove(ref string:string m, string k) do
+    return m.remove(k)
+end
+
+/// Removes every key from a string:string map.
+void ssClear(ref string:string m) do
+    string vec keys = ssKeys(m)
+    int i = 0
+    while i < keys.len() do
+        m.remove(keys[i])
+        i = i + 1
+    end
+end
+
 /// Returns the number of entries in string:string map `m`.
 int ssLen(string:string m) do
     return m.len()
@@ -107,4 +225,34 @@ string ssGetOr(string:string m, string k, string d) do
         end
     end
     return d
+end
+
+/// Stores the value for `k`; returns false and resets value when missing.
+bool ssTryGet(string:string m, string k, ref string value) do
+    value = ""
+    for key, val in m do
+        if equals(key, k) do
+            value = val
+            return true
+        end
+    end
+    return false
+end
+
+/// Returns the keys from a string:string map in iteration order.
+string vec ssKeys(string:string m) do
+    string vec result = vec[]
+    for key in m do
+        result.push(key)
+    end
+    return result
+end
+
+/// Returns the values from a string:string map in iteration order.
+string vec ssValues(string:string m) do
+    string vec result = vec[]
+    for key, val in m do
+        result.push(val)
+    end
+    return result
 end

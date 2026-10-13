@@ -1,7 +1,9 @@
 // std::encoding — hex and base64 text encodings for Hella (pure Hella).
 // Import via: import std::encoding
 //
-// Byte-oriented: inputs are arbitrary bytes. Byte values ride `char`
+// String APIs are byte-oriented for all bytes representable in a Hella
+// string, but decoded NUL is rejected because Hella strings are NUL-terminated.
+// The `*Bytes` APIs handle arbitrary binary buffers. Byte values ride `char`
 // slots into `int` locals via the widening conversion (`int b = s[i]`,
 // masked `& 255` so high bytes behave regardless of char extension);
 // computed bytes land via truncating index stores (`res[i] = v` keeps
@@ -60,7 +62,6 @@ bool hexDecode(string s, ref string value) do
     if n % 2 is 1 do
         return false
     end
-    string res = allocateString(n / 2)
     int i = 0
     while i < n do
         int hi = hexValue(s[i])
@@ -68,6 +69,16 @@ bool hexDecode(string s, ref string value) do
         if hi < 0 or lo < 0 do
             return false
         end
+        if hi * 16 + lo is 0 do
+            return false
+        end
+        i = i + 2
+    end
+    string res = allocateString(n / 2)
+    i = 0
+    while i < n do
+        int hi = hexValue(s[i])
+        int lo = hexValue(s[i + 1])
         res[i / 2] = hi * 16 + lo
         i = i + 2
     end
@@ -87,6 +98,78 @@ int base64Value(char c) do
         i = i + 1
     end
     return -1
+end
+
+/// Returns the number of trailing padding bytes, or -1 for malformed or
+/// non-canonical Base64. Shared by the text and binary decoders.
+int base64Padding(string s) do
+    int n = len(s)
+    if n % 4 is not 0 do
+        return -1
+    end
+    int pad = 0
+    if n > 0 do
+        if s[n - 1] is '=' do
+            pad = 1
+            if n > 1 do
+                if s[n - 2] is '=' do
+                    pad = 2
+                end
+            end
+        end
+    end
+    int j = 0
+    while j < n - pad do
+        if s[j] is '=' or base64Value(s[j]) < 0 do
+            return -1
+        end
+        j = j + 1
+    end
+    while j < n do
+        if s[j] is not '=' do
+            return -1
+        end
+        j = j + 1
+    end
+    int q = 0
+    while q < n / 4 do
+        int i = q * 4
+        int remaining = n / 4 - q
+        int v0 = base64Value(s[i])
+        int v1 = base64Value(s[i + 1])
+        if v0 < 0 or v1 < 0 do
+            return -1
+        end
+        if remaining is 1 do
+            if pad is 2 do
+                int lowBits = v1 & 15
+                if lowBits is not 0 do
+                    return -1
+                end
+            end else do
+                int v2 = base64Value(s[i + 2])
+                if v2 < 0 do
+                    return -1
+                end
+                if pad is 1 do
+                    int lowBits = v2 & 3
+                    if lowBits is not 0 do
+                        return -1
+                    end
+                end else do
+                    if base64Value(s[i + 3]) < 0 do
+                        return -1
+                    end
+                end
+            end
+        end else do
+            if base64Value(s[i + 2]) < 0 or base64Value(s[i + 3]) < 0 do
+                return -1
+            end
+        end
+        q = q + 1
+    end
+    return pad
 end
 
 /// Standard base64 with `=` padding (`base64Encode("foobar")` is
@@ -142,41 +225,46 @@ string base64Encode(string s) do
 end
 
 /// Inverse of `base64Encode` into `value`. Strict: length must be a
-/// multiple of 4, `=` only as the last one or two characters, and every
-/// other character must be in the alphabet. Returns false **and resets
-/// value to `""`** on any violation.
+/// multiple of 4, `=` only as the last one or two characters, all bytes
+/// must use the standard alphabet, and unused padding bits must be zero.
+/// Returns false **and resets value to `""`** on any violation.
 bool base64Decode(string s, ref string value) do
     value = ""
     int n = len(s)
-    if n % 4 is not 0 do
+    int pad = base64Padding(s)
+    if pad < 0 do
         return false
     end
-    // Padding census: 0, 1, or 2 trailing '=' (nested guards stay in
-    // bounds; `=` anywhere else is caught below).
-    int pad = 0
-    if n > 0 do
-        if s[n - 1] is '=' do
-            pad = 1
-            if n > 1 do
-                if s[n - 2] is '=' do
-                    pad = 2
+    // Hella strings cannot represent decoded NUL. Detect it before
+    // allocating so callers that need arbitrary bytes use base64DecodeBytes.
+    int q = 0
+    while q < n / 4 do
+        int i = q * 4
+        int remaining = n / 4 - q
+        int v0 = base64Value(s[i])
+        int v1 = base64Value(s[i + 1])
+        int byte0 = (v0 << 2) | (v1 >> 4)
+        if byte0 is 0 do
+            return false
+        end
+        if remaining is 1 do
+            if pad is not 2 do
+                int v2 = base64Value(s[i + 2])
+                int byte1 = ((v1 & 15) << 4) | (v2 >> 2)
+                if byte1 is 0 do
+                    return false
                 end
             end
+        end else do
+            int v2 = base64Value(s[i + 2])
+            int v3 = base64Value(s[i + 3])
+            int byte1 = ((v1 & 15) << 4) | (v2 >> 2)
+            int byte2 = ((v2 & 3) << 6) | v3
+            if byte1 is 0 or byte2 is 0 do
+                return false
+            end
         end
-    end
-    // '=' may only occupy the final `pad` slots.
-    int j = 0
-    while j < n - pad do
-        if s[j] is '=' do
-            return false
-        end
-        j = j + 1
-    end
-    while j < n do
-        if s[j] is not '=' do
-            return false
-        end
-        j = j + 1
+        q = q + 1
     end
     int total = n / 4 * 3
     if pad > 0 do
@@ -184,7 +272,7 @@ bool base64Decode(string s, ref string value) do
     end
     string res = allocateString(total)
     int quads = n / 4
-    int q = 0
+    q = 0
     int i = 0
     int o = 0
     while q < quads do
@@ -223,5 +311,125 @@ bool base64Decode(string s, ref string value) do
         q = q + 1
     end
     value = res
+    return true
+end
+
+/// Lowercase hex encoding for an arbitrary byte buffer, including NUL.
+string hexEncodeBytes(u8 vec data) do
+    string digits = "0123456789abcdef"
+    int n = data.len()
+    assert n <= 4611686018427387903
+    string res = allocateString(n * 2)
+    int i = 0
+    while i < n do
+        int b = data[i] & 255
+        res[i * 2] = digits[b >> 4]
+        res[i * 2 + 1] = digits[b & 15]
+        i = i + 1
+    end
+    return res
+end
+
+/// Decodes hex into arbitrary bytes, including NUL. Returns false and
+/// clears `value` on invalid input or when output exceeds vector capacity.
+bool hexDecodeBytes(string s, ref u8 vec value) do
+    while not value.is_empty() do
+        value.pop()
+    end
+    int n = len(s)
+    if n % 2 is 1 or n / 2 > 256 do
+        return false
+    end
+    int i = 0
+    while i < n do
+        if hexValue(s[i]) < 0 or hexValue(s[i + 1]) < 0 do
+            return false
+        end
+        i = i + 2
+    end
+    i = 0
+    while i < n do
+        int byte = hexValue(s[i]) * 16 + hexValue(s[i + 1])
+        value.push(byte)
+        i = i + 2
+    end
+    return true
+end
+
+/// Standard padded Base64 encoding for arbitrary bytes, including NUL.
+string base64EncodeBytes(u8 vec data) do
+    string alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    int n = data.len()
+    int full = n / 3
+    int rem = n % 3
+    int total = full * 4
+    if rem > 0 do
+        total = total + 4
+    end
+    string res = allocateString(total)
+    int i = 0
+    int o = 0
+    while i < full * 3 do
+        int b0 = data[i] & 255
+        int b1 = data[i + 1] & 255
+        int b2 = data[i + 2] & 255
+        res[o] = alpha[b0 >> 2]
+        res[o + 1] = alpha[((b0 & 3) << 4) | (b1 >> 4)]
+        res[o + 2] = alpha[((b1 & 15) << 2) | (b2 >> 6)]
+        res[o + 3] = alpha[b2 & 63]
+        i = i + 3
+        o = o + 4
+    end
+    if rem is 1 do
+        int b0 = data[i] & 255
+        res[o] = alpha[b0 >> 2]
+        res[o + 1] = alpha[(b0 & 3) << 4]
+        res[o + 2] = '='
+        res[o + 3] = '='
+    end else do
+        if rem is 2 do
+            int b0 = data[i] & 255
+            int b1 = data[i + 1] & 255
+            res[o] = alpha[b0 >> 2]
+            res[o + 1] = alpha[((b0 & 3) << 4) | (b1 >> 4)]
+            res[o + 2] = alpha[(b1 & 15) << 2]
+            res[o + 3] = '='
+        end
+    end
+    return res
+end
+
+/// Decodes canonical Base64 to arbitrary bytes, including NUL. Returns
+/// false and clears `value` for invalid input or output over 256 bytes.
+bool base64DecodeBytes(string s, ref u8 vec value) do
+    while not value.is_empty() do
+        value.pop()
+    end
+    int n = len(s)
+    int pad = base64Padding(s)
+    if pad < 0 do
+        return false
+    end
+    int total = n / 4 * 3 - pad
+    if total > 256 do
+        return false
+    end
+    int q = 0
+    int i = 0
+    while q < n / 4 do
+        int v0 = base64Value(s[i])
+        int v1 = base64Value(s[i + 1])
+        int v2 = base64Value(s[i + 2])
+        int v3 = base64Value(s[i + 3])
+        value.push((v0 << 2) | (v1 >> 4))
+        if s[i + 2] is not '=' do
+            value.push(((v1 & 15) << 4) | (v2 >> 2))
+            if s[i + 3] is not '=' do
+                value.push(((v2 & 3) << 6) | v3)
+            end
+        end
+        i = i + 4
+        q = q + 1
+    end
     return true
 end

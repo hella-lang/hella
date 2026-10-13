@@ -1,0 +1,19 @@
+// stdlib_os.hll — regression for std::os
+
+import std::os
+import std::io
+import std::str
+
+int main() do
+    int pid = processId()
+    assert pid > 0
+    assert processId() is pid
+    int parent = parentProcessId()
+    assert parent > 0
+    string host = ""
+    assert tryHostName(ref host)
+    assert len(host) > 0
+    freeString(ref host)
+    println("os ok")
+    return 0
+end

@@ -10,6 +10,12 @@ void rejectHex(string s) do
     assert isEmpty(value) is true
 end
 
+void rejectHexBytes(string s) do
+    u8 vec value = [1]
+    assert hexDecodeBytes(s, ref value) is false
+    assert value.is_empty()
+end
+
 void rejectB64(string s) do
     string value = "sentinel"
     assert base64Decode(s, ref value) is false
@@ -38,6 +44,7 @@ int main() do
     rejectHex("zz")
     rejectHex("0g")
     rejectHex("0x10")
+    rejectHex("00")
     assert base64Value('A') is 0
     assert base64Value('z') is 51
     assert base64Value('0') is 52
@@ -67,6 +74,44 @@ int main() do
     rejectB64("A===")
     rejectB64("A==B")
     rejectB64("====")
+    // RFC 4648 requires all unused low bits in padded quartets to be zero.
+    rejectB64("AB==")
+    rejectB64("AAB=")
+    rejectB64("AA==")
+    rejectB64("AGE=")
+    u8 vec raw = vec[]
+    raw.push(0)
+    raw.push(1)
+    raw.push(255)
+    assert equals(hexEncodeBytes(raw), "0001ff")
+    assert equals(base64EncodeBytes(raw), "AAH/")
+    u8 vec decoded = [42]
+    u8 zero = 0
+    u8 one = 1
+    u8 high = 255
+    assert hexDecodeBytes("0001ff", ref decoded)
+    assert decoded.len() is 3
+    assert decoded[0] is zero
+    assert decoded[1] is one
+    assert decoded[2] is high
+    assert base64DecodeBytes("AAH/", ref decoded)
+    assert decoded.len() is 3
+    assert decoded[0] is zero
+    assert decoded[1] is one
+    assert decoded[2] is high
+    rejectHexBytes("0")
+    rejectHexBytes("zz")
+    assert base64DecodeBytes("AA==", ref decoded)
+    assert decoded.len() is 1
+    assert decoded[0] is zero
+    string oversized = allocateString(344)
+    int oversizedIndex = 0
+    while oversizedIndex < 344 do
+        oversized[oversizedIndex] = 'A'
+        oversizedIndex = oversizedIndex + 1
+    end
+    assert base64DecodeBytes(oversized, ref decoded) is false
+    assert decoded.is_empty()
     // round-trips through both codecs
     string rt = ""
     assert hexDecode(hexEncode("hello, world!"), ref rt)

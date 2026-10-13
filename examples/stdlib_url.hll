@@ -110,6 +110,8 @@ int main() do
     assert percentDecode("ab%2", ref bad) is false
     assert percentDecode("ab%zz", ref bad) is false
     assert percentDecode("%2G", ref bad) is false
+    assert percentDecode("ab%00cd", ref bad) is false
+    assert isEmpty(bad) is true
     assert hasUrlControl("a b") is true
     assert hasUrlControl("a\tb") is true
     assert hasUrlControl("ab") is false

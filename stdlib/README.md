@@ -1,7 +1,7 @@
 # Hella Standard Library
 
-Pure Hella sources. See `.opencode/skills/stdlib/SKILL.md` for import semantics (EBNF §32),
-`.opencode/skills/stdlib/REAL_STDLIB.md` for the bare-minimum compiler contract, and roadmap.
+Pure Hella sources. See `.opencode/skills/stdlib/SKILL.md` for the stdlib
+design goals and import semantics.
 
 The compiler knows no user-facing IO names. Every symbol below is an ordinary Hella
 function defined in `stdlib/`, using Hella algorithms and `extern "c"` where needed. Calling one
@@ -14,10 +14,11 @@ without its `import` is a sema error (`undefined function`) by design.
   - `void println(string s)` — with newline (`puts(s)`)
   - `void eprint(string s)` / `void eprintln(string s)` — stderr, without/with
     newline (`write(2, …)`; no `FILE*` global needed)
-  - `string readLine()` — dynamically growing line reader, strips LF, preserves
-    blank lines; returns the partial line on EOF/error, or `""` if no bytes read.
-    No EOF/error distinction, CR stripping, or embedded-NUL support. Uses bounded
-    one-byte `scanf("%1c")` reads, doubling buffers; intermediate buffers are freed.
+  - `bool tryReadLine(ref line)` — distinguishes blank lines from EOF, returns
+    nonempty unterminated final lines, resets output on EOF/NUL, consumes a NUL
+    line before reporting failure, and preserves CR. `string readLine()` is the
+    convenience wrapper returning `""` for EOF or NUL-containing input. Both
+    grow buffers dynamically; the caller owns returned heap storage.
 - `std::math` — `stdlib/std/math.hll`
   - `double sqrt(double x)`, `sin`/`cos`/`tan`, `pow`, `floor`/`ceil`/`round`,
     `log`/`exp`, `fabs`, `fmin`/`fmax`, `atan2` via `libm`
@@ -28,7 +29,9 @@ without its `import` is a sema error (`undefined function`) by design.
     and arithmetic on doubles remain sema-rejected by design.
 - `std::str` — `stdlib/std/str.hll`
   - `int len(string s)`, `bool isEmpty`, `bool equals`/`int compare`,
-    `bool contains`/`startsWith`/`endsWith`, `string clone`/`substring`
+    `bool contains`/`startsWith`/`endsWith`, `string clone`/`substring`,
+    `freeString(ref owned)` to release a caller-owned heap string and reset its
+    variable (never use on literals or borrowed values)
   - `indexOf(hay, needle)`, `indexOfFrom(hay, needle, start)`, `lastIndexOf`:
     byte offsets, `-1` on miss. Empty needle matches start/end. Negative search
     start clamps to 0; start beyond length returns -1, even for empty needle.
@@ -82,7 +85,14 @@ without its `import` is a sema error (`undefined function`) by design.
     digits) in a 32-byte buffer, always big enough. Display-grade only:
     shortest round-trip is not guaranteed.
 - `std::env` — `stdlib/std/env.hll`
-  - `string getEnv(string name)` (getenv + "" on miss, `string is null` now allowed), `bool hasEnv`, `void setEnv`/`unsetEnv` (setenv/unsetenv), `string cwd()` (getcwd + calloc)
+  - `string getEnv(string name)` (getenv + `""` on miss), `bool hasEnv`,
+    `tryGetEnv(name, ref value)` (distinguishes missing from empty; successful
+    output borrows libc-owned storage and can be invalidated by environment
+    mutation), `void setEnv`/`unsetEnv`, checked `trySetEnv`/`tryUnsetEnv`,
+    `tryCwd(ref path)` (caller-owned output; resets on failure; uses a 1024-byte
+    buffer), and `cwd()`. POSIX uses `setenv`/`unsetenv`/`getcwd`; Windows
+    uses UCRT `_putenv_s`/`_getcwd` (`_putenv_s` removes a variable when given
+    an empty value).
   - `string homeDir()` — `HOME`, else `USERPROFILE` (Windows), else `""`.
     Pure lookup; no `~` expansion anywhere.
   - `string tempDir()` — `TMPDIR`, else `TEMP`, else `TMP`, else `""` (empty
@@ -93,7 +103,25 @@ without its `import` is a sema error (`undefined function`) by design.
     `__hella_progname`; no libc symbol involved despite the `from "libc"` header)
   - `void exitProcess(int code)` — immediate `exit(code)`; deferred cleanup
     does not run, so reserve it for fatal paths
+- `std::os` — `stdlib/std/os.hll`
+  - `processId()` returns the current process ID on Unix-like systems and
+    Windows. Unix additionally exposes `parentProcessId()`,
+    `tryHostName(ref name)`, and `hostName()`; the host-name output is owned
+    heap memory and should be released with `std::str::freeString`. Host names
+    exceeding 255 bytes fail instead of being truncated. Parent PID and
+    hostname operations are intentionally unavailable on Windows.
 - `std::fs` — `stdlib/std/fs.hll`
+  - `tryReadFile(path, ref content)`, `tryWriteFile`, `tryAppendFile`, and
+    `tryRemoveFile` report failures as `bool`; `tryCopyFile` checks the read,
+    write, and resulting size (the destination may be truncated on failure).
+    `tryFileSize` writes a size output and resets it to `-1` on failure.
+    `tryReadFile` resets its output
+    on failure, distinguishes missing from empty files, and rejects embedded
+    NUL bytes because Hella strings cannot represent them.
+  - `tryReadFileBytes`, `tryWriteFileBytes`, and `tryAppendFileBytes` preserve
+    every byte, including NUL and invalid UTF-8, using `u8 vec` buffers.
+    Checked binary reads replace the output buffer on success and clear it on
+    failure; empty files are successful reads.
   - `bool exists(string path)` (access), `string readFile`/`void writeFile`/`appendFile`/`removeFile` (fopen/fseek/ftell/fread/fwrite/remove)
   - `int fileSize(string path)` — bytes via `fseek`/`ftell`, or `-1` when
     the file cannot be opened
@@ -110,6 +138,9 @@ without its `import` is a sema error (`undefined function`) by design.
     `extension(p)` (`"a.tar.gz"` → `"gz"`; dotfiles/dotless/trailing-dot yield `""`)
   - `isAbsolute(p)` — true for a leading `/` (POSIX semantics;
     `C:/x` is not absolute, `\` is an ordinary byte)
+  - `normalizeSeparators(p)` converts `\\` to `/`; `isAbsolutePortable(p)`
+    recognizes POSIX-rooted, Windows-rooted, and drive-rooted forms without
+    changing the POSIX-only contract of `isAbsolute`.
   - `clean(p)` — lexical normalization (Go `path.Clean` parity):
     collapses `//`, drops `.`, resolves `..` without escaping the root,
     strips trailing slashes; `""` → `"."`, root stays `"/"`. At most 255
@@ -117,26 +148,57 @@ without its `import` is a sema error (`undefined function`) by design.
   - `/`-separated only (no Windows `\` handling); composes with `std::fs` paths
 - `std::vector` — `stdlib/std/vector.hll` (pure Hella; named `vector` because
   `vec` is a compiler keyword and cannot be an import segment)
-  - int vec: `iLen`/`iIsEmpty`/`iContains`/`iFirst`/`iLast`, `iPush`/`iPop`
-    (`ref`), `iSum`/`iIndexOf` (loops)
-  - string vec: `sLen`/`sIsEmpty`/`sFirst`/`sLast`, `sPush`/`sPop` (`ref`),
-    `sContains`/`sJoin` (byte comparison/exact-size copying — the
-    `contains` method hangs on ptr-element vecs)
-  - double vec: `dLen`, `dPush` (`ref`) only (`contains` miscompiles f64,
-    `+` has no double overload)
-  - no `*Clear`/`*Sort`/`*Reverse`: `clear()` fails LLVM verification even
-    on locals, and indexing (`v[i]`, `v[i] = x`) plus `v.len()` do not lower
-    through `ref` params — only `push`/`pop` method calls do. Clear with a
-    caller-side `while v.len() > 0 do iPop(ref v) end` loop or by rebinding
-    to a fresh literal; sort/reverse need compiler support first
-- `std::map` — `stdlib/std/map.hll` (pure Hella, read-only)
+  - int vec: `iLen`/`iIsEmpty`/`iContains`/`iFirst`/`iLast`, `iPush`/`iPop`/
+    `iCapacity`/`iRemainingCapacity` (fixed at 256/256-len),
+    `iClear` (`ref`), `iTryGet`/`iTryPop` (checked access/removal that resets
+    output on failure), `iSum`/`iIndexOf`/`iCount`/`iTryMin`/`iTryMax`/`iClone`
+    (clone makes an independent vector of the element values),
+    `iTryInsert`/`iTryRemoveAt`/`iTrySwapRemoveAt`/`iTryAppend` (checked,
+    preserve-on-failure capacity behavior; swap removal is unordered),
+    `iReverse`, and stable ascending `iSort`
+    `iTryTruncate` removes the tail; negative lengths fail and lengths above
+    the current size are a no-op.
+  - string vec: `sLen`/`sIsEmpty`/`sFirst`/`sLast`, `sPush`/`sPop`/`sClear`
+    (`ref` for mutation), `sCapacity`/`sRemainingCapacity`,
+    `sTryGet`/`sTryPop`, `sContains`/`sIndexOf`/`sCount`/
+    `sJoin`, `sTryInsert`/`sTryRemoveAt`/`sTrySwapRemoveAt`/`sTryAppend`,
+    `sReverse`, and stable byte-lexicographic `sSort` (bytewise equality —
+    the built-in `contains` method hangs
+    on ptr-element vecs)
+    `sTryTruncate` removes the tail with the same checked length contract.
+  - double vec: `dLen`/`dIsEmpty`/`dCapacity`/`dRemainingCapacity`,
+    `dFirst`/`dLast`/`dPush`/`dPop`/`dClear` (`ref` for mutation),
+    `dTryGet`/`dTryPop`/`dClone`, checked `dTryInsert`/`dTryRemoveAt`/
+    `dTrySwapRemoveAt`/`dTryAppend`/`dTryTruncate`, and `dReverse`.
+    Double comparison-based helpers (`contains`/sorting) remain unavailable
+    because f64 comparison lowering is unreliable; `+` has no double overload.
+  - `*Clear` facades drain via repeated `pop()` because the compiler's
+    built-in `clear()` fails LLVM verification. `ref` parameters support
+    indexing and mutation for these helpers, but some other collection
+    operations still have codegen limitations. Vectors are currently backed
+    by 256 inline slots, not dynamically allocated storage; checked insert and
+    append return false without mutation when capacity is insufficient.
+- Fixed arrays — compiler-provided methods (no import required)
+  - `arr.len()`, `arr.is_empty()`, `arr.contains(value)`, `arr.first()`,
+    `arr.last()`, and `arr.at_or(index, fallback)` operate on fixed-size
+    arrays. `at_or` returns the fallback for a negative or out-of-range index;
+    it does not form an invalid pointer or read the array. `first()`/`last()` trap on empty
+    arrays; `contains` scans the full array. Arrays are passed and returned by
+    value. Generic Hella helpers taking unsized array parameters are not yet
+    supported reliably; call these methods directly on local arrays. There is
+    no general-purpose array mutation, sorting, or checked-reference API yet.
+- `std::map` — `stdlib/std/map.hll` (pure Hella helper layer)
   - `si*` (string:int), `ii*` (int:int), `ss*` (string:string):
-    `Len`/`IsEmpty` (methods) + `Has`/`GetOr` (`for`-in loops — keyed
-    methods and `m[k]` fail verification through by-value params)
-  - mutate with direct local calls: subscript insert/update/read
-    (`m[k] = v`, `m[k]`), `contains`/`get_or`/`len`/`is_empty` methods,
-    `m.remove(k)`; `ref`-param method calls do not codegen. `m.clear()`
-    miscompiles (LLVM verification) — pop in a loop or rebind instead.
+    `Len`/`IsEmpty`, `Has`/`GetOr`/`TryGet`, `Keys`/`Values` (via map
+    iteration), and `Put`/`Remove`/`Clear` (mutating `ref` helpers; clear
+    snapshots keys then removes them). Key/value
+    vectors are returned in the map's unspecified iteration order. Keyed
+    reads and direct subscript access remain unreliable through by-value
+    parameters; use `TryGet`/`GetOr` there.
+  - Local direct mutation also supports subscript insert/update/read
+    (`m[k] = v`, `m[k]`), `contains`/`get_or`/`len`/`is_empty`, and
+    `m.remove(k)`. The built-in `m.clear()` still miscompiles (LLVM
+    verification); use the `*Clear` helpers.
     See `examples/stdlib_collections.hll` for the working pattern.
 - `std::log` — `stdlib/std/log.hll` (pure Hella over `std::io`/`str`/`num`/`time`)
   - `logDebug`/`logInfo`/`logWarn`/`logError` to stderr, each line prefixed
@@ -149,16 +211,35 @@ without its `import` is a sema error (`undefined function`) by design.
     silences everything.
   - Lines use exact-size `concat`, never the interpolation buffer, so
     unbounded messages stay safe.
-- `std::encoding` — `stdlib/std/encoding.hll` (pure Hella over `std::str`)
-  - `hexEncode(s)` (lowercase, exact `2n` output), `hexDecode(s, ref value)`
-    (either case; false + reset on odd length or non-hex input),
+- `std::encoding` — `stdlib/std/encoding.hll` (pure Hella over `std::str`/
+  `std::vector`)
+  - Text `hexEncode(s)` (lowercase, exact `2n` output) and
+    `hexDecode(s, ref value)` (either case; false + reset on odd length,
+    non-hex input, or decoded NUL, which Hella strings cannot represent);
     `hexValue(c)` digit helper (`-1` on miss)
-  - `base64Encode(s)` (standard alphabet, `=` padding, exact output),
-    `base64Decode(s, ref value)` (strict length/`=`-placement/alphabet;
-    false + reset on violation), `base64Value(c)` helper (`-1`, incl. `=`)
+  - Text `base64Encode(s)` and `base64Decode(s, ref value)` use the standard
+    alphabet and padding; decoding is strict about length, alphabet, padding
+    placement, canonical padding bits, and decoded NUL, and validates before
+    allocating. Failures reset the output.
+    `base64Value(c)` helper (`-1`, incl. `=`)
+  - Binary `hexEncodeBytes`/`base64EncodeBytes` accept `u8 vec`; matching
+    `hexDecodeBytes`/`base64DecodeBytes` preserve every byte including NUL,
+    clear outputs on errors, and reject decoded sizes above the vector's
+    current 256-byte capacity.
   - Possible because `char` widens to `int` at bindings and `int` narrows
     into `char` index stores (low byte); bytes are masked `& 255` after
     widening so high bytes behave regardless of char extension
+- `std::bytes` — `stdlib/std/bytes.hll` (`u8 vec`-backed mutable byte buffers)
+  - `length`, `isEmptyBytes`, `push`, `pop`, `tryGet`, `trySet`, `append`,
+    `indexOfByte`, `buffersEqual`, `fromString`, `appendString`, and
+    `tryToString`.
+  - Buffers can contain all 256 byte values, including NUL and invalid UTF-8.
+    String conversion is checked and fails for embedded NUL; otherwise it
+    preserves raw bytes, so use `std::utf8::validate` when text validity matters.
+    The compiler's inline vector storage caps each byte buffer at 256 bytes;
+    checked binary file reads return false for larger files, while byte-buffer
+    constructors/appends assert on capacity overflow. This is a compiler
+    limitation, not an intended growable-buffer contract.
 - `std::hash` — `stdlib/std/hash.hll` (pure Hella over `std::str` + `std::encoding`)
   - `fnv1a64(s)` / `fnv1a32(s)` / `crc32(s)` (zlib/IEEE) as lowercase hex
     strings (16/8/8 chars, leading zeros kept). Digests render nibble-direct
@@ -169,6 +250,38 @@ without its `import` is a sema error (`undefined function`) by design.
     tokens, or signatures; no crypto lives in the standard library).
     Wrapping mod-2^N arithmetic like `std::rand` relies on; `u64Pair` halves
     must be split (a 40-bit FNV prime in `lo` truncates — see module header).
+- `std::utf8` — `stdlib/std/utf8.hll` (strict UTF-8 operations over `std::str`)
+  - `validate(s)`, `decodeRuneAt(s, byteOffset, ref rune)`, `runeAt(s,
+    runeIndex, ref rune)`, `runeCount(s)`, `byteOffset(s, runeIndex)`,
+    `substringRunes(s, start, stop, ref result)`, and
+    `encodeRune(rune, ref result)`. Rune slicing copies the bytes; it is not
+    a borrowed view.
+  - Byte offsets/widths are distinct from rune indexes. Malformed input
+    consumes one byte as U+FFFD; `validate` rejects it. `encodeRune` rejects
+    invalid scalars and U+0000 because Hella strings are NUL-terminated and
+    cannot contain embedded NUL bytes.
+- `std::json` — `stdlib/std/json.hll`
+  - `isValid(s)` checks for exactly one complete RFC 8259 JSON value;
+    it enforces strict number grammar, string escapes, UTF-8, and a
+    128-container nesting limit. `tryQuoteString(s, ref quoted)` encodes one
+    valid UTF-8 string as a JSON string literal (including control escaping)
+    and `tryUnquoteString(jsonString, ref value)` decodes JSON escapes and
+    Unicode surrogate pairs to UTF-8. `tryGetRawField(object, name, ref raw)`
+    locates the first matching top-level object field (including escaped keys)
+    and returns its value as a raw JSON copy, suitable for checking with
+    `isValid` or decoding with `tryUnquoteString`/`std::num`. All checked
+    operations reset outputs on failure; decoded U+0000 is rejected because
+    Hella strings cannot represent NUL. Returned strings are owned heap copies
+    and may be released with `std::str::freeString`. This is a scalar/raw-value
+    API, not a general dynamic JSON value model or object encoder.
+- `std::csv` — `stdlib/std/csv.hll`
+  - `tryNextField(input, ref cursor, ref field, ref separator)` streams one
+    field at a time, handles quoted commas/newlines and doubled quotes, and
+    recognizes LF/CR/CRLF row separators. Separator is 44 (comma), 10 (record
+    end), or 0 (input end). Fields are byte-oriented owned copies; release
+    them with `std::str::freeString`. Malformed quoting returns false and sets
+    cursor to -2; cursor -1 means no more fields. Stop after a record separator
+    at end-of-input rather than requesting a synthetic extra row.
 - `std::fmt` — `stdlib/std/fmt.hll` (pure Hella over `std::str`/`vector`/`num`)
   - `join(sep, parts)` (via `sJoin`), `iJoin(sep, parts)` (int vec via
     `toString` each; empty yields `""`), `repeat(s, n)`, `padStart(s, width)`,
@@ -266,7 +379,8 @@ without its `import` is a sema error (`undefined function`) by design.
   - `buildUrl(u)` recomposes (the `hasAuthority` flag round-trips
     `http:///empty` faithfully); `percentEncode(s)` (uppercase hex,
     never `+` for space) / `percentDecode(s, ref value)` (false + reset
-    on truncated/non-hex `%`); `hasUrlControl`/`isUrlUnreserved`/
+    on truncated/non-hex `%` or `%00`, which strings cannot represent);
+    `hasUrlControl`/`isUrlUnreserved`/
     `isSchemeStart`/`isSchemeRest` building blocks.
 - `std::terminal` — `stdlib/std/terminal/mod.hll`
   - `isStdoutTerminal()` / `isStderrTerminal()` (`isatty` on Unix).

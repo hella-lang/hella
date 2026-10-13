@@ -96,14 +96,14 @@ string percentEncode(string s) do
 end
 
 /// Inverse of `percentEncode` into `value`: `%XX` runs become bytes,
-/// other bytes pass through. Returns false **and resets value to `""`**
-/// on truncated (`"ab%"`, `"ab%2"`) or non-hex (`"ab%zz"`) sequences.
+/// other bytes pass through. Since Hella strings cannot represent NUL,
+/// `%00` is rejected too. Returns false **and resets value to `""`** on
+/// truncated (`"ab%"`, `"ab%2"`), non-hex (`"ab%zz"`), or NUL input.
 bool percentDecode(string s, ref string value) do
     value = ""
     int n = len(s)
-    string res = allocateString(n)
     int i = 0
-    int o = 0
+    int decodedLen = 0
     while i < n do
         int b = s[i]
         b = b & 255
@@ -117,6 +117,26 @@ bool percentDecode(string s, ref string value) do
             if hi < 0 or lo < 0 do
                 return false
             end
+            int decodedByte = hi * 16 + lo
+            if decodedByte is 0 do
+                return false
+            end
+            decodedLen = decodedLen + 1
+            i = i + 3
+        end else do
+            decodedLen = decodedLen + 1
+            i = i + 1
+        end
+    end
+    string res = allocateString(decodedLen)
+    i = 0
+    int o = 0
+    while i < n do
+        int b = s[i]
+        b = b & 255
+        if b is 37 do
+            int hi = hexValue(s[i + 1])
+            int lo = hexValue(s[i + 2])
             res[o] = hi * 16 + lo
             o = o + 1
             i = i + 3
@@ -126,7 +146,7 @@ bool percentDecode(string s, ref string value) do
             i = i + 1
         end
     end
-    value = substring(res, 0, o)
+    value = res
     return true
 end
 

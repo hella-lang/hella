@@ -1,0 +1,73 @@
+// std::os — operating-system identity helpers for Hella.
+// Import via: import std::os
+
+@cfg(unix)
+extern "c" from "libc" do
+    i32 getpid()
+    i32 getppid()
+    int gethostname(string name, int size)
+    string calloc(int n, int size)
+    void free(string value)
+end
+
+@cfg(windows)
+extern "c" from "libc" do
+    i32 _getpid()
+end
+
+/// Returns the current process ID on Unix-like systems and Windows.
+/// The value is positive for a running process.
+@cfg(unix)
+int processId() do
+    return getpid()
+end
+
+@cfg(windows)
+int processId() do
+    return _getpid()
+end
+
+/// Returns the parent process ID on Unix-like systems.
+/// This API is platform-specific and is unavailable on Windows.
+@cfg(unix)
+int parentProcessId() do
+    return getppid()
+end
+
+/// Stores the local host name in `name`; returns false and resets `name`
+/// on failure. Successful output is caller-owned heap memory and should be
+/// released with `std::str::freeString`. Unix host names longer than 255
+/// bytes are rejected rather than returned truncated.
+@cfg(unix)
+bool tryHostName(ref string name) do
+    name = ""
+    string buf = calloc(1, 257)
+    if buf is null do
+        return false
+    end
+    if gethostname(buf, 256) is not 0 do
+        free(buf)
+        return false
+    end
+    int i = 0
+    while i < 256 do
+        if buf[i] is '\0' do
+            name = buf
+            return true
+        end
+        i = i + 1
+    end
+    free(buf)
+    return false
+end
+
+/// Returns the local Unix host name, or `""` when unavailable. Successful
+/// output is caller-owned heap memory; use `std::str::freeString`.
+@cfg(unix)
+string hostName() do
+    string name = ""
+    if not tryHostName(ref name) do
+        return ""
+    end
+    return name
+end

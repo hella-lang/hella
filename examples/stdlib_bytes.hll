@@ -1,0 +1,72 @@
+import std::bytes
+import std::io
+import std::str::{equals, isEmpty}
+import std::utf8::{validate}
+
+
+int main() do
+    u8 vec data     = vec[]
+    u8 vec copy     = vec[]
+    u8 vec expected = vec[]
+    int    value    = -1
+    string text     = ""
+    assert isEmptyBytes(data)
+    assert length(data) is 0
+    push(ref data, 0)
+    push(ref data, 65)
+    push(ref data, 255)
+    assert length(data) is 3
+    assert tryGet(data, 0, ref value)
+    assert value is 0
+    assert tryGet(data, 2, ref value)
+    assert value is 255
+    assert tryGet(data, -1, ref value) is false
+    assert value is 0
+    assert tryGet(data, 3, ref value) is false
+    assert trySet(ref data, 1, 66)
+    assert trySet(ref data, 3, 1) is false
+    assert trySet(ref data, 0, 256) is false
+    assert indexOfByte(data, 255) is 2
+    assert indexOfByte(data, 12) is -1
+    assert indexOfByte(data, 256) is -1
+    copy = fromString("hello")
+    appendString(ref data, "!")
+    assert length(data) is 4
+    assert tryToString(data, ref text) is false
+    assert isEmpty(text)
+    assert pop(ref data, ref value)
+    assert value is 33
+    assert pop(ref data, ref value)
+    assert value is 255
+    assert pop(ref data, ref value)
+    assert value is 66
+    assert pop(ref data, ref value)
+    assert value is 0
+    assert pop(ref data, ref value) is false
+    assert isEmptyBytes(data)
+    assert tryToString(copy, ref text)
+    assert equals(text, "hello")
+    assert validate(text)
+    copy = fromString("¢")
+    assert length(copy) is 2
+    assert tryGet(copy, 0, ref value)
+    assert value is 194
+    assert tryGet(copy, 1, ref value)
+    assert value is 162
+    assert tryToString(copy, ref text)
+    assert equals(text, "¢")
+    assert validate(text)
+    push(ref copy, 255)
+    assert tryToString(copy, ref text)
+    assert validate(text) is false
+    append(ref copy, copy)
+    assert length(copy) is 6
+    assert tryToString(copy, ref text)
+    assert validate(text) is false
+    expected = fromString("¢")
+    push(ref expected, 255)
+    append(ref expected, expected)
+    assert buffersEqual(copy, expected)
+    println("bytes ok")
+    return 0
+end
