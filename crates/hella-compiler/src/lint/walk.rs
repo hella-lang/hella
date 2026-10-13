@@ -60,7 +60,9 @@ fn ty(t: &Type, v: &mut impl FnMut(&str)) {
         | Type::Own(e, _)
         | Type::Task(e, _) => ty(e, v),
         Type::FixedArray { elem: e, .. } => ty(e, v),
-        Type::Map { key: k, value: val, .. } => {
+        Type::Map {
+            key: k, value: val, ..
+        } => {
             ty(k, v);
             ty(val, v);
         }
@@ -410,7 +412,9 @@ fn expr(e: &Expr, v: &mut impl FnMut(&Expr)) {
         ExprKind::Call { args: a, .. }
         | ExprKind::New { args: a, .. }
         | ExprKind::EnumVariant { args: a, .. } => args(a, v),
-        ExprKind::Await { task, .. } | ExprKind::Spawn { task, .. } => expr(task, v),
+        ExprKind::Await { task, .. } | ExprKind::Spawn { task, .. } => {
+            expr(task, v)
+        }
         ExprKind::MethodCall {
             object, args: a, ..
         } => {

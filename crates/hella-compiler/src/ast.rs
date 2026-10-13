@@ -51,7 +51,10 @@ pub enum Item {
     Init(Block),
     Const(ConstDecl),
     Var(VarDecl),
-    Attributed { attrs: Vec<Attribute>, item: Box<Item> },
+    Attributed {
+        attrs: Vec<Attribute>,
+        item: Box<Item>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
@@ -132,23 +135,34 @@ pub enum Type {
     Char(Span),
     Float(Span),
     Double(Span),
-    Named(String, Span),       // Phase 2: struct name
+    Named(String, Span),              // Phase 2: struct name
     Generic(String, Vec<Type>, Span), // Phase 5: Box<int>
     FunctionType(Box<Type>, Vec<Type>, Span), // function<Ret(Args)>
     Tuple(Vec<Type>, Span),
     Any(Span),
-    Array(Box<Type>, Span),    // T[]  (Phase 2)
+    Array(Box<Type>, Span), // T[]  (Phase 2)
     /// Fixed-size array (types skill §7-8): `TYPE arr` (size inferred from
     /// initializer) or `TYPE arr[SIZE]` (explicit size, zero-initialized).
     /// `arr` is a compiler keyword; the element type precedes it.
-    FixedArray { elem: Box<Type>, size: Option<u64>, span: Span },
+    FixedArray {
+        elem: Box<Type>,
+        size: Option<u64>,
+        span: Span,
+    },
     /// Dynamic owning vector (types skill §9): `TYPE vec`. Vectors may grow;
     /// empty vectors come from the `vec[]` expression with `any` element type
     /// until the first `push` establishes it.
-    Vec { elem: Box<Type>, span: Span },
+    Vec {
+        elem: Box<Type>,
+        span: Span,
+    },
     /// Associative map (types skill §12): `KEY_TYPE:VALUE_TYPE`
     /// (e.g. `string:int`). There is no `map` keyword.
-    Map { key: Box<Type>, value: Box<Type>, span: Span },
+    Map {
+        key: Box<Type>,
+        value: Box<Type>,
+        span: Span,
+    },
     Pointer(Box<Type>, Span),  // T*  (Phase 2)
     Optional(Box<Type>, Span), // T? (Phase 2 future)
     /// Owning heap pointer: `own T` (moves, scope-destroyed, never null).
@@ -195,9 +209,20 @@ impl Type {
             Type::Float(_) => "float".into(),
             Type::Double(_) => "double".into(),
             Type::Named(n, _) => n.clone(),
-            Type::Generic(n, args, _) => format!("{}<{}>", n, args.iter().map(|a| a.name()).collect::<Vec<_>>().join(", ")),
-            Type::FunctionType(ret, args, _) => format!("function<{}({})>", ret.name(), args.iter().map(|a| a.name()).collect::<Vec<_>>().join(", ")),
-            Type::Tuple(tys, _) => format!("({})", tys.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ")),
+            Type::Generic(n, args, _) => format!(
+                "{}<{}>",
+                n,
+                args.iter().map(|a| a.name()).collect::<Vec<_>>().join(", ")
+            ),
+            Type::FunctionType(ret, args, _) => format!(
+                "function<{}({})>",
+                ret.name(),
+                args.iter().map(|a| a.name()).collect::<Vec<_>>().join(", ")
+            ),
+            Type::Tuple(tys, _) => format!(
+                "({})",
+                tys.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ")
+            ),
             Type::Any(_) => "any".into(),
             Type::Array(el, _) => format!("{}[]", el.name()),
             Type::FixedArray { elem, size, .. } => match size {
@@ -205,7 +230,9 @@ impl Type {
                 None => format!("{} arr", elem.name()),
             },
             Type::Vec { elem, .. } => format!("{} vec", elem.name()),
-            Type::Map { key, value, .. } => format!("{}:{}", key.name(), value.name()),
+            Type::Map { key, value, .. } => {
+                format!("{}:{}", key.name(), value.name())
+            }
             Type::Pointer(el, _) => format!("{}*", el.name()),
             Type::Optional(el, _) => format!("{}?", el.name()),
             Type::Own(el, _) => format!("own {}", el.name()),
@@ -403,10 +430,31 @@ pub struct ExternDecl {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternMember {
-    Function { ty: Type, name: String, name_span: Span, params: Vec<ExternParam>, span: Span },
-    Struct { name: String, name_span: Span, fields: Vec<ExternField>, span: Span },
-    Enum { name: String, name_span: Span, variants: Vec<EnumVariant>, span: Span },
-    Const { ty: Type, name: String, name_span: Span, span: Span },
+    Function {
+        ty: Type,
+        name: String,
+        name_span: Span,
+        params: Vec<ExternParam>,
+        span: Span,
+    },
+    Struct {
+        name: String,
+        name_span: Span,
+        fields: Vec<ExternField>,
+        span: Span,
+    },
+    Enum {
+        name: String,
+        name_span: Span,
+        variants: Vec<EnumVariant>,
+        span: Span,
+    },
+    Const {
+        ty: Type,
+        name: String,
+        name_span: Span,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -605,9 +653,22 @@ pub enum ClosureBody {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallArg {
     Expr(Expr),
-    Named { name: String, name_span: Span, value: Expr, span: Span },
-    Out { ty: Option<Type>, name: String, name_span: Span, span: Span },
-    Ref { expr: Box<Expr>, span: Span },
+    Named {
+        name: String,
+        name_span: Span,
+        value: Expr,
+        span: Span,
+    },
+    Out {
+        ty: Option<Type>,
+        name: String,
+        name_span: Span,
+        span: Span,
+    },
+    Ref {
+        expr: Box<Expr>,
+        span: Span,
+    },
 }
 
 impl CallArg {
@@ -738,24 +799,30 @@ pub enum ExprKind {
     /// parks the current task until the child completes, then yields the
     /// child's return value. Errors when used outside an `async` function
     /// body or when the task already completed / lives in another scope.
-    Await { task: Box<Expr>, span: Span },
+    Await {
+        task: Box<Expr>,
+        span: Span,
+    },
     /// Concurrent child: `spawn callee(args)` or `spawn block-expr`
     /// (Async-1/Async-4). Runs the async callee on its own worker thread,
     /// returns `task<T>` immediately. Must appear inside a `scope` in an
     /// `async` function (or `async main`); the enclosing scope joins it.
-    Spawn { task: Box<Expr>, span: Span },
+    Spawn {
+        task: Box<Expr>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
-    Neg, // -
-    Not, // not
-    Pos, // + (unary plus, no-op)
+    Neg,    // -
+    Not,    // not
+    Pos,    // + (unary plus, no-op)
     BitNot, // ~
-    Inc, // ++ prefix/postfix
-    Dec, // -- prefix/postfix
+    Inc,    // ++ prefix/postfix
+    Dec,    // -- prefix/postfix
     AddrOf, // &x (C1 systems: address-of, yields T*)
-    Deref, // *p (C1 systems: load through T*)
+    Deref,  // *p (C1 systems: load through T*)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -773,24 +840,24 @@ pub enum BinOp {
     IsNot, // "is" / "is not"
     And,
     Or,
-    BitAnd, // &
-    BitOr, // |
-    BitXor, // ^
-    Shl, // <<
-    Shr, // >>
-    NullCoalesce, // ??
-    Range, // ..
+    BitAnd,         // &
+    BitOr,          // |
+    BitXor,         // ^
+    Shl,            // <<
+    Shr,            // >>
+    NullCoalesce,   // ??
+    Range,          // ..
     RangeInclusive, // ..=
-    CompoundAdd, // +=
-    CompoundSub, // -=
-    CompoundMul, // *=
-    CompoundDiv, // /=
-    CompoundMod, // %=
+    CompoundAdd,    // +=
+    CompoundSub,    // -=
+    CompoundMul,    // *=
+    CompoundDiv,    // /=
+    CompoundMod,    // %=
     CompoundBitAnd, // &=
-    CompoundBitOr, // |=
+    CompoundBitOr,  // |=
     CompoundBitXor, // ^=
-    CompoundShl, // <<=
-    CompoundShr, // >>=
+    CompoundShl,    // <<=
+    CompoundShr,    // >>=
 }
 
 // Phase 2: simple match (EBNF §10, §16)
@@ -820,7 +887,7 @@ pub enum Pattern {
         variant_span: Span,
         payload: Option<Vec<Pattern>>,
     },
-    Tuple(Vec<Pattern>, Span), // (a, b, ...)
+    Tuple(Vec<Pattern>, Span),       // (a, b, ...)
     Alternative(Vec<Pattern>, Span), // a | b | c  or  a or b
 }
 
@@ -831,7 +898,7 @@ impl Pattern {
             Pattern::Var(_, s) => *s,
             Pattern::LitInt(_, s) => *s,
             Pattern::LitBool(_, s) => *s,
-            Pattern::Enum{variant_span, ..} => *variant_span,
+            Pattern::Enum { variant_span, .. } => *variant_span,
             Pattern::Tuple(_, s) => *s,
             Pattern::Alternative(_, s) => *s,
         }

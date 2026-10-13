@@ -31,7 +31,8 @@ fn check_entry(dir: &Path, entry_name: &str, entry_src: &str) -> Vec<String> {
     write_file(&entry, entry_src);
     let lexed = lexer::lex(entry_src);
     assert!(lexed.errors.is_empty(), "lex: {:?}", lexed.errors);
-    let parsed = parse::parse(lexed.tokens, entry_src.to_owned()).expect("parse");
+    let parsed =
+        parse::parse(lexed.tokens, entry_src.to_owned()).expect("parse");
     let expanded = modules::expand_imports(parsed, &entry);
     assert!(
         expanded.errors.is_empty(),
@@ -139,7 +140,8 @@ fn without_import_is_still_undefined() {
     let dir = scratch_dir("noimport");
     let errs = std_case(&dir, "void main() do\n    println(\"Hello\")\nend\n");
     assert!(
-        errs.iter().any(|m| m.contains("undefined function `println`")),
+        errs.iter()
+            .any(|m| m.contains("undefined function `println`")),
         "expected undefined-function diagnostic, got: {errs:?}"
     );
     let _ = fs::remove_dir_all(&dir);

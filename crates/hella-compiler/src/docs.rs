@@ -121,10 +121,7 @@ mod tests {
         // line cuts off the upper doc line.
         let src = "/// Upper.\n// note\n/// Lower.\nvoid f() do\nend\n";
         let off = src.find("void f").unwrap();
-        assert_eq!(
-            extract_doc_comment(src, off).as_deref(),
-            Some("Lower.")
-        );
+        assert_eq!(extract_doc_comment(src, off).as_deref(), Some("Lower."));
     }
 
     #[test]

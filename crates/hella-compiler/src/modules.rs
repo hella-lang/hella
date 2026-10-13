@@ -67,7 +67,8 @@ pub fn hella_home() -> Option<PathBuf> {
         if !h.trim().is_empty() {
             return Some(PathBuf::from(h));
         }
-    }    #[cfg(unix)]
+    }
+    #[cfg(unix)]
     {
         std::env::var("HOME")
             .ok()
@@ -151,7 +152,10 @@ pub fn pkg_slot_dir(pkg_root: &Path, git: &str, version: &str) -> PathBuf {
 /// Module root inside a fetched slot: the slot itself, or the `package`
 /// sub-path (`tool::cli` → `tool/cli`) when the Hella module root is not
 /// the repo root.
-pub fn dep_module_root(pkg_root: &Path, dep: &crate::manifest::LockedDependency) -> PathBuf {
+pub fn dep_module_root(
+    pkg_root: &Path,
+    dep: &crate::manifest::LockedDependency,
+) -> PathBuf {
     let slot = pkg_slot_dir(pkg_root, &dep.git, &dep.version);
     match &dep.package {
         Some(pkg) => {
@@ -172,8 +176,12 @@ pub fn dep_module_root(pkg_root: &Path, dep: &crate::manifest::LockedDependency)
 /// back to their requested version. Only existing directories are returned.
 /// Returns empty when there is no manifest or nothing is fetched yet —
 /// plain projects are unaffected.
-pub fn dep_bases_for_project(project_root: &Path, pkg_root: &Path) -> Vec<PathBuf> {
-    let Ok(Some(manifest)) = crate::manifest::read_manifest_file(project_root) else {
+pub fn dep_bases_for_project(
+    project_root: &Path,
+    pkg_root: &Path,
+) -> Vec<PathBuf> {
+    let Ok(Some(manifest)) = crate::manifest::read_manifest_file(project_root)
+    else {
         return Vec::new();
     };
     let locked = crate::manifest::read_lockfile(project_root)
@@ -377,7 +385,11 @@ pub fn expand_imports(program: Program, importer: &Path) -> Expanded {
 /// [`expand_imports`] with an explicit `debug` flag for `@cfg(debug)`
 /// (the CLI passes `true` only for debug link profiles; `check`/LSP and
 /// `--release` pass `false`, so analysis never depends on the link mode).
-pub fn expand_imports_with_cfg(program: Program, importer: &Path, debug_mode: bool) -> Expanded {
+pub fn expand_imports_with_cfg(
+    program: Program,
+    importer: &Path,
+    debug_mode: bool,
+) -> Expanded {
     let bases = search_bases(importer);
     // Entry-level namespaces first (before `program.items` is consumed):
     // each `import a::b` introduces alias `b` (and full `a::b`) so that
@@ -389,13 +401,16 @@ pub fn expand_imports_with_cfg(program: Program, importer: &Path, debug_mode: bo
             Item::Import(imp) => {
                 let alias = imp.path.last().cloned().unwrap_or_default();
                 let full = imp.path.join("::");
-                let requested: Option<Vec<String>> =
-                    imp.symbols.as_ref().map(|v| v.iter().map(|(s, _)| s.clone()).collect());
+                let requested: Option<Vec<String>> = imp
+                    .symbols
+                    .as_ref()
+                    .map(|v| v.iter().map(|(s, _)| s.clone()).collect());
                 let provided = match resolve_import(&imp.path, &bases) {
                     Some(path) => collect_provided_names(&path, debug_mode)
                         .map(|mut names| {
                             if let Some(req) = &requested {
-                                let want: HashSet<String> = req.iter().cloned().collect();
+                                let want: HashSet<String> =
+                                    req.iter().cloned().collect();
                                 names.retain(|n| want.contains(n));
                                 // Keep requested names even if the target file
                                 // does not define them (sema reports unknown);
@@ -408,7 +423,9 @@ pub fn expand_imports_with_cfg(program: Program, importer: &Path, debug_mode: bo
                             }
                             names
                         })
-                        .unwrap_or_else(|| requested.clone().unwrap_or_default()),
+                        .unwrap_or_else(|| {
+                            requested.clone().unwrap_or_default()
+                        }),
                     None => requested.clone().unwrap_or_default(),
                 };
                 Some(ResolvedImport {
@@ -449,7 +466,10 @@ pub fn expand_imports_with_cfg(program: Program, importer: &Path, debug_mode: bo
 /// Top-level declared names in the file at `path` (after `@cfg` filtering),
 /// for namespace / ambiguity bookkeeping. Empty on any I/O/lex/parse error
 /// (the import error itself is reported through the normal path).
-fn collect_provided_names(path: &Path, debug_mode: bool) -> Option<Vec<String>> {
+fn collect_provided_names(
+    path: &Path,
+    debug_mode: bool,
+) -> Option<Vec<String>> {
     let src = std::fs::read_to_string(path).ok()?;
     let toks = crate::lexer::lex(&src);
     if !toks.errors.is_empty() {
@@ -618,7 +638,10 @@ fn expand_items(
             Ok(s) => s,
             Err(e) => {
                 ctx.errors.push(ImportError {
-                    message: format!("failed to read import {}: {e}", path.display()),
+                    message: format!(
+                        "failed to read import {}: {e}",
+                        path.display()
+                    ),
                     span: imp.span,
                     file: importer.to_path_buf(),
                 });
@@ -638,7 +661,11 @@ fn expand_items(
             Ok(p) => p,
             Err(e) => {
                 ctx.errors.push(ImportError {
-                    message: format!("parse error in {}: {}", path.display(), e.message),
+                    message: format!(
+                        "parse error in {}: {}",
+                        path.display(),
+                        e.message
+                    ),
                     span: imp.span,
                     file: importer.to_path_buf(),
                 });
@@ -726,7 +753,10 @@ fn expand_items(
                 }
             }
         } else {
-            for it in sub_items.into_iter().filter(|i| !matches!(i, Item::Import(_))) {
+            for it in sub_items
+                .into_iter()
+                .filter(|i| !matches!(i, Item::Import(_)))
+            {
                 // Extern blocks always ride along (linkage); named declarations
                 // dedup by bare name at the entry level (first import wins —
                 // §34 ambiguity + single codegen symbol).
@@ -774,10 +804,8 @@ mod tests {
     use super::*;
 
     fn scratch_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "hella-mod-test-{}-{tag}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir()
+            .join(format!("hella-mod-test-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

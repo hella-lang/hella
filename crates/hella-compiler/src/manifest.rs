@@ -232,8 +232,7 @@ pub fn is_valid_version_req(req: &str) -> bool {
 
 /// An optional `package` sub-path is one or more `::`-separated short names.
 pub fn is_valid_package_path(path: &str) -> bool {
-    !path.is_empty()
-        && path.split("::").all(|seg| is_valid_dep_name(seg))
+    !path.is_empty() && path.split("::").all(|seg| is_valid_dep_name(seg))
 }
 
 fn value_to_string(v: &toml::Value) -> Option<String> {
@@ -246,7 +245,10 @@ fn value_to_string(v: &toml::Value) -> Option<String> {
     }
 }
 
-fn parse_dependency(name: &str, v: &toml::Value) -> Result<Dependency, ManifestError> {
+fn parse_dependency(
+    name: &str,
+    v: &toml::Value,
+) -> Result<Dependency, ManifestError> {
     if !is_valid_dep_name(name) {
         return Err(ManifestError::Invalid(format!(
             "invalid dependency name `{name}` (expected [_a-zA-Z][_a-zA-Z0-9]*, `std` is reserved)"
@@ -394,15 +396,18 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, ManifestError> {
 }
 
 /// Read and parse `root/hella.toml`. `Ok(None)` when the file is absent.
-pub fn read_manifest_file(root: &Path) -> Result<Option<Manifest>, ManifestError> {
+pub fn read_manifest_file(
+    root: &Path,
+) -> Result<Option<Manifest>, ManifestError> {
     let path = root.join("hella.toml");
     if !path.is_file() {
         return Ok(None);
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| ManifestError::Io {
-        path: path.display().to_string(),
-        source: e,
-    })?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| ManifestError::Io {
+            path: path.display().to_string(),
+            source: e,
+        })?;
     parse_manifest(&text).map(Some)
 }
 
@@ -488,10 +493,11 @@ pub fn read_lockfile(root: &Path) -> Result<Option<Lockfile>, ManifestError> {
     if !path.is_file() {
         return Ok(None);
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| ManifestError::Io {
-        path: path.display().to_string(),
-        source: e,
-    })?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| ManifestError::Io {
+            path: path.display().to_string(),
+            source: e,
+        })?;
     parse_lockfile(&text).map(Some)
 }
 
@@ -519,11 +525,7 @@ pub fn serialize_lockfile(lock: &Lockfile) -> String {
 /// `_` (`github.com/Owner/My-Lib` → `my_lib`). A leading digit or the
 /// reserved `std` gains a leading underscore.
 pub fn derive_dep_name(git: &str) -> String {
-    let last = git
-        .trim_matches('/')
-        .rsplit('/')
-        .next()
-        .unwrap_or(git);
+    let last = git.trim_matches('/').rsplit('/').next().unwrap_or(git);
     let mut name: String = last
         .chars()
         .map(|c| {
@@ -552,7 +554,8 @@ pub fn derive_dep_name(git: &str) -> String {
     if name.is_empty() {
         name = "dep".to_string();
     }
-    if name.chars().next().is_some_and(|c| c.is_ascii_digit()) || name == "std" {
+    if name.chars().next().is_some_and(|c| c.is_ascii_digit()) || name == "std"
+    {
         name = format!("_{name}");
     }
     if !is_valid_dep_name(&name) {
@@ -585,15 +588,18 @@ pub fn serialize_slot_marker(git: &str, version: &str, rev: &str) -> String {
 
 /// Read a slot marker. `Ok(None)` when the directory holds no marker
 /// (not a managed slot); `Err` on malformed content.
-pub fn read_slot_marker(slot: &Path) -> Result<Option<(String, String, String)>, ManifestError> {
+pub fn read_slot_marker(
+    slot: &Path,
+) -> Result<Option<(String, String, String)>, ManifestError> {
     let path = slot.join(slot_marker_name());
     if !path.is_file() {
         return Ok(None);
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| ManifestError::Io {
-        path: path.display().to_string(),
-        source: e,
-    })?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| ManifestError::Io {
+            path: path.display().to_string(),
+            source: e,
+        })?;
     let value: toml::Table = text.parse().map_err(|e: toml::de::Error| {
         ManifestError::Invalid(format!(
             "malformed slot marker {}: {e}",
@@ -602,15 +608,12 @@ pub fn read_slot_marker(slot: &Path) -> Result<Option<(String, String, String)>,
     })?;
     let table = &value;
     let get = |key: &str| {
-        table
-            .get(key)
-            .and_then(value_to_string)
-            .ok_or_else(|| {
-                ManifestError::Invalid(format!(
-                    "malformed slot marker {}: missing `{key}`",
-                    path.display()
-                ))
-            })
+        table.get(key).and_then(value_to_string).ok_or_else(|| {
+            ManifestError::Invalid(format!(
+                "malformed slot marker {}: missing `{key}`",
+                path.display()
+            ))
+        })
     };
     Ok(Some((get("git")?, get("version")?, get("rev")?)))
 }
@@ -621,7 +624,8 @@ mod tests {
 
     #[test]
     fn parses_legacy_bare_manifest() {
-        let m = parse_manifest("name = \"myapp\"\nversion = \"0.1.0\"\n").unwrap();
+        let m =
+            parse_manifest("name = \"myapp\"\nversion = \"0.1.0\"\n").unwrap();
         assert_eq!(m.name, "myapp");
         assert_eq!(m.version, "0.1.0");
         assert!(m.dependencies.is_empty());
@@ -752,20 +756,14 @@ mod tests {
             "github.com/a/b"
         );
         assert_eq!(normalize_git_source("owner/repo"), "github.com/owner/repo");
-        assert_eq!(
-            normalize_git_source("file:///tmp/foo"),
-            "local/tmp/foo"
-        );
+        assert_eq!(normalize_git_source("file:///tmp/foo"), "local/tmp/foo");
         assert_eq!(normalize_git_source("/tmp/foo"), "local/tmp/foo");
         assert_eq!(
             normalize_git_source("local/tmp/foo"),
             "local/tmp/foo",
             "normalization must be idempotent"
         );
-        assert_eq!(
-            clone_url("github.com/a/b"),
-            "https://github.com/a/b"
-        );
+        assert_eq!(clone_url("github.com/a/b"), "https://github.com/a/b");
         assert_eq!(clone_url("local/tmp/foo"), "/tmp/foo");
     }
 

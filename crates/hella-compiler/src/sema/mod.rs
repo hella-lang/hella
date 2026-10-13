@@ -19,7 +19,10 @@ pub enum Ty {
     /// Fixed-width integer from stdlib (`i8`..`i128`, `u8`..`u128`).
     /// These are stdlib types (types skill §2), NOT compiler keywords:
     /// they lex as `Ident` and resolve here via the implicit stdlib env.
-    SizedInt { bits: u16, signed: bool },
+    SizedInt {
+        bits: u16,
+        signed: bool,
+    },
     Bool,
     Void,
     Char,
@@ -35,7 +38,10 @@ pub enum Ty {
     Array(Box<Ty>),
     /// Fixed-size array (types skill §7-8): `TYPE arr` (size inferred,
     /// `None`) or `TYPE arr[N]` (explicit). Arrays are fixed-size for life.
-    FixedArray { elem: Box<Ty>, size: Option<usize> },
+    FixedArray {
+        elem: Box<Ty>,
+        size: Option<usize>,
+    },
     /// Dynamic owning vector (types skill §9-11): `TYPE vec`. An `Any`
     /// element means undetermined — from `vec[]` until the first `push`
     /// establishes it permanently.
@@ -43,7 +49,10 @@ pub enum Ty {
     /// Associative map (types skill §12-14): `KEY:VALUE` (e.g. `string:int`).
     /// Implementation/storage belongs to stdlib; the compiler validates the
     /// key/value types at construction and access.
-    Map { key: Box<Ty>, value: Box<Ty> },
+    Map {
+        key: Box<Ty>,
+        value: Box<Ty>,
+    },
     Pointer(Box<Ty>),
     Optional(Box<Ty>),
     /// Owning heap pointer: `own T`. Moves (never copies); scope-destroyed.
@@ -60,16 +69,46 @@ impl Ty {
         match name {
             "int" => Some(Ty::Int),
             "uint" => Some(Ty::UInt),
-            "i8" => Some(Ty::SizedInt { bits: 8, signed: true }),
-            "i16" => Some(Ty::SizedInt { bits: 16, signed: true }),
-            "i32" => Some(Ty::SizedInt { bits: 32, signed: true }),
-            "i64" => Some(Ty::SizedInt { bits: 64, signed: true }),
-            "i128" => Some(Ty::SizedInt { bits: 128, signed: true }),
-            "u8" => Some(Ty::SizedInt { bits: 8, signed: false }),
-            "u16" => Some(Ty::SizedInt { bits: 16, signed: false }),
-            "u32" => Some(Ty::SizedInt { bits: 32, signed: false }),
-            "u64" => Some(Ty::SizedInt { bits: 64, signed: false }),
-            "u128" => Some(Ty::SizedInt { bits: 128, signed: false }),
+            "i8" => Some(Ty::SizedInt {
+                bits: 8,
+                signed: true,
+            }),
+            "i16" => Some(Ty::SizedInt {
+                bits: 16,
+                signed: true,
+            }),
+            "i32" => Some(Ty::SizedInt {
+                bits: 32,
+                signed: true,
+            }),
+            "i64" => Some(Ty::SizedInt {
+                bits: 64,
+                signed: true,
+            }),
+            "i128" => Some(Ty::SizedInt {
+                bits: 128,
+                signed: true,
+            }),
+            "u8" => Some(Ty::SizedInt {
+                bits: 8,
+                signed: false,
+            }),
+            "u16" => Some(Ty::SizedInt {
+                bits: 16,
+                signed: false,
+            }),
+            "u32" => Some(Ty::SizedInt {
+                bits: 32,
+                signed: false,
+            }),
+            "u64" => Some(Ty::SizedInt {
+                bits: 64,
+                signed: false,
+            }),
+            "u128" => Some(Ty::SizedInt {
+                bits: 128,
+                signed: false,
+            }),
             _ => None,
         }
     }
@@ -141,9 +180,10 @@ impl Ty {
                 Self::assignable(fe, te)
             }
             // Maps: key- and value-wise assignable.
-            (Ty::Map { key: fk, value: fv }, Ty::Map { key: tk, value: tv }) => {
-                Self::assignable(fk, tk) && Self::assignable(fv, tv)
-            }
+            (
+                Ty::Map { key: fk, value: fv },
+                Ty::Map { key: tk, value: tv },
+            ) => Self::assignable(fk, tk) && Self::assignable(fv, tv),
             // Optionals: element-wise between optionals; any value lifts
             // into its Optional (`Some`). Unwrapping needs `??`.
             (Ty::Optional(fe), Ty::Optional(te)) => Self::assignable(fe, te),
@@ -169,20 +209,27 @@ impl From<&Type> for Ty {
                     return std_ty;
                 }
                 Ty::Struct(base)
-            },
+            }
             Type::Generic(n, args, _) => {
                 let base = n.rsplit("::").next().unwrap_or(n).to_string();
                 Ty::Generic(base, args.iter().map(|a| Ty::from(a)).collect())
-            },
-            Type::FunctionType(ret, args, _) => Ty::Function(Box::new(Ty::from(ret.as_ref())), args.iter().map(|a| Ty::from(a)).collect()),
-            Type::Tuple(tys, _) => Ty::Tuple(tys.iter().map(|t| Ty::from(t)).collect()),
+            }
+            Type::FunctionType(ret, args, _) => Ty::Function(
+                Box::new(Ty::from(ret.as_ref())),
+                args.iter().map(|a| Ty::from(a)).collect(),
+            ),
+            Type::Tuple(tys, _) => {
+                Ty::Tuple(tys.iter().map(|t| Ty::from(t)).collect())
+            }
             Type::Any(_) => Ty::Any,
             Type::Array(el, _) => Ty::Array(Box::new(Ty::from(el.as_ref()))),
             Type::FixedArray { elem, size, .. } => Ty::FixedArray {
                 elem: Box::new(Ty::from(elem.as_ref())),
                 size: size.map(|n| n as usize),
             },
-            Type::Vec { elem, .. } => Ty::Vec(Box::new(Ty::from(elem.as_ref()))),
+            Type::Vec { elem, .. } => {
+                Ty::Vec(Box::new(Ty::from(elem.as_ref())))
+            }
             Type::Map { key, value, .. } => Ty::Map {
                 key: Box::new(Ty::from(key.as_ref())),
                 value: Box::new(Ty::from(value.as_ref())),
@@ -193,12 +240,8 @@ impl From<&Type> for Ty {
             Type::Optional(el, _) => {
                 Ty::Optional(Box::new(Ty::from(el.as_ref())))
             }
-            Type::Own(el, _) => {
-                Ty::Own(Box::new(Ty::from(el.as_ref())))
-            }
-            Type::Task(el, _) => {
-                Ty::Task(Box::new(Ty::from(el.as_ref())))
-            }
+            Type::Own(el, _) => Ty::Own(Box::new(Ty::from(el.as_ref()))),
+            Type::Task(el, _) => Ty::Task(Box::new(Ty::from(el.as_ref()))),
         }
     }
 }
@@ -223,12 +266,35 @@ impl std::fmt::Display for Ty {
                 if args.is_empty() {
                     write!(f, "{}", n)
                 } else {
-                    write!(f, "{}<{}>", n, args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", "))
+                    write!(
+                        f,
+                        "{}<{}>",
+                        n,
+                        args.iter()
+                            .map(|a| a.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
                 }
             }
-            Ty::Tuple(tys) => write!(f, "({})", tys.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ")),
+            Ty::Tuple(tys) => write!(
+                f,
+                "({})",
+                tys.iter()
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Ty::Any => write!(f, "any"),
-            Ty::Function(ret, args) => write!(f, "function<{}({})>", ret, args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ")),
+            Ty::Function(ret, args) => write!(
+                f,
+                "function<{}({})>",
+                ret,
+                args.iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Ty::Array(el) => write!(f, "{}[]", el),
             Ty::FixedArray { elem, size } => match size {
                 Some(n) => write!(f, "{} arr[{}]", elem, n),
@@ -399,10 +465,12 @@ impl Checker {
     /// refer to the same (single, non-duplicated) declarations.
     pub fn set_imports(&mut self, imports: &[crate::modules::ResolvedImport]) {
         for imp in imports {
-            self.import_aliases.insert(imp.alias.clone(), imp.full.clone());
+            self.import_aliases
+                .insert(imp.alias.clone(), imp.full.clone());
             self.import_fulls.insert(imp.full.clone());
             for sym in &imp.provided {
-                let entry = self.symbol_providers.entry(sym.clone()).or_default();
+                let entry =
+                    self.symbol_providers.entry(sym.clone()).or_default();
                 // One entry per importing alias (dedup); order = import order.
                 if !entry.contains(&imp.alias) {
                     entry.push(imp.alias.clone());
@@ -419,7 +487,9 @@ impl Checker {
         if base.is_empty() {
             return None;
         }
-        if self.import_aliases.contains_key(prefix) || self.import_fulls.contains(prefix) {
+        if self.import_aliases.contains_key(prefix)
+            || self.import_fulls.contains(prefix)
+        {
             return Some(base.to_string());
         }
         // `a::b::sym` where the import is `a::b`: prefix itself contains
@@ -449,7 +519,10 @@ impl Checker {
                     .iter()
                     .map(|a| format!(
                         "`{}`",
-                        self.import_aliases.get(a).map(|f| f.as_str()).unwrap_or(a)
+                        self.import_aliases
+                            .get(a)
+                            .map(|f| f.as_str())
+                            .unwrap_or(a)
                     ))
                     .collect::<Vec<_>>()
                     .join(", "),
@@ -465,7 +538,9 @@ impl Checker {
         self.require_main = require;
     }
 
-    fn loop_depth(&self) -> usize { self.loop_stack.len() }
+    fn loop_depth(&self) -> usize {
+        self.loop_stack.len()
+    }
 
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
@@ -497,7 +572,9 @@ impl Checker {
     /// clean even when an outer same-named slot is poisoned.
     fn is_poisoned(&self, name: &str) -> bool {
         match self.scope_index_of(name) {
-            Some(idx) => self.poisoned.get(idx).is_some_and(|s| s.contains(name)),
+            Some(idx) => {
+                self.poisoned.get(idx).is_some_and(|s| s.contains(name))
+            }
             None => false,
         }
     }
@@ -571,7 +648,9 @@ impl Checker {
             ExprKind::Match(m) => {
                 for arm in &m.arms {
                     match &arm.body {
-                        MatchArmBody::Expr(e) => Self::moved_ident_names(e, out),
+                        MatchArmBody::Expr(e) => {
+                            Self::moved_ident_names(e, out)
+                        }
                         // Block bodies evaluate to their last value in
                         // complex ways; conservative approximation lives
                         // with the callers (they only enter here for
@@ -609,7 +688,11 @@ impl Checker {
         self.ty_has_own_inner(ty, &mut visiting)
     }
 
-    fn ty_has_own_inner(&self, ty: &Ty, visiting: &mut HashSet<String>) -> bool {
+    fn ty_has_own_inner(
+        &self,
+        ty: &Ty,
+        visiting: &mut HashSet<String>,
+    ) -> bool {
         match ty {
             Ty::Own(_) => true,
             Ty::Struct(n) => {
@@ -619,20 +702,31 @@ impl Checker {
                 }
                 // Classes mirror into the structs map; either entry works.
                 if let Some(sinfo) = self.structs.get(lookup) {
-                    sinfo.fields.iter().any(|(_, fty)| self.ty_has_own_inner(fty, visiting))
+                    sinfo
+                        .fields
+                        .iter()
+                        .any(|(_, fty)| self.ty_has_own_inner(fty, visiting))
                 } else {
                     false
                 }
             }
-            Ty::Tuple(tys) => tys.iter().any(|t| self.ty_has_own_inner(t, visiting)),
-            Ty::Array(el) | Ty::Vec(el) | Ty::Pointer(el) | Ty::Optional(el) => {
-                self.ty_has_own_inner(el, visiting)
+            Ty::Tuple(tys) => {
+                tys.iter().any(|t| self.ty_has_own_inner(t, visiting))
             }
-            Ty::FixedArray { elem, .. } => self.ty_has_own_inner(elem, visiting),
+            Ty::Array(el)
+            | Ty::Vec(el)
+            | Ty::Pointer(el)
+            | Ty::Optional(el) => self.ty_has_own_inner(el, visiting),
+            Ty::FixedArray { elem, .. } => {
+                self.ty_has_own_inner(elem, visiting)
+            }
             Ty::Map { key, value } => {
-                self.ty_has_own_inner(key, visiting) || self.ty_has_own_inner(value, visiting)
+                self.ty_has_own_inner(key, visiting)
+                    || self.ty_has_own_inner(value, visiting)
             }
-            Ty::Generic(_, args) => args.iter().any(|t| self.ty_has_own_inner(t, visiting)),
+            Ty::Generic(_, args) => {
+                args.iter().any(|t| self.ty_has_own_inner(t, visiting))
+            }
             Ty::Function(ret, params) => {
                 self.ty_has_own_inner(ret, visiting)
                     || params.iter().any(|t| self.ty_has_own_inner(t, visiting))
@@ -647,7 +741,9 @@ impl Checker {
         for name in names {
             let base = name.rsplit("::").next().unwrap_or(&name);
             let ty = self.lookup_var(&name).or_else(|| self.lookup_var(base));
-            if matches!(ty, Some(Ty::Own(_))) || ty.as_ref().is_some_and(|t| self.ty_has_own(t)) {
+            if matches!(ty, Some(Ty::Own(_)))
+                || ty.as_ref().is_some_and(|t| self.ty_has_own(t))
+            {
                 self.poison_at_decl(&name);
             }
         }
@@ -719,18 +815,26 @@ impl Checker {
         let is_param = |n: &str| -> bool {
             let lookup = n.rsplit("::").next().unwrap_or(n);
             lookup.len() == 1
-                && lookup.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && lookup
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_uppercase())
                 && !ck.structs.contains_key(lookup)
                 && !ck.classes.contains_key(lookup)
                 && !ck.enums.contains_key(lookup)
                 && !ck.traits.contains_key(lookup)
         };
         match ty {
-            Ty::Struct(n) if is_param(&n) => {
-                Ty::Generic(n.rsplit("::").next().unwrap_or(&n).to_string(), vec![])
+            Ty::Struct(n) if is_param(&n) => Ty::Generic(
+                n.rsplit("::").next().unwrap_or(&n).to_string(),
+                vec![],
+            ),
+            Ty::Array(e) => {
+                Ty::Array(Box::new(Self::canonicalize_generic_param(*e, ck)))
             }
-            Ty::Array(e) => Ty::Array(Box::new(Self::canonicalize_generic_param(*e, ck))),
-            Ty::Vec(e) => Ty::Vec(Box::new(Self::canonicalize_generic_param(*e, ck))),
+            Ty::Vec(e) => {
+                Ty::Vec(Box::new(Self::canonicalize_generic_param(*e, ck)))
+            }
             Ty::FixedArray { elem, size } => Ty::FixedArray {
                 elem: Box::new(Self::canonicalize_generic_param(*elem, ck)),
                 size,
@@ -739,18 +843,29 @@ impl Checker {
                 key: Box::new(Self::canonicalize_generic_param(*key, ck)),
                 value: Box::new(Self::canonicalize_generic_param(*value, ck)),
             },
-            Ty::Pointer(e) => Ty::Pointer(Box::new(Self::canonicalize_generic_param(*e, ck))),
-            Ty::Optional(e) => Ty::Optional(Box::new(Self::canonicalize_generic_param(*e, ck))),
-            Ty::Tuple(es) => {
-                Ty::Tuple(es.into_iter().map(|e| Self::canonicalize_generic_param(e, ck)).collect())
+            Ty::Pointer(e) => {
+                Ty::Pointer(Box::new(Self::canonicalize_generic_param(*e, ck)))
             }
+            Ty::Optional(e) => {
+                Ty::Optional(Box::new(Self::canonicalize_generic_param(*e, ck)))
+            }
+            Ty::Tuple(es) => Ty::Tuple(
+                es.into_iter()
+                    .map(|e| Self::canonicalize_generic_param(e, ck))
+                    .collect(),
+            ),
             Ty::Generic(n, args) => Ty::Generic(
                 n,
-                args.into_iter().map(|a| Self::canonicalize_generic_param(a, ck)).collect(),
+                args.into_iter()
+                    .map(|a| Self::canonicalize_generic_param(a, ck))
+                    .collect(),
             ),
             Ty::Function(ret, params) => Ty::Function(
                 Box::new(Self::canonicalize_generic_param(*ret, ck)),
-                params.into_iter().map(|p| Self::canonicalize_generic_param(p, ck)).collect(),
+                params
+                    .into_iter()
+                    .map(|p| Self::canonicalize_generic_param(p, ck))
+                    .collect(),
             ),
             other => other,
         }
@@ -765,8 +880,12 @@ impl Checker {
                 Self::contains_own(e)
             }
             Ty::FixedArray { elem, .. } => Self::contains_own(elem),
-            Ty::Map { key, value } => Self::contains_own(key) || Self::contains_own(value),
-            Ty::Generic(_, args) | Ty::Tuple(args) => args.iter().any(Self::contains_own),
+            Ty::Map { key, value } => {
+                Self::contains_own(key) || Self::contains_own(value)
+            }
+            Ty::Generic(_, args) | Ty::Tuple(args) => {
+                args.iter().any(Self::contains_own)
+            }
             Ty::Function(ret, params) => {
                 Self::contains_own(ret) || params.iter().any(Self::contains_own)
             }
@@ -779,7 +898,8 @@ impl Checker {
     fn reject_null_own(&mut self, is_null: bool, decl_ty: &Ty, span: Span) {
         if is_null && matches!(decl_ty, Ty::Own(_)) {
             self.errors.push(SemError {
-                message: "null cannot flow into `own` (non-nullable ownership)".into(),
+                message: "null cannot flow into `own` (non-nullable ownership)"
+                    .into(),
                 span,
             });
         }
@@ -847,7 +967,11 @@ impl Checker {
 
     /// True when class `class_name` implements trait `trait_name`, directly
     /// or via its `extends` chain (cycle-guarded).
-    fn class_implements_trait(&self, class_name: &str, trait_name: &str) -> bool {
+    fn class_implements_trait(
+        &self,
+        class_name: &str,
+        trait_name: &str,
+    ) -> bool {
         let mut seen = HashSet::new();
         let mut cur = Some(class_name.to_string());
         while let Some(name) = cur {
@@ -880,19 +1004,49 @@ impl Checker {
             let min_required = Self::min_args_for_sig(sig);
             if args.len() < min_required || args.len() > sig.params.len() {
                 if min_required == sig.params.len() {
-                    self.errors.push(SemError{message: format!("method `{}` expects {} args, found {}", method, sig.params.len(), args.len()), span: *method_span});
+                    self.errors.push(SemError {
+                        message: format!(
+                            "method `{}` expects {} args, found {}",
+                            method,
+                            sig.params.len(),
+                            args.len()
+                        ),
+                        span: *method_span,
+                    });
                 } else {
-                    self.errors.push(SemError{message: format!("method `{}` expects {}-{} args, found {}", method, min_required, sig.params.len(), args.len()), span: *method_span});
+                    self.errors.push(SemError {
+                        message: format!(
+                            "method `{}` expects {}-{} args, found {}",
+                            method,
+                            min_required,
+                            sig.params.len(),
+                            args.len()
+                        ),
+                        span: *method_span,
+                    });
                 }
             }
             for (i, a) in args.iter().enumerate() {
                 let pidx = if let CallArg::Named { name, .. } = a {
                     sig.param_names.iter().position(|n| n == name).unwrap_or(i)
-                } else { i };
+                } else {
+                    i
+                };
                 self.declare_out_arg(a, sig.params.get(pidx));
                 let aty = self.check_call_arg(a);
                 if let Some(pt) = sig.params.get(pidx) {
-                    if !self.ty_assignable(&aty, pt) { self.errors.push(SemError{message: format!("arg {} of `{}`: expected `{}`, found `{}`", i+1, method, pt, aty), span: a.span()}); }
+                    if !self.ty_assignable(&aty, pt) {
+                        self.errors.push(SemError {
+                            message: format!(
+                                "arg {} of `{}`: expected `{}`, found `{}`",
+                                i + 1,
+                                method,
+                                pt,
+                                aty
+                            ),
+                            span: a.span(),
+                        });
+                    }
                 }
                 self.check_arg_mode(a, sig, pidx, method, i + 1);
             }
@@ -901,7 +1055,9 @@ impl Checker {
             let mut n_pos = 0;
             for a in args {
                 if let CallArg::Named { name, .. } = a {
-                    if let Some(pidx) = sig.param_names.iter().position(|n| n == name) {
+                    if let Some(pidx) =
+                        sig.param_names.iter().position(|n| n == name)
+                    {
                         provided.insert(pidx);
                     }
                 } else {
@@ -910,7 +1066,13 @@ impl Checker {
                 }
             }
             for (pidx, pname) in sig.param_names.iter().enumerate() {
-                if !provided.contains(&pidx) && sig.param_defaults.get(pidx).and_then(|d| d.as_ref()).is_none() {
+                if !provided.contains(&pidx)
+                    && sig
+                        .param_defaults
+                        .get(pidx)
+                        .and_then(|d| d.as_ref())
+                        .is_none()
+                {
                     self.errors.push(SemError{message: format!("missing argument `{}` for method `{}` (no default value)", pname, method), span: *method_span});
                 }
             }
@@ -955,12 +1117,14 @@ impl Checker {
         }
         let mut common: Option<FuncSig> = None;
         for cname in &implementors {
-            let entry: Option<(FuncSig, crate::ast::Visibility)> = self
-                .classes
-                .get(cname)
-                .and_then(|cls| {
+            let entry: Option<(FuncSig, crate::ast::Visibility)> =
+                self.classes.get(cname).and_then(|cls| {
                     cls.methods.get(method).map(|sig| {
-                        let vis = cls.method_vis.get(method).cloned().unwrap_or(crate::ast::Visibility::Default);
+                        let vis = cls
+                            .method_vis
+                            .get(method)
+                            .cloned()
+                            .unwrap_or(crate::ast::Visibility::Default);
                         (sig.clone(), vis)
                     })
                 });
@@ -1006,7 +1170,12 @@ impl Checker {
                 sig.ret
             }
             None => {
-                self.errors.push(SemError{message: format!("unknown method `{method}` on trait `{tname}`"), span: obj_span});
+                self.errors.push(SemError {
+                    message: format!(
+                        "unknown method `{method}` on trait `{tname}`"
+                    ),
+                    span: obj_span,
+                });
                 for a in args {
                     let _ = self.check_call_arg(a);
                 }
@@ -1018,7 +1187,12 @@ impl Checker {
     /// Field read/write through a trait-typed receiver (closed-world
     /// structural dispatch): every known implementor must expose the field
     /// with an identical public type. Returns the agreed type.
-    fn check_trait_field(&mut self, tname: &str, field: &str, field_span: &Span) -> Ty {
+    fn check_trait_field(
+        &mut self,
+        tname: &str,
+        field: &str,
+        field_span: &Span,
+    ) -> Ty {
         let implementors: Vec<String> = self
             .classes
             .keys()
@@ -1111,9 +1285,14 @@ impl Checker {
             }
             // Check if it's a generic param for current function/class
             // For minimal, check if it's a single uppercase letter like T, U, V
-            if lookup.len() == 1 && lookup.chars().next().unwrap().is_ascii_uppercase() {
+            if lookup.len() == 1
+                && lookup.chars().next().unwrap().is_ascii_uppercase()
+            {
                 // Consider it as generic if not known struct/class/enum
-                if !self.structs.contains_key(lookup) && !self.classes.contains_key(lookup) && !self.enums.contains_key(lookup) {
+                if !self.structs.contains_key(lookup)
+                    && !self.classes.contains_key(lookup)
+                    && !self.enums.contains_key(lookup)
+                {
                     t = Ty::Generic(lookup.to_string(), vec![]);
                     return t;
                 }
@@ -1123,12 +1302,20 @@ impl Checker {
                 t = Ty::Array(Box::new(Ty::Any));
             } else if self.enums.contains_key(lookup) {
                 t = Ty::Enum(lookup.to_string());
-            } else if !self.structs.contains_key(lookup) && !self.classes.contains_key(lookup) && !self.traits.contains_key(lookup) {
+            } else if !self.structs.contains_key(lookup)
+                && !self.classes.contains_key(lookup)
+                && !self.traits.contains_key(lookup)
+            {
                 // Check if it's generic param (single uppercase)
-                if n.len() == 1 && n.chars().next().unwrap().is_ascii_uppercase() {
+                if n.len() == 1
+                    && n.chars().next().unwrap().is_ascii_uppercase()
+                {
                     t = Ty::Generic(n.clone(), vec![]);
                 } else {
-                    self.errors.push(SemError{message: format!("unknown type `{n}`"), span: ty.span()});
+                    self.errors.push(SemError {
+                        message: format!("unknown type `{n}`"),
+                        span: ty.span(),
+                    });
                 }
             }
         }
@@ -1143,7 +1330,10 @@ impl Checker {
                         && !self.classes.contains_key(lookup)
                         && !self.traits.contains_key(lookup)
                     {
-                        self.errors.push(SemError{message: format!("unknown type `{n}`"), span: ty.span()});
+                        self.errors.push(SemError {
+                            message: format!("unknown type `{n}`"),
+                            span: ty.span(),
+                        });
                     }
                 }
                 other => {
@@ -1154,12 +1344,21 @@ impl Checker {
         // Handle Generic type
         if let Ty::Generic(ref n, ref args) = t {
             // Check base exists
-            if !self.structs.contains_key(n) && !self.classes.contains_key(n) && !self.enums.contains_key(n) && !self.traits.contains_key(n) {
+            if !self.structs.contains_key(n)
+                && !self.classes.contains_key(n)
+                && !self.enums.contains_key(n)
+                && !self.traits.contains_key(n)
+            {
                 // Could be generic param itself, not base
-                if n.len() == 1 && n.chars().next().unwrap().is_ascii_uppercase() {
+                if n.len() == 1
+                    && n.chars().next().unwrap().is_ascii_uppercase()
+                {
                     // Generic param, ok
                 } else {
-                    self.errors.push(SemError{message: format!("unknown generic type `{n}`"), span: ty.span()});
+                    self.errors.push(SemError {
+                        message: format!("unknown generic type `{n}`"),
+                        span: ty.span(),
+                    });
                 }
             }
         }
@@ -1167,62 +1366,141 @@ impl Checker {
         // containers, pointers, generics, ...). Top-level `own` itself is
         // validated above.
         if !matches!(t, Ty::Own(_)) && Self::contains_own(&t) {
-            self.errors.push(SemError{message: "own types cannot be nested inside other types in phase 1".into(), span: ty.span()});
+            self.errors.push(SemError {
+                message:
+                    "own types cannot be nested inside other types in phase 1"
+                        .into(),
+                span: ty.span(),
+            });
         }
         // For compound types, ensure inner is known (array element etc) – From already handled, but check nested struct/enum existence
         match &t {
             Ty::Array(el) | Ty::Pointer(el) | Ty::Optional(el) => {
                 if let Ty::Struct(ref n) = **el {
-                    if !self.structs.contains_key(n) && !self.classes.contains_key(n) && !self.enums.contains_key(n) && !self.traits.contains_key(n) {
-                        self.errors.push(SemError{message: format!("unknown type `{n}`"), span: ty.span()});
+                    if !self.structs.contains_key(n)
+                        && !self.classes.contains_key(n)
+                        && !self.enums.contains_key(n)
+                        && !self.traits.contains_key(n)
+                    {
+                        self.errors.push(SemError {
+                            message: format!("unknown type `{n}`"),
+                            span: ty.span(),
+                        });
                     }
                 }
                 if let Ty::Enum(ref n) = **el {
-                    if !self.enums.contains_key(n) { self.errors.push(SemError{message: format!("unknown type `{n}`"), span: ty.span()}); }
+                    if !self.enums.contains_key(n) {
+                        self.errors.push(SemError {
+                            message: format!("unknown type `{n}`"),
+                            span: ty.span(),
+                        });
+                    }
                 }
                 if let Ty::Generic(ref n, _) = **el {
-                    if !self.structs.contains_key(n) && !self.classes.contains_key(n) && !self.enums.contains_key(n) && !self.traits.contains_key(n) {
-                        self.errors.push(SemError{message: format!("unknown type `{n}`"), span: ty.span()});
+                    if !self.structs.contains_key(n)
+                        && !self.classes.contains_key(n)
+                        && !self.enums.contains_key(n)
+                        && !self.traits.contains_key(n)
+                    {
+                        self.errors.push(SemError {
+                            message: format!("unknown type `{n}`"),
+                            span: ty.span(),
+                        });
                     }
                 }
             }
             Ty::FixedArray { elem: el, .. } => {
                 if let Ty::Struct(ref n) = **el {
-                    if !self.structs.contains_key(n) && !self.classes.contains_key(n) && !self.enums.contains_key(n) && !self.traits.contains_key(n) {
-                        self.errors.push(SemError{message: format!("unknown type `{n}`"), span: ty.span()});
+                    if !self.structs.contains_key(n)
+                        && !self.classes.contains_key(n)
+                        && !self.enums.contains_key(n)
+                        && !self.traits.contains_key(n)
+                    {
+                        self.errors.push(SemError {
+                            message: format!("unknown type `{n}`"),
+                            span: ty.span(),
+                        });
                     }
                 }
                 if let Ty::Enum(ref n) = **el {
-                    if !self.enums.contains_key(n) { self.errors.push(SemError{message: format!("unknown type `{n}`"), span: ty.span()}); }
+                    if !self.enums.contains_key(n) {
+                        self.errors.push(SemError {
+                            message: format!("unknown type `{n}`"),
+                            span: ty.span(),
+                        });
+                    }
                 }
             }
             Ty::Vec(el) => {
                 if let Ty::Struct(ref n) = **el {
-                    if !self.structs.contains_key(n) && !self.classes.contains_key(n) && !self.enums.contains_key(n) && !self.traits.contains_key(n) {
-                        self.errors.push(SemError{message: format!("unknown type `{n}`"), span: ty.span()});
+                    if !self.structs.contains_key(n)
+                        && !self.classes.contains_key(n)
+                        && !self.enums.contains_key(n)
+                        && !self.traits.contains_key(n)
+                    {
+                        self.errors.push(SemError {
+                            message: format!("unknown type `{n}`"),
+                            span: ty.span(),
+                        });
                     }
                 }
                 if let Ty::Enum(ref n) = **el {
-                    if !self.enums.contains_key(n) { self.errors.push(SemError{message: format!("unknown type `{n}`"), span: ty.span()}); }
+                    if !self.enums.contains_key(n) {
+                        self.errors.push(SemError {
+                            message: format!("unknown type `{n}`"),
+                            span: ty.span(),
+                        });
+                    }
                 }
             }
             Ty::Map { key, value } => {
                 for el in [key, value] {
                     if let Ty::Struct(ref n) = **el {
-                        if !self.structs.contains_key(n) && !self.classes.contains_key(n) && !self.enums.contains_key(n) && !self.traits.contains_key(n) {
-                            self.errors.push(SemError{message: format!("unknown type `{n}`"), span: ty.span()});
+                        if !self.structs.contains_key(n)
+                            && !self.classes.contains_key(n)
+                            && !self.enums.contains_key(n)
+                            && !self.traits.contains_key(n)
+                        {
+                            self.errors.push(SemError {
+                                message: format!("unknown type `{n}`"),
+                                span: ty.span(),
+                            });
                         }
                     }
                     if let Ty::Enum(ref n) = **el {
-                        if !self.enums.contains_key(n) { self.errors.push(SemError{message: format!("unknown type `{n}`"), span: ty.span()}); }
+                        if !self.enums.contains_key(n) {
+                            self.errors.push(SemError {
+                                message: format!("unknown type `{n}`"),
+                                span: ty.span(),
+                            });
+                        }
                     }
                 }
             }
             Ty::Generic(n, args) => {
-                if !self.structs.contains_key(n) && !self.classes.contains_key(n) && !self.enums.contains_key(n) && !self.traits.contains_key(n) {
-                    self.errors.push(SemError{message: format!("unknown type `{n}`"), span: ty.span()});
+                if !self.structs.contains_key(n)
+                    && !self.classes.contains_key(n)
+                    && !self.enums.contains_key(n)
+                    && !self.traits.contains_key(n)
+                {
+                    self.errors.push(SemError {
+                        message: format!("unknown type `{n}`"),
+                        span: ty.span(),
+                    });
                 }
-                for a in args { if let Ty::Struct(sn) = a { if !self.structs.contains_key(sn) && !self.classes.contains_key(sn) && !self.enums.contains_key(sn) { self.errors.push(SemError{message: format!("unknown type `{sn}`"), span: ty.span()}); } } }
+                for a in args {
+                    if let Ty::Struct(sn) = a {
+                        if !self.structs.contains_key(sn)
+                            && !self.classes.contains_key(sn)
+                            && !self.enums.contains_key(sn)
+                        {
+                            self.errors.push(SemError {
+                                message: format!("unknown type `{sn}`"),
+                                span: ty.span(),
+                            });
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -1235,7 +1513,9 @@ impl Checker {
         let mut unwrapped: Vec<&Item> = Vec::new();
         for it in &prog.items {
             match it {
-                Item::Attributed{attrs: _, item} => unwrapped.push(item.as_ref()),
+                Item::Attributed { attrs: _, item } => {
+                    unwrapped.push(item.as_ref())
+                }
                 other => unwrapped.push(other),
             }
         }
@@ -1308,20 +1588,40 @@ impl Checker {
                             span: s.span,
                         },
                     );
-                    self.check_where_clause_def("struct", &s.name, &s.generic_params, &s.where_clause, s.span);
+                    self.check_where_clause_def(
+                        "struct",
+                        &s.name,
+                        &s.generic_params,
+                        &s.where_clause,
+                        s.span,
+                    );
                 }
             }
         }
         // Collect traits first (needed for class implements checks)
         for item in &prog.items {
             if let Item::Trait(t) = item {
-                if self.traits.contains_key(&t.name) || self.structs.contains_key(&t.name) || self.classes.contains_key(&t.name) || self.enums.contains_key(&t.name) || self.funcs.contains_key(&t.name) {
-                    self.errors.push(SemError{message: format!("duplicate trait `{}`", t.name), span: t.name_span});
+                if self.traits.contains_key(&t.name)
+                    || self.structs.contains_key(&t.name)
+                    || self.classes.contains_key(&t.name)
+                    || self.enums.contains_key(&t.name)
+                    || self.funcs.contains_key(&t.name)
+                {
+                    self.errors.push(SemError {
+                        message: format!("duplicate trait `{}`", t.name),
+                        span: t.name_span,
+                    });
                 } else {
                     let mut methods = HashMap::new();
                     for m in &t.methods {
                         if methods.contains_key(&m.name) {
-                            self.errors.push(SemError{message: format!("duplicate method `{}` in trait `{}`", m.name, t.name), span: m.name_span});
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "duplicate method `{}` in trait `{}`",
+                                    m.name, t.name
+                                ),
+                                span: m.name_span,
+                            });
                         } else {
                             let param_tys: Vec<Ty> = m.params.iter().enumerate().map(|(idx, p)| {
                                 let mut ty = self.resolve_type(&p.ty);
@@ -1344,41 +1644,105 @@ impl Checker {
                                 ty
                             }).collect();
                             self.check_param_defaults(&m.params, &param_tys);
-                            let param_modes: Vec<ParamMode> = m.params.iter().map(|p| p.mode).collect();
+                            let param_modes: Vec<ParamMode> =
+                                m.params.iter().map(|p| p.mode).collect();
                             let ret_ty = self.resolve_type(&m.ret_ty);
-                            methods.insert(m.name.clone(), FuncSig{ret: ret_ty, params: param_tys, param_modes, param_names: m.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: m.params.iter().map(|p| p.is_variadic).collect(), param_defaults: m.params.iter().map(|p| p.default.clone()).collect(), generic_params: m.generic_params.clone(), where_clause: m.where_clause.clone(), is_async: false, span: m.name_span});
+                            methods.insert(
+                                m.name.clone(),
+                                FuncSig {
+                                    ret: ret_ty,
+                                    params: param_tys,
+                                    param_modes,
+                                    param_names: m
+                                        .params
+                                        .iter()
+                                        .map(|p| p.name.clone())
+                                        .collect(),
+                                    param_is_variadic: m
+                                        .params
+                                        .iter()
+                                        .map(|p| p.is_variadic)
+                                        .collect(),
+                                    param_defaults: m
+                                        .params
+                                        .iter()
+                                        .map(|p| p.default.clone())
+                                        .collect(),
+                                    generic_params: m.generic_params.clone(),
+                                    where_clause: m.where_clause.clone(),
+                                    is_async: false,
+                                    span: m.name_span,
+                                },
+                            );
                         }
                     }
-                    self.traits.insert(t.name.clone(), TraitInfo{name: t.name.clone(), methods, generic_params: t.generic_params.clone(), where_clause: t.where_clause.clone(), span: t.span});
-                    self.check_where_clause_def("trait", &t.name, &t.generic_params, &t.where_clause, t.span);
+                    self.traits.insert(
+                        t.name.clone(),
+                        TraitInfo {
+                            name: t.name.clone(),
+                            methods,
+                            generic_params: t.generic_params.clone(),
+                            where_clause: t.where_clause.clone(),
+                            span: t.span,
+                        },
+                    );
+                    self.check_where_clause_def(
+                        "trait",
+                        &t.name,
+                        &t.generic_params,
+                        &t.where_clause,
+                        t.span,
+                    );
                 }
             }
         }
         // First pass (continued): collect class definitions
         for item in &prog.items {
             if let Item::Class(c) = item {
-                if self.structs.contains_key(&c.name) || self.classes.contains_key(&c.name) {
-                    self.errors.push(SemError{message: format!("duplicate class/struct `{}`", c.name), span: c.name_span});
+                if self.structs.contains_key(&c.name)
+                    || self.classes.contains_key(&c.name)
+                {
+                    self.errors.push(SemError {
+                        message: format!("duplicate class/struct `{}`", c.name),
+                        span: c.name_span,
+                    });
                 } else if self.funcs.contains_key(&c.name) {
-                    self.errors.push(SemError{message: format!("class name `{}` conflicts with function", c.name), span: c.name_span});
+                    self.errors.push(SemError {
+                        message: format!(
+                            "class name `{}` conflicts with function",
+                            c.name
+                        ),
+                        span: c.name_span,
+                    });
                 } else {
                     // Record extends / implements names (validation deferred until after all classes collected)
                     // Generic `extends Base<int>`: identity is the base name.
-                    let extends_name = c.extends.as_ref().map(|t| {
-                        match t {
-                            Type::Named(s, _) => s.clone(),
-                            Type::Generic(base, _, _) => base.rsplit("::").next().unwrap_or(base).to_string(),
-                            _ => self.resolve_type(t).to_string(),
+                    let extends_name = c.extends.as_ref().map(|t| match t {
+                        Type::Named(s, _) => s.clone(),
+                        Type::Generic(base, _, _) => {
+                            base.rsplit("::").next().unwrap_or(base).to_string()
                         }
+                        _ => self.resolve_type(t).to_string(),
                     });
                     // Generic args on `extends`/`implements` must satisfy the
                     // parent/trait bounds now (traits are already collected;
                     // parent classes may follow, so skip unknown ones here —
                     // the deferred validation below reports those).
-                    if let Some(Type::Generic(base, args, _)) = c.extends.as_ref() {
+                    if let Some(Type::Generic(base, args, _)) =
+                        c.extends.as_ref()
+                    {
                         let lookup = base.rsplit("::").next().unwrap_or(base);
                         if let Some(pinfo) = self.classes.get(lookup).cloned() {
-                            self.check_type_args(&pinfo.generic_params, &pinfo.where_clause, lookup, args, c.extends.as_ref().map(|t| t.span()).unwrap_or(c.span));
+                            self.check_type_args(
+                                &pinfo.generic_params,
+                                &pinfo.where_clause,
+                                lookup,
+                                args,
+                                c.extends
+                                    .as_ref()
+                                    .map(|t| t.span())
+                                    .unwrap_or(c.span),
+                            );
                         }
                     }
                     let mut implements_names = Vec::new();
@@ -1388,13 +1752,26 @@ impl Checker {
                         // `Ty::Generic` (`Box<int>`) never matches trait keys.
                         let n = match imp {
                             Type::Named(s, _) => s.clone(),
-                            Type::Generic(base, _, _) => base.rsplit("::").next().unwrap_or(base).to_string(),
+                            Type::Generic(base, _, _) => base
+                                .rsplit("::")
+                                .next()
+                                .unwrap_or(base)
+                                .to_string(),
                             _ => self.resolve_type(imp).to_string(),
                         };
                         if let Type::Generic(base, args, _) = imp {
-                            let lookup = base.rsplit("::").next().unwrap_or(base);
-                            if let Some(tinfo) = self.traits.get(lookup).cloned() {
-                                self.check_type_args(&tinfo.generic_params, &tinfo.where_clause, lookup, args, imp.span());
+                            let lookup =
+                                base.rsplit("::").next().unwrap_or(base);
+                            if let Some(tinfo) =
+                                self.traits.get(lookup).cloned()
+                            {
+                                self.check_type_args(
+                                    &tinfo.generic_params,
+                                    &tinfo.where_clause,
+                                    lookup,
+                                    args,
+                                    imp.span(),
+                                );
                             }
                         }
                         implements_names.push(n);
@@ -1407,19 +1784,45 @@ impl Checker {
                     // Inherit parent fields if extends
                     if let Some(ref parent) = extends_name {
                         if let Some(pinfo) = self.classes.get(parent).cloned() {
-                            for (idx, (fname, fty)) in pinfo.fields.iter().enumerate() {
+                            for (idx, (fname, fty)) in
+                                pinfo.fields.iter().enumerate()
+                            {
                                 fmap.insert(fname.clone(), (idx, fty.clone()));
-                                if let Some(v) = pinfo.field_vis.get(fname) { fvis.insert(fname.clone(), *v); }
-                                else { fvis.insert(fname.clone(), crate::ast::Visibility::Default); }
+                                if let Some(v) = pinfo.field_vis.get(fname) {
+                                    fvis.insert(fname.clone(), *v);
+                                } else {
+                                    fvis.insert(
+                                        fname.clone(),
+                                        crate::ast::Visibility::Default,
+                                    );
+                                }
                                 fdefaults.insert(fname.clone(), None);
                                 fields.push((fname.clone(), fty.clone()));
                                 seen.insert(fname.clone());
                             }
-                        } else if let Some(sinfo) = self.structs.get(parent).cloned() {
-                            for (idx, (fname, fty)) in sinfo.fields.iter().enumerate() {
+                        } else if let Some(sinfo) =
+                            self.structs.get(parent).cloned()
+                        {
+                            for (idx, (fname, fty)) in
+                                sinfo.fields.iter().enumerate()
+                            {
                                 fmap.insert(fname.clone(), (idx, fty.clone()));
-                                if let Some(v) = sinfo.field_vis.get(fname) { fvis.insert(fname.clone(), *v); } else { fvis.insert(fname.clone(), crate::ast::Visibility::Default); }
-                                fdefaults.insert(fname.clone(), sinfo.field_defaults.get(fname).cloned().unwrap_or(None));
+                                if let Some(v) = sinfo.field_vis.get(fname) {
+                                    fvis.insert(fname.clone(), *v);
+                                } else {
+                                    fvis.insert(
+                                        fname.clone(),
+                                        crate::ast::Visibility::Default,
+                                    );
+                                }
+                                fdefaults.insert(
+                                    fname.clone(),
+                                    sinfo
+                                        .field_defaults
+                                        .get(fname)
+                                        .cloned()
+                                        .unwrap_or(None),
+                                );
                                 fields.push((fname.clone(), fty.clone()));
                                 seen.insert(fname.clone());
                             }
@@ -1428,10 +1831,24 @@ impl Checker {
                     let offset = fields.len();
                     for (idx, f) in c.fields.iter().enumerate() {
                         if !seen.insert(f.name.clone()) {
-                            self.errors.push(SemError{message: format!("duplicate field `{}` in class `{}`", f.name, c.name), span: f.name_span});
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "duplicate field `{}` in class `{}`",
+                                    f.name, c.name
+                                ),
+                                span: f.name_span,
+                            });
                         }
                         let fty = self.resolve_type(&f.ty);
-                        if fty == Ty::Void { self.errors.push(SemError{message: format!("field `{}` cannot be `void`", f.name), span: f.span}); }
+                        if fty == Ty::Void {
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "field `{}` cannot be `void`",
+                                    f.name
+                                ),
+                                span: f.span,
+                            });
+                        }
                         if let Some(def) = &f.default {
                             let dty = self.check_expr(def);
                             if dty != fty && dty != Ty::Any {
@@ -1445,13 +1862,34 @@ impl Checker {
                         fields.push((f.name.clone(), fty));
                     }
                     // Also insert class layout into structs map for field access / instantiation
-                    self.structs.insert(c.name.clone(), StructInfo{name: c.name.clone(), fields: fields.clone(), field_map: fmap.clone(), field_vis: fvis.clone(), field_defaults: fdefaults.clone(), generic_params: c.generic_params.clone(), where_clause: c.where_clause.clone(), span: c.span});
+                    self.structs.insert(
+                        c.name.clone(),
+                        StructInfo {
+                            name: c.name.clone(),
+                            fields: fields.clone(),
+                            field_map: fmap.clone(),
+                            field_vis: fvis.clone(),
+                            field_defaults: fdefaults.clone(),
+                            generic_params: c.generic_params.clone(),
+                            where_clause: c.where_clause.clone(),
+                            span: c.span,
+                        },
+                    );
                     // Collect methods
                     let mut methods = HashMap::new();
-                    let mut method_vis: HashMap<String, crate::ast::Visibility> = HashMap::new();
+                    let mut method_vis: HashMap<
+                        String,
+                        crate::ast::Visibility,
+                    > = HashMap::new();
                     for m in &c.methods {
                         if methods.contains_key(&m.name) {
-                            self.errors.push(SemError{message: format!("duplicate method `{}` in class `{}`", m.name, c.name), span: m.name_span});
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "duplicate method `{}` in class `{}`",
+                                    m.name, c.name
+                                ),
+                                span: m.name_span,
+                            });
                         } else {
                             let param_tys: Vec<Ty> = m.params.iter().enumerate().map(|(idx, p)| {
                                 let mut t = self.resolve_type(&p.ty);
@@ -1474,11 +1912,48 @@ impl Checker {
                                 t
                             }).collect();
                             self.check_param_defaults(&m.params, &param_tys);
-                            let param_modes: Vec<ParamMode> = m.params.iter().map(|p| p.mode).collect();
+                            let param_modes: Vec<ParamMode> =
+                                m.params.iter().map(|p| p.mode).collect();
                             let ret_ty = self.resolve_type(&m.ret_ty);
                             let mut pseen = HashSet::new();
-                            for p in &m.params { if !pseen.insert(&p.name) { self.errors.push(SemError{message: format!("duplicate param `{}`", p.name), span: p.name_span}); } }
-                            methods.insert(m.name.clone(), FuncSig{ret: ret_ty, params: param_tys, param_modes, param_names: m.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: m.params.iter().map(|p| p.is_variadic).collect(), param_defaults: m.params.iter().map(|p| p.default.clone()).collect(), generic_params: m.generic_params.clone(), where_clause: m.where_clause.clone(), is_async: false, span: m.name_span});
+                            for p in &m.params {
+                                if !pseen.insert(&p.name) {
+                                    self.errors.push(SemError {
+                                        message: format!(
+                                            "duplicate param `{}`",
+                                            p.name
+                                        ),
+                                        span: p.name_span,
+                                    });
+                                }
+                            }
+                            methods.insert(
+                                m.name.clone(),
+                                FuncSig {
+                                    ret: ret_ty,
+                                    params: param_tys,
+                                    param_modes,
+                                    param_names: m
+                                        .params
+                                        .iter()
+                                        .map(|p| p.name.clone())
+                                        .collect(),
+                                    param_is_variadic: m
+                                        .params
+                                        .iter()
+                                        .map(|p| p.is_variadic)
+                                        .collect(),
+                                    param_defaults: m
+                                        .params
+                                        .iter()
+                                        .map(|p| p.default.clone())
+                                        .collect(),
+                                    generic_params: m.generic_params.clone(),
+                                    where_clause: m.where_clause.clone(),
+                                    is_async: false,
+                                    span: m.name_span,
+                                },
+                            );
                             method_vis.insert(m.name.clone(), m.visibility);
                         }
                     }
@@ -1488,19 +1963,29 @@ impl Checker {
                             for (mname, sig) in pinfo.methods.iter() {
                                 if !methods.contains_key(mname) {
                                     methods.insert(mname.clone(), sig.clone());
-                                    if let Some(v) = pinfo.method_vis.get(mname) { method_vis.insert(mname.clone(), *v); }
+                                    if let Some(v) = pinfo.method_vis.get(mname)
+                                    {
+                                        method_vis.insert(mname.clone(), *v);
+                                    }
                                 }
                             }
                         }
                     }
                     // Validate constructors: name must match class name, params unique; also collect for ClassInfo
-                    let mut ctor_sigs: Vec<(FuncSig, crate::ast::Visibility)> = Vec::new();
+                    let mut ctor_sigs: Vec<(FuncSig, crate::ast::Visibility)> =
+                        Vec::new();
                     for ctor in &c.constructors {
                         if ctor.name != c.name {
                             self.errors.push(SemError{message: format!("constructor name `{}` must match class name `{}`", ctor.name, c.name), span: ctor.name_span});
                         }
                         if methods.contains_key(&ctor.name) {
-                            self.errors.push(SemError{message: format!("constructor `{}` conflicts with method", ctor.name), span: ctor.name_span});
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "constructor `{}` conflicts with method",
+                                    ctor.name
+                                ),
+                                span: ctor.name_span,
+                            });
                         }
                         let mut pseen = HashSet::new();
                         let mut param_tys = Vec::new();
@@ -1511,24 +1996,65 @@ impl Checker {
                                     if idx == 0 {
                                         self.errors.push(SemError{message: "variadic `... vda` without previous type must not be first param".into(), span: p.span});
                                     } else {
-                                        let prev_t = self.resolve_type(&ctor.params[idx-1].ty);
+                                        let prev_t = self.resolve_type(
+                                            &ctor.params[idx - 1].ty,
+                                        );
                                         ty = Ty::Array(Box::new(prev_t));
                                     }
                                 } else {
                                     ty = Ty::Array(Box::new(ty));
                                 }
-                                if p.ty.name() == "__derived__" && idx + 1 != ctor.params.len() {
+                                if p.ty.name() == "__derived__"
+                                    && idx + 1 != ctor.params.len()
+                                {
                                     self.errors.push(SemError{message: "derived variadic `... vda` must be last".into(), span: p.span});
                                 }
                             }
-                            if ty == Ty::Void { self.errors.push(SemError{message: format!("constructor param `{}` cannot be `void`", p.name), span: p.span}); }
-                            if !pseen.insert(&p.name) { self.errors.push(SemError{message: format!("duplicate param `{}` in constructor", p.name), span: p.name_span}); }
+                            if ty == Ty::Void {
+                                self.errors.push(SemError{message: format!("constructor param `{}` cannot be `void`", p.name), span: p.span});
+                            }
+                            if !pseen.insert(&p.name) {
+                                self.errors.push(SemError {
+                                    message: format!(
+                                        "duplicate param `{}` in constructor",
+                                        p.name
+                                    ),
+                                    span: p.name_span,
+                                });
+                            }
                             param_tys.push(ty);
                         }
                         self.check_param_defaults(&ctor.params, &param_tys);
-                        let param_modes: Vec<ParamMode> = ctor.params.iter().map(|p| p.mode).collect();
+                        let param_modes: Vec<ParamMode> =
+                            ctor.params.iter().map(|p| p.mode).collect();
                         // constructors are void return
-                        ctor_sigs.push((FuncSig{ret: Ty::Void, params: param_tys, param_modes, param_names: ctor.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: ctor.params.iter().map(|p| p.is_variadic).collect(), param_defaults: ctor.params.iter().map(|p| p.default.clone()).collect(), generic_params: Vec::new(), where_clause: None, is_async: false, span: ctor.name_span}, ctor.visibility));
+                        ctor_sigs.push((
+                            FuncSig {
+                                ret: Ty::Void,
+                                params: param_tys,
+                                param_modes,
+                                param_names: ctor
+                                    .params
+                                    .iter()
+                                    .map(|p| p.name.clone())
+                                    .collect(),
+                                param_is_variadic: ctor
+                                    .params
+                                    .iter()
+                                    .map(|p| p.is_variadic)
+                                    .collect(),
+                                param_defaults: ctor
+                                    .params
+                                    .iter()
+                                    .map(|p| p.default.clone())
+                                    .collect(),
+                                generic_params: Vec::new(),
+                                where_clause: None,
+                                is_async: false,
+                                span: ctor.name_span,
+                            },
+                            ctor.visibility,
+                        ));
                     }
                     // Validate destructors: name must match class name
                     for dtor in &c.destructors {
@@ -1537,13 +2063,18 @@ impl Checker {
                         }
                     }
                     // Collect properties — allow separate getter/setter declarations that merge
-                    let mut prop_map: HashMap<String, PropertyInfo> = HashMap::new();
+                    let mut prop_map: HashMap<String, PropertyInfo> =
+                        HashMap::new();
                     for prop in &c.properties {
-                        if seen.contains(&prop.name) || methods.contains_key(&prop.name) {
+                        if seen.contains(&prop.name)
+                            || methods.contains_key(&prop.name)
+                        {
                             self.errors.push(SemError{message: format!("duplicate property/member `{}` in class `{}`", prop.name, c.name), span: prop.name_span});
                             continue;
                         }
-                        if let Some(existing) = prop_map.get(&prop.name).cloned() {
+                        if let Some(existing) =
+                            prop_map.get(&prop.name).cloned()
+                        {
                             // Merge getter/setter for same property name
                             let new_has_get = prop.getter.is_some();
                             let new_has_set = prop.setter.is_some();
@@ -1556,22 +2087,64 @@ impl Checker {
                                 continue;
                             }
                             // Type consistency: if both have explicit types, they must match
-                            let new_ty: Option<Ty> = if let Some(ref t) = prop.ty { Some(self.resolve_type(t)) } else if let Some((p,_)) = prop.setter.as_ref() { Some(self.resolve_type(&p.ty)) } else { None };
+                            let new_ty: Option<Ty> = if let Some(ref t) =
+                                prop.ty
+                            {
+                                Some(self.resolve_type(t))
+                            } else if let Some((p, _)) = prop.setter.as_ref() {
+                                Some(self.resolve_type(&p.ty))
+                            } else {
+                                None
+                            };
                             if let Some(nt) = &new_ty {
-                                if existing.ty != Ty::Void && *nt != Ty::Void && existing.ty != *nt {
-                                    self.errors.push(SemError{message: format!("property `{}` type mismatch", prop.name), span: prop.name_span});
+                                if existing.ty != Ty::Void
+                                    && *nt != Ty::Void
+                                    && existing.ty != *nt
+                                {
+                                    self.errors.push(SemError {
+                                        message: format!(
+                                            "property `{}` type mismatch",
+                                            prop.name
+                                        ),
+                                        span: prop.name_span,
+                                    });
                                 }
                             }
-                            let merged_has_get = existing.has_get || new_has_get;
-                            let merged_has_set = existing.has_set || new_has_set;
+                            let merged_has_get =
+                                existing.has_get || new_has_get;
+                            let merged_has_set =
+                                existing.has_set || new_has_set;
                             // Keep existing type/visibility, update accessors
-                            prop_map.insert(prop.name.clone(), PropertyInfo{ty: existing.ty.clone(), has_get: merged_has_get, has_set: merged_has_set, visibility: existing.visibility, span: prop.span});
+                            prop_map.insert(
+                                prop.name.clone(),
+                                PropertyInfo {
+                                    ty: existing.ty.clone(),
+                                    has_get: merged_has_get,
+                                    has_set: merged_has_set,
+                                    visibility: existing.visibility,
+                                    span: prop.span,
+                                },
+                            );
                             continue;
                         }
-                        let prop_ty = if let Some(ref t) = prop.ty { self.resolve_type(t) } else if let Some((param, _)) = prop.setter.as_ref() { self.resolve_type(&param.ty) } else if prop.getter.is_some() { Ty::Void } else { Ty::Void };
+                        let prop_ty = if let Some(ref t) = prop.ty {
+                            self.resolve_type(t)
+                        } else if let Some((param, _)) = prop.setter.as_ref() {
+                            self.resolve_type(&param.ty)
+                        } else if prop.getter.is_some() {
+                            Ty::Void
+                        } else {
+                            Ty::Void
+                        };
                         // Check getter/setter consistency
                         if prop.getter.is_none() && prop.setter.is_none() {
-                            self.errors.push(SemError{message: format!("property `{}` must have getter or setter", prop.name), span: prop.span});
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "property `{}` must have getter or setter",
+                                    prop.name
+                                ),
+                                span: prop.span,
+                            });
                         }
                         if let Some(ref g) = prop.getter {
                             // getter body will be checked later; type must match prop_ty if given
@@ -1580,17 +2153,31 @@ impl Checker {
                             let pty = self.resolve_type(&p.ty);
                             if let Some(ref t) = prop.ty {
                                 let exp = self.resolve_type(t);
-                                if pty != exp { self.errors.push(SemError{message: format!("setter param type mismatch for property `{}`", prop.name), span: p.span}); }
+                                if pty != exp {
+                                    self.errors.push(SemError{message: format!("setter param type mismatch for property `{}`", prop.name), span: p.span});
+                                }
                             }
                         }
-                        prop_map.insert(prop.name.clone(), PropertyInfo{ty: prop_ty.clone(), has_get: prop.getter.is_some(), has_set: prop.setter.is_some(), visibility: prop.visibility, span: prop.span});
+                        prop_map.insert(
+                            prop.name.clone(),
+                            PropertyInfo {
+                                ty: prop_ty.clone(),
+                                has_get: prop.getter.is_some(),
+                                has_set: prop.setter.is_some(),
+                                visibility: prop.visibility,
+                                span: prop.span,
+                            },
+                        );
                     }
                     // Inherit parent properties
                     if let Some(ref parent) = extends_name {
                         if let Some(pinfo) = self.classes.get(parent).cloned() {
                             for (pname, pinfo_prop) in pinfo.properties.iter() {
                                 if !prop_map.contains_key(pname) {
-                                    prop_map.insert(pname.clone(), pinfo_prop.clone());
+                                    prop_map.insert(
+                                        pname.clone(),
+                                        pinfo_prop.clone(),
+                                    );
                                 }
                             }
                         }
@@ -1598,29 +2185,57 @@ impl Checker {
                     // Validate implements: class must provide all trait methods.
                     // Generic `implements Box<int>`: substitute the trait's
                     // params before comparing signatures.
-                    let mut imp_type_args: std::collections::HashMap<String, Vec<Type>> = std::collections::HashMap::new();
+                    let mut imp_type_args: std::collections::HashMap<
+                        String,
+                        Vec<Type>,
+                    > = std::collections::HashMap::new();
                     for imp in &c.implements {
                         if let Type::Generic(base, targs, _) = imp {
-                            let lookup = base.rsplit("::").next().unwrap_or(base).to_string();
+                            let lookup = base
+                                .rsplit("::")
+                                .next()
+                                .unwrap_or(base)
+                                .to_string();
                             imp_type_args.insert(lookup, targs.clone());
                         }
                     }
                     for imp_name in &implements_names {
-                        if let Some(trait_info) = self.traits.get(imp_name).cloned() {
-                            if !trait_info.generic_params.is_empty() && !imp_type_args.contains_key(imp_name) {
+                        if let Some(trait_info) =
+                            self.traits.get(imp_name).cloned()
+                        {
+                            if !trait_info.generic_params.is_empty()
+                                && !imp_type_args.contains_key(imp_name)
+                            {
                                 self.errors.push(SemError{message: format!("trait `{}` is generic; provide type arguments (`implements {}<...>`)", imp_name, imp_name), span: c.span});
                             }
-                            let mut subst: std::collections::HashMap<String, Ty> = std::collections::HashMap::new();
+                            let mut subst: std::collections::HashMap<
+                                String,
+                                Ty,
+                            > = std::collections::HashMap::new();
                             if let Some(targs) = imp_type_args.get(imp_name) {
-                                for (gp, ta) in trait_info.generic_params.iter().zip(targs.iter()) {
-                                    subst.insert(gp.name.clone(), self.resolve_type(ta));
+                                for (gp, ta) in trait_info
+                                    .generic_params
+                                    .iter()
+                                    .zip(targs.iter())
+                                {
+                                    subst.insert(
+                                        gp.name.clone(),
+                                        self.resolve_type(ta),
+                                    );
                                 }
                             }
                             for (mname, sig) in trait_info.methods.iter() {
-                                let exp_ret = Self::subst_generic_ty(&sig.ret, &subst);
-                                let exp_params: Vec<Ty> = sig.params.iter().map(|p| Self::subst_generic_ty(p, &subst)).collect();
+                                let exp_ret =
+                                    Self::subst_generic_ty(&sig.ret, &subst);
+                                let exp_params: Vec<Ty> = sig
+                                    .params
+                                    .iter()
+                                    .map(|p| Self::subst_generic_ty(p, &subst))
+                                    .collect();
                                 if let Some(cls_sig) = methods.get(mname) {
-                                    if cls_sig.ret != exp_ret || cls_sig.params != exp_params {
+                                    if cls_sig.ret != exp_ret
+                                        || cls_sig.params != exp_params
+                                    {
                                         self.errors.push(SemError{message: format!("class `{}` method `{}` does not match trait `{}` signature", c.name, mname, imp_name), span: c.span});
                                     }
                                 } else {
@@ -1640,23 +2255,54 @@ impl Checker {
                                     if idx == 0 {
                                         self.errors.push(SemError{message: "variadic `... vda` without previous type must not be first param".into(), span: pp.span});
                                     } else {
-                                        let prev_t = self.resolve_type(&op.params[idx-1].ty);
+                                        let prev_t = self.resolve_type(
+                                            &op.params[idx - 1].ty,
+                                        );
                                         ty = Ty::Array(Box::new(prev_t));
                                     }
                                 } else {
                                     ty = Ty::Array(Box::new(ty));
                                 }
-                                if pp.ty.name() == "__derived__" && idx + 1 != op.params.len() {
+                                if pp.ty.name() == "__derived__"
+                                    && idx + 1 != op.params.len()
+                                {
                                     self.errors.push(SemError{message: "derived variadic `... vda` must be last".into(), span: pp.span});
                                 }
                             }
                             p_tys.push(ty);
                         }
                         self.check_param_defaults(&op.params, &p_tys);
-                        let p_modes: Vec<ParamMode> = op.params.iter().map(|p| p.mode).collect();
+                        let p_modes: Vec<ParamMode> =
+                            op.params.iter().map(|p| p.mode).collect();
                         // For MVP, assume operator returns int (or struct for + if class)
                         let ret = Ty::Int;
-                        op_map.insert(op.op.clone(), FuncSig{ret: ret.clone(), params: p_tys, param_modes: p_modes, param_names: op.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: op.params.iter().map(|p| p.is_variadic).collect(), param_defaults: op.params.iter().map(|p| p.default.clone()).collect(), generic_params: Vec::new(), where_clause: op.where_clause.clone(), is_async: false, span: op.span});
+                        op_map.insert(
+                            op.op.clone(),
+                            FuncSig {
+                                ret: ret.clone(),
+                                params: p_tys,
+                                param_modes: p_modes,
+                                param_names: op
+                                    .params
+                                    .iter()
+                                    .map(|p| p.name.clone())
+                                    .collect(),
+                                param_is_variadic: op
+                                    .params
+                                    .iter()
+                                    .map(|p| p.is_variadic)
+                                    .collect(),
+                                param_defaults: op
+                                    .params
+                                    .iter()
+                                    .map(|p| p.default.clone())
+                                    .collect(),
+                                generic_params: Vec::new(),
+                                where_clause: op.where_clause.clone(),
+                                is_async: false,
+                                span: op.span,
+                            },
+                        );
                     }
                     let mut conv_vec: Vec<(Ty, Ty, Span)> = Vec::new();
                     for conv in &c.conversions {
@@ -1664,8 +2310,35 @@ impl Checker {
                         let to = self.resolve_type(&conv.to_ty);
                         conv_vec.push((from, to, conv.span));
                     }
-                    self.classes.insert(c.name.clone(), ClassInfo{name: c.name.clone(), fields, field_map: fmap, field_vis: fvis, methods, method_vis, constructors: ctor_sigs, properties: prop_map, operators: op_map, conversions: conv_vec, is_open: c.is_open, is_sealed: c.is_sealed, extends: extends_name.clone(), implements: implements_names.clone(), generic_params: c.generic_params.clone(), where_clause: c.where_clause.clone(), span: c.span});
-                    self.check_where_clause_def("class", &c.name, &c.generic_params, &c.where_clause, c.span);
+                    self.classes.insert(
+                        c.name.clone(),
+                        ClassInfo {
+                            name: c.name.clone(),
+                            fields,
+                            field_map: fmap,
+                            field_vis: fvis,
+                            methods,
+                            method_vis,
+                            constructors: ctor_sigs,
+                            properties: prop_map,
+                            operators: op_map,
+                            conversions: conv_vec,
+                            is_open: c.is_open,
+                            is_sealed: c.is_sealed,
+                            extends: extends_name.clone(),
+                            implements: implements_names.clone(),
+                            generic_params: c.generic_params.clone(),
+                            where_clause: c.where_clause.clone(),
+                            span: c.span,
+                        },
+                    );
+                    self.check_where_clause_def(
+                        "class",
+                        &c.name,
+                        &c.generic_params,
+                        &c.where_clause,
+                        c.span,
+                    );
                 }
             }
         }
@@ -1681,7 +2354,12 @@ impl Checker {
                         if parent_info.is_sealed {
                             self.errors.push(SemError{message: format!("class `{cname}` cannot extend sealed class `{parent}`"), span: info.span});
                         }
-                        if !parent_info.is_open && parent_info.methods.keys().any(|k| info.methods.contains_key(k)) {
+                        if !parent_info.is_open
+                            && parent_info
+                                .methods
+                                .keys()
+                                .any(|k| info.methods.contains_key(k))
+                        {
                             // warn if overriding without open? For now allow, but check sealed methods
                         }
                     }
@@ -1692,7 +2370,17 @@ impl Checker {
                     }
                 }
                 // override checks: methods marked override must exist in parent
-                let prog_class = prog.items.iter().filter_map(|it| if let Item::Class(c) = it { if &c.name == &cname { Some(c)} else {None}} else {None}).next();
+                let prog_class = prog
+                    .items
+                    .iter()
+                    .filter_map(|it| {
+                        if let Item::Class(c) = it {
+                            if &c.name == &cname { Some(c) } else { None }
+                        } else {
+                            None
+                        }
+                    })
+                    .next();
                 if let Some(cls) = prog_class {
                     for m in &cls.methods {
                         if m.is_override {
@@ -1716,21 +2404,38 @@ impl Checker {
         // Collect enums
         for item in &prog.items {
             if let Item::Enum(e) = item {
-                if self.enums.contains_key(&e.name) || self.structs.contains_key(&e.name) || self.classes.contains_key(&e.name) || self.funcs.contains_key(&e.name) {
-                    self.errors.push(SemError{message: format!("duplicate enum `{}`", e.name), span: e.name_span});
+                if self.enums.contains_key(&e.name)
+                    || self.structs.contains_key(&e.name)
+                    || self.classes.contains_key(&e.name)
+                    || self.funcs.contains_key(&e.name)
+                {
+                    self.errors.push(SemError {
+                        message: format!("duplicate enum `{}`", e.name),
+                        span: e.name_span,
+                    });
                 } else {
                     let mut seen = HashSet::new();
                     let mut variants = Vec::new();
                     let mut vmap = HashMap::new();
                     for (idx, v) in e.variants.iter().enumerate() {
                         if !seen.insert(&v.name) {
-                            self.errors.push(SemError{message: format!("duplicate variant `{}` in enum `{}`", v.name, e.name), span: v.name_span});
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "duplicate variant `{}` in enum `{}`",
+                                    v.name, e.name
+                                ),
+                                span: v.name_span,
+                            });
                         }
                         let mut payload_tys = Vec::new();
                         for p in &v.payload_params {
                             let pt = self.resolve_type(&p.ty);
-                            if pt == Ty::Void { self.errors.push(SemError{message: format!("variant `{}` payload param `{}` cannot be `void`", v.name, p.name), span: p.span}); }
-                            if p.default.is_some() { self.errors.push(SemError{message: format!("variant `{}` payload param `{}` cannot have a default value", v.name, p.name), span: p.name_span}); }
+                            if pt == Ty::Void {
+                                self.errors.push(SemError{message: format!("variant `{}` payload param `{}` cannot be `void`", v.name, p.name), span: p.span});
+                            }
+                            if p.default.is_some() {
+                                self.errors.push(SemError{message: format!("variant `{}` payload param `{}` cannot have a default value", v.name, p.name), span: p.name_span});
+                            }
                             payload_tys.push(pt);
                         }
                         // discriminant: if Some(expr), try to evaluate as int, else use idx
@@ -1752,10 +2457,32 @@ impl Checker {
                             idx
                         };
                         vmap.insert(v.name.clone(), (tag, payload_tys.clone()));
-                        variants.push(EnumVariantInfo{name: v.name.clone(), tag, payload_tys, discriminant_expr: v.discriminant.clone(), span: v.span});
+                        variants.push(EnumVariantInfo {
+                            name: v.name.clone(),
+                            tag,
+                            payload_tys,
+                            discriminant_expr: v.discriminant.clone(),
+                            span: v.span,
+                        });
                     }
-                    self.enums.insert(e.name.clone(), EnumInfo{name: e.name.clone(), variants, variant_map: vmap, generic_params: e.generic_params.clone(), where_clause: e.where_clause.clone(), span: e.span});
-                    self.check_where_clause_def("enum", &e.name, &e.generic_params, &e.where_clause, e.span);
+                    self.enums.insert(
+                        e.name.clone(),
+                        EnumInfo {
+                            name: e.name.clone(),
+                            variants,
+                            variant_map: vmap,
+                            generic_params: e.generic_params.clone(),
+                            where_clause: e.where_clause.clone(),
+                            span: e.span,
+                        },
+                    );
+                    self.check_where_clause_def(
+                        "enum",
+                        &e.name,
+                        &e.generic_params,
+                        &e.where_clause,
+                        e.span,
+                    );
                 }
             }
         }
@@ -1767,20 +2494,65 @@ impl Checker {
                 fvis.insert("value".to_string(), Visibility::Public);
                 let mut fdefs = HashMap::new();
                 fdefs.insert("value".to_string(), None);
-                self.structs.insert(td.name.clone(), StructInfo{name: td.name.clone(), fields: vec![("value".to_string(), ty.clone())], field_map: [(String::from("value"), (0, ty.clone()))].into_iter().collect(), field_vis: fvis, field_defaults: fdefs, generic_params: td.generic_params.clone(), where_clause: None, span: td.span});
+                self.structs.insert(
+                    td.name.clone(),
+                    StructInfo {
+                        name: td.name.clone(),
+                        fields: vec![("value".to_string(), ty.clone())],
+                        field_map: [(String::from("value"), (0, ty.clone()))]
+                            .into_iter()
+                            .collect(),
+                        field_vis: fvis,
+                        field_defaults: fdefs,
+                        generic_params: td.generic_params.clone(),
+                        where_clause: None,
+                        span: td.span,
+                    },
+                );
             } else if let Item::Distinct(dd) = item {
                 let ty = self.resolve_type(&dd.ty);
                 let mut fvis = HashMap::new();
                 fvis.insert("value".to_string(), Visibility::Public);
                 let mut fdefs = HashMap::new();
                 fdefs.insert("value".to_string(), None);
-                self.structs.insert(dd.name.clone(), StructInfo{name: dd.name.clone(), fields: vec![("value".to_string(), ty.clone())], field_map: [(String::from("value"), (0, ty.clone()))].into_iter().collect(), field_vis: fvis, field_defaults: fdefs, generic_params: dd.generic_params.clone(), where_clause: None, span: dd.span});
+                self.structs.insert(
+                    dd.name.clone(),
+                    StructInfo {
+                        name: dd.name.clone(),
+                        fields: vec![("value".to_string(), ty.clone())],
+                        field_map: [(String::from("value"), (0, ty.clone()))]
+                            .into_iter()
+                            .collect(),
+                        field_vis: fvis,
+                        field_defaults: fdefs,
+                        generic_params: dd.generic_params.clone(),
+                        where_clause: None,
+                        span: dd.span,
+                    },
+                );
             } else if let Item::Extension(ext) = item {
-                let target_name = match &ext.ty { Type::Named(n, _) => n.clone(), Type::Generic(n, _, _) => n.clone(), _ => "".to_string() };
+                let target_name = match &ext.ty {
+                    Type::Named(n, _) => n.clone(),
+                    Type::Generic(n, _, _) => n.clone(),
+                    _ => "".to_string(),
+                };
                 let ext_members = ext.members.clone();
-                let mut pending_ext: Vec<(String, FuncSig, crate::ast::Visibility)> = Vec::new();
-                let mut pending_fields: Vec<(String, Ty, crate::ast::Visibility, Option<Expr>)> = Vec::new();
-                let mut pending_ops: Vec<(String, FuncSig, crate::ast::Visibility)> = Vec::new();
+                let mut pending_ext: Vec<(
+                    String,
+                    FuncSig,
+                    crate::ast::Visibility,
+                )> = Vec::new();
+                let mut pending_fields: Vec<(
+                    String,
+                    Ty,
+                    crate::ast::Visibility,
+                    Option<Expr>,
+                )> = Vec::new();
+                let mut pending_ops: Vec<(
+                    String,
+                    FuncSig,
+                    crate::ast::Visibility,
+                )> = Vec::new();
                 let mut pending_props: Vec<(String, PropertyInfo)> = Vec::new();
                 let mut pending_convs: Vec<(Ty, Ty, Span)> = Vec::new();
                 for mem in &ext_members {
@@ -1799,18 +2571,61 @@ impl Checker {
                                 ty
                             }).collect();
                             self.check_param_defaults(&f.params, &param_tys);
-                            let param_modes: Vec<ParamMode> = f.params.iter().map(|p| p.mode).collect();
-                            let sig = FuncSig{ret: ret_ty, params: param_tys, param_modes, param_names: f.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: f.params.iter().map(|p| p.is_variadic).collect(), param_defaults: f.params.iter().map(|p| p.default.clone()).collect(), generic_params: f.generic_params.clone(), where_clause: f.where_clause.clone(), is_async: false, span: f.name_span};
-                            pending_ext.push((f.name.clone(), sig, f.visibility));
+                            let param_modes: Vec<ParamMode> =
+                                f.params.iter().map(|p| p.mode).collect();
+                            let sig = FuncSig {
+                                ret: ret_ty,
+                                params: param_tys,
+                                param_modes,
+                                param_names: f
+                                    .params
+                                    .iter()
+                                    .map(|p| p.name.clone())
+                                    .collect(),
+                                param_is_variadic: f
+                                    .params
+                                    .iter()
+                                    .map(|p| p.is_variadic)
+                                    .collect(),
+                                param_defaults: f
+                                    .params
+                                    .iter()
+                                    .map(|p| p.default.clone())
+                                    .collect(),
+                                generic_params: f.generic_params.clone(),
+                                where_clause: f.where_clause.clone(),
+                                is_async: false,
+                                span: f.name_span,
+                            };
+                            pending_ext.push((
+                                f.name.clone(),
+                                sig,
+                                f.visibility,
+                            ));
                         }
                         crate::ast::ExtensionMember::Field(field) => {
                             let fty = self.resolve_type(&field.ty);
-                            if fty == Ty::Void { self.errors.push(SemError{message: format!("field `{}` cannot be `void`", field.name), span: field.span}); }
+                            if fty == Ty::Void {
+                                self.errors.push(SemError {
+                                    message: format!(
+                                        "field `{}` cannot be `void`",
+                                        field.name
+                                    ),
+                                    span: field.span,
+                                });
+                            }
                             if let Some(def) = &field.default {
                                 let dty = self.check_expr(def);
-                                if dty != fty && dty != Ty::Any { self.errors.push(SemError{message: format!("default for field `{}`: expected `{}`, found `{}`", field.name, fty, dty), span: def.span}); }
+                                if dty != fty && dty != Ty::Any {
+                                    self.errors.push(SemError{message: format!("default for field `{}`: expected `{}`, found `{}`", field.name, fty, dty), span: def.span});
+                                }
                             }
-                            pending_fields.push((field.name.clone(), fty, field.visibility, field.default.clone()));
+                            pending_fields.push((
+                                field.name.clone(),
+                                fty,
+                                field.visibility,
+                                field.default.clone(),
+                            ));
                         }
                         crate::ast::ExtensionMember::Operator(op) => {
                             let mut p_tys = Vec::new();
@@ -1818,20 +2633,79 @@ impl Checker {
                                 let mut ty = self.resolve_type(&pp.ty);
                                 if pp.is_variadic {
                                     if pp.ty.name() == "__derived__" {
-                                        if idx == 0 { self.errors.push(SemError{message: "variadic `... vda` without previous type must not be first param".into(), span: pp.span}); } else { let prev_t = self.resolve_type(&op.params[idx-1].ty); ty = Ty::Array(Box::new(prev_t)); }
-                                    } else { ty = Ty::Array(Box::new(ty)); }
-                                    if pp.ty.name() == "__derived__" && idx + 1 != op.params.len() { self.errors.push(SemError{message: "derived variadic `... vda` must be last".into(), span: pp.span}); }
+                                        if idx == 0 {
+                                            self.errors.push(SemError{message: "variadic `... vda` without previous type must not be first param".into(), span: pp.span});
+                                        } else {
+                                            let prev_t = self.resolve_type(
+                                                &op.params[idx - 1].ty,
+                                            );
+                                            ty = Ty::Array(Box::new(prev_t));
+                                        }
+                                    } else {
+                                        ty = Ty::Array(Box::new(ty));
+                                    }
+                                    if pp.ty.name() == "__derived__"
+                                        && idx + 1 != op.params.len()
+                                    {
+                                        self.errors.push(SemError{message: "derived variadic `... vda` must be last".into(), span: pp.span});
+                                    }
                                 }
                                 p_tys.push(ty);
                             }
                             self.check_param_defaults(&op.params, &p_tys);
                             let ret = Ty::Int;
-                            let sig = FuncSig{ret: ret.clone(), params: p_tys, param_modes: op.params.iter().map(|p| p.mode).collect(), param_names: op.params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: op.params.iter().map(|p| p.is_variadic).collect(), param_defaults: op.params.iter().map(|p| p.default.clone()).collect(), generic_params: Vec::new(), where_clause: op.where_clause.clone(), is_async: false, span: op.span};
-                            pending_ops.push((op.op.clone(), sig, op.visibility));
+                            let sig = FuncSig {
+                                ret: ret.clone(),
+                                params: p_tys,
+                                param_modes: op
+                                    .params
+                                    .iter()
+                                    .map(|p| p.mode)
+                                    .collect(),
+                                param_names: op
+                                    .params
+                                    .iter()
+                                    .map(|p| p.name.clone())
+                                    .collect(),
+                                param_is_variadic: op
+                                    .params
+                                    .iter()
+                                    .map(|p| p.is_variadic)
+                                    .collect(),
+                                param_defaults: op
+                                    .params
+                                    .iter()
+                                    .map(|p| p.default.clone())
+                                    .collect(),
+                                generic_params: Vec::new(),
+                                where_clause: op.where_clause.clone(),
+                                is_async: false,
+                                span: op.span,
+                            };
+                            pending_ops.push((
+                                op.op.clone(),
+                                sig,
+                                op.visibility,
+                            ));
                         }
                         crate::ast::ExtensionMember::Property(prop) => {
-                            let prop_ty = if let Some(ref t) = prop.ty { self.resolve_type(t) } else if let Some((p,_)) = prop.setter.as_ref() { self.resolve_type(&p.ty) } else { Ty::Void };
-                            pending_props.push((prop.name.clone(), PropertyInfo{ty: prop_ty, has_get: prop.getter.is_some(), has_set: prop.setter.is_some(), visibility: prop.visibility, span: prop.span}));
+                            let prop_ty = if let Some(ref t) = prop.ty {
+                                self.resolve_type(t)
+                            } else if let Some((p, _)) = prop.setter.as_ref() {
+                                self.resolve_type(&p.ty)
+                            } else {
+                                Ty::Void
+                            };
+                            pending_props.push((
+                                prop.name.clone(),
+                                PropertyInfo {
+                                    ty: prop_ty,
+                                    has_get: prop.getter.is_some(),
+                                    has_set: prop.setter.is_some(),
+                                    visibility: prop.visibility,
+                                    span: prop.span,
+                                },
+                            ));
                         }
                         crate::ast::ExtensionMember::Conversion(conv) => {
                             let from = self.resolve_type(&conv.from_ty);
@@ -1846,23 +2720,44 @@ impl Checker {
                 // kept). Mirrors the struct-branch method merge below.
                 if let Some(cls) = self.classes.get_mut(&target_name) {
                     for (name, sig, vis) in pending_ext {
-                        let vis_pub = if vis == crate::ast::Visibility::Default { crate::ast::Visibility::Public } else { vis };
+                        let vis_pub = if vis == crate::ast::Visibility::Default
+                        {
+                            crate::ast::Visibility::Public
+                        } else {
+                            vis
+                        };
                         cls.methods.insert(name.clone(), sig);
                         cls.method_vis.insert(name, vis_pub);
                     }
                     for (fname, fty, vis, def) in pending_fields {
-                        if cls.fields.iter().any(|(n,_)| n == &fname) {
-                            self.errors.push(SemError{message: format!("duplicate field `{}` in `extend {}`", fname, target_name), span: Span::new(0,0)});
+                        if cls.fields.iter().any(|(n, _)| n == &fname) {
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "duplicate field `{}` in `extend {}`",
+                                    fname, target_name
+                                ),
+                                span: Span::new(0, 0),
+                            });
                         } else {
-                            let vis_pub = if vis == crate::ast::Visibility::Default { crate::ast::Visibility::Public } else { vis };
+                            let vis_pub =
+                                if vis == crate::ast::Visibility::Default {
+                                    crate::ast::Visibility::Public
+                                } else {
+                                    vis
+                                };
                             let idx = cls.fields.len();
                             cls.fields.push((fname.clone(), fty.clone()));
-                            cls.field_map.insert(fname.clone(), (idx, fty.clone()));
+                            cls.field_map
+                                .insert(fname.clone(), (idx, fty.clone()));
                             cls.field_vis.insert(fname.clone(), vis_pub);
                             // also update structs map for field access
-                            if let Some(sinfo) = self.structs.get_mut(&target_name) {
+                            if let Some(sinfo) =
+                                self.structs.get_mut(&target_name)
+                            {
                                 sinfo.fields.push((fname.clone(), fty.clone()));
-                                sinfo.field_map.insert(fname.clone(), (idx, fty.clone()));
+                                sinfo
+                                    .field_map
+                                    .insert(fname.clone(), (idx, fty.clone()));
                                 sinfo.field_vis.insert(fname.clone(), vis_pub);
                                 sinfo.field_defaults.insert(fname.clone(), def);
                             }
@@ -1872,41 +2767,107 @@ impl Checker {
                         cls.operators.insert(op_str, sig);
                     }
                     for (pname, pinfo) in pending_props {
-                        if let Some(existing) = cls.properties.get(&pname).cloned() {
-                            let merged_has_get = existing.has_get || pinfo.has_get;
-                            let merged_has_set = existing.has_set || pinfo.has_set;
-                            let merged_ty = if existing.ty != Ty::Void { existing.ty.clone() } else { pinfo.ty.clone() };
+                        if let Some(existing) =
+                            cls.properties.get(&pname).cloned()
+                        {
+                            let merged_has_get =
+                                existing.has_get || pinfo.has_get;
+                            let merged_has_set =
+                                existing.has_set || pinfo.has_set;
+                            let merged_ty = if existing.ty != Ty::Void {
+                                existing.ty.clone()
+                            } else {
+                                pinfo.ty.clone()
+                            };
                             let merged_vis = existing.visibility;
-                            cls.properties.insert(pname.clone(), PropertyInfo{ty: merged_ty, has_get: merged_has_get, has_set: merged_has_set, visibility: merged_vis, span: pinfo.span});
+                            cls.properties.insert(
+                                pname.clone(),
+                                PropertyInfo {
+                                    ty: merged_ty,
+                                    has_get: merged_has_get,
+                                    has_set: merged_has_set,
+                                    visibility: merged_vis,
+                                    span: pinfo.span,
+                                },
+                            );
                         } else {
-                            let vis_pub = if pinfo.visibility == crate::ast::Visibility::Default { crate::ast::Visibility::Public } else { pinfo.visibility };
-                            cls.properties.insert(pname, PropertyInfo{ty: pinfo.ty.clone(), has_get: pinfo.has_get, has_set: pinfo.has_set, visibility: vis_pub, span: pinfo.span});
+                            let vis_pub = if pinfo.visibility
+                                == crate::ast::Visibility::Default
+                            {
+                                crate::ast::Visibility::Public
+                            } else {
+                                pinfo.visibility
+                            };
+                            cls.properties.insert(
+                                pname,
+                                PropertyInfo {
+                                    ty: pinfo.ty.clone(),
+                                    has_get: pinfo.has_get,
+                                    has_set: pinfo.has_set,
+                                    visibility: vis_pub,
+                                    span: pinfo.span,
+                                },
+                            );
                         }
                     }
                     for (from, to, _) in pending_convs {
-                        cls.conversions.push((from, to, Span::new(0,0)));
+                        cls.conversions.push((from, to, Span::new(0, 0)));
                     }
                 } else if let Some(sinfo) = self.structs.get_mut(&target_name) {
                     for (fname, fty, vis, def) in pending_fields {
-                        if sinfo.fields.iter().any(|(n,_)| n == &fname) {
-                            self.errors.push(SemError{message: format!("duplicate field `{}` in `extend {}`", fname, target_name), span: Span::new(0,0)});
+                        if sinfo.fields.iter().any(|(n, _)| n == &fname) {
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "duplicate field `{}` in `extend {}`",
+                                    fname, target_name
+                                ),
+                                span: Span::new(0, 0),
+                            });
                         } else {
                             let idx = sinfo.fields.len();
                             sinfo.fields.push((fname.clone(), fty.clone()));
-                            sinfo.field_map.insert(fname.clone(), (idx, fty.clone()));
+                            sinfo
+                                .field_map
+                                .insert(fname.clone(), (idx, fty.clone()));
                             sinfo.field_vis.insert(fname.clone(), vis);
                             sinfo.field_defaults.insert(fname.clone(), def);
                         }
                     }
                     // For struct, also handle operators/properties/conversions via class maps (create ClassInfo if needed)
-                    if !pending_ops.is_empty() || !pending_props.is_empty() || !pending_convs.is_empty() || !pending_ext.is_empty() {
-                        let cls = self.classes.entry(target_name.clone()).or_insert_with(|| ClassInfo{
-                            name: target_name.clone(), fields: vec![], field_map: HashMap::new(), field_vis: HashMap::new(),
-                            methods: HashMap::new(), method_vis: HashMap::new(), constructors: vec![], properties: HashMap::new(),
-                            operators: HashMap::new(), conversions: vec![], is_open: false, is_sealed: false, extends: None, implements: vec![], generic_params: vec![], where_clause: None, span: Span::new(0,0)
-                        });
+                    if !pending_ops.is_empty()
+                        || !pending_props.is_empty()
+                        || !pending_convs.is_empty()
+                        || !pending_ext.is_empty()
+                    {
+                        let cls = self
+                            .classes
+                            .entry(target_name.clone())
+                            .or_insert_with(|| ClassInfo {
+                                name: target_name.clone(),
+                                fields: vec![],
+                                field_map: HashMap::new(),
+                                field_vis: HashMap::new(),
+                                methods: HashMap::new(),
+                                method_vis: HashMap::new(),
+                                constructors: vec![],
+                                properties: HashMap::new(),
+                                operators: HashMap::new(),
+                                conversions: vec![],
+                                is_open: false,
+                                is_sealed: false,
+                                extends: None,
+                                implements: vec![],
+                                generic_params: vec![],
+                                where_clause: None,
+                                span: Span::new(0, 0),
+                            });
                         for (name, sig, vis) in pending_ext {
-                            let vis_pub = if vis == crate::ast::Visibility::Default { crate::ast::Visibility::Public } else { vis };
+                            let vis_pub =
+                                if vis == crate::ast::Visibility::Default {
+                                    crate::ast::Visibility::Public
+                                } else {
+                                    vis
+                                };
                             cls.methods.insert(name.clone(), sig);
                             cls.method_vis.insert(name, vis_pub);
                         }
@@ -1914,18 +2875,50 @@ impl Checker {
                             cls.operators.insert(op_str, sig);
                         }
                         for (pname, pinfo) in pending_props {
-                            if let Some(existing) = cls.properties.get(&pname).cloned() {
-                                let merged_has_get = existing.has_get || pinfo.has_get;
-                                let merged_has_set = existing.has_set || pinfo.has_set;
-                                let merged_ty = if existing.ty != Ty::Void { existing.ty.clone() } else { pinfo.ty.clone() };
-                                cls.properties.insert(pname.clone(), PropertyInfo{ty: merged_ty, has_get: merged_has_get, has_set: merged_has_set, visibility: existing.visibility, span: pinfo.span});
+                            if let Some(existing) =
+                                cls.properties.get(&pname).cloned()
+                            {
+                                let merged_has_get =
+                                    existing.has_get || pinfo.has_get;
+                                let merged_has_set =
+                                    existing.has_set || pinfo.has_set;
+                                let merged_ty = if existing.ty != Ty::Void {
+                                    existing.ty.clone()
+                                } else {
+                                    pinfo.ty.clone()
+                                };
+                                cls.properties.insert(
+                                    pname.clone(),
+                                    PropertyInfo {
+                                        ty: merged_ty,
+                                        has_get: merged_has_get,
+                                        has_set: merged_has_set,
+                                        visibility: existing.visibility,
+                                        span: pinfo.span,
+                                    },
+                                );
                             } else {
-                                let vis_pub = if pinfo.visibility == crate::ast::Visibility::Default { crate::ast::Visibility::Public } else { pinfo.visibility };
-                                cls.properties.insert(pname, PropertyInfo{ty: pinfo.ty.clone(), has_get: pinfo.has_get, has_set: pinfo.has_set, visibility: vis_pub, span: pinfo.span});
+                                let vis_pub = if pinfo.visibility
+                                    == crate::ast::Visibility::Default
+                                {
+                                    crate::ast::Visibility::Public
+                                } else {
+                                    pinfo.visibility
+                                };
+                                cls.properties.insert(
+                                    pname,
+                                    PropertyInfo {
+                                        ty: pinfo.ty.clone(),
+                                        has_get: pinfo.has_get,
+                                        has_set: pinfo.has_set,
+                                        visibility: vis_pub,
+                                        span: pinfo.span,
+                                    },
+                                );
                             }
                         }
                         for (from, to, _) in pending_convs {
-                            cls.conversions.push((from, to, Span::new(0,0)));
+                            cls.conversions.push((from, to, Span::new(0, 0)));
                         }
                     }
                 }
@@ -1936,7 +2929,10 @@ impl Checker {
                     self.check_expr(&c.init)
                 };
                 if decl_ty == Ty::Void {
-                    self.errors.push(SemError{message: "const cannot have void type".into(), span: c.span});
+                    self.errors.push(SemError {
+                        message: "const cannot have void type".into(),
+                        span: c.span,
+                    });
                 }
                 if matches!(decl_ty, Ty::Own(_)) {
                     self.errors.push(SemError{message: "global own constants need structural destruction — rejected in phase 1".into(), span: c.span});
@@ -1945,19 +2941,34 @@ impl Checker {
                 }
                 let init_ty = self.check_expr(&c.init);
                 let is_null = matches!(c.init.kind, ExprKind::Null);
-                if !is_null && !self.ty_assignable(&init_ty, &decl_ty) && decl_ty != Ty::Any {
+                if !is_null
+                    && !self.ty_assignable(&init_ty, &decl_ty)
+                    && decl_ty != Ty::Any
+                {
                     self.errors.push(SemError{message: format!("const initializer mismatch: expected `{}`, found `{}`", decl_ty, init_ty), span: c.init.span});
                 }
                 self.reject_null_own(is_null, &decl_ty, c.init.span);
-                if self.scopes.last().map(|s| s.contains_key(&c.name)).unwrap_or(false) {
-                    self.errors.push(SemError{message: format!("redefinition of const `{}`", c.name), span: c.name_span});
+                if self
+                    .scopes
+                    .last()
+                    .map(|s| s.contains_key(&c.name))
+                    .unwrap_or(false)
+                {
+                    self.errors.push(SemError {
+                        message: format!("redefinition of const `{}`", c.name),
+                        span: c.name_span,
+                    });
                 } else {
                     self.declare_const(&c.name, decl_ty, c.name_span);
                 }
             } else if let Item::Var(v) = item {
                 let mut decl_ty = self.resolve_type(&v.ty);
                 if decl_ty == Ty::Void {
-                    self.errors.push(SemError{message: "global variable cannot have `void` type".into(), span: v.span});
+                    self.errors.push(SemError {
+                        message: "global variable cannot have `void` type"
+                            .into(),
+                        span: v.span,
+                    });
                 }
                 if decl_ty == Ty::Any {
                     if let Some(init) = &v.init {
@@ -1975,7 +2986,9 @@ impl Checker {
                         }
                     }
                 }
-                if matches!(decl_ty, Ty::FixedArray { size: None, .. }) && v.init.is_none() {
+                if matches!(decl_ty, Ty::FixedArray { size: None, .. })
+                    && v.init.is_none()
+                {
                     self.errors.push(SemError{message: format!("array `{}` has inferred size but no initializer: use `arr[N]` or `= [...]`", v.name), span: v.span});
                 }
                 if let Some(init) = &v.init {
@@ -2009,8 +3022,19 @@ impl Checker {
                         self.reject_null_own(is_null, &decl_ty, init.span);
                     }
                 }
-                if self.scopes.last().map(|s| s.contains_key(&v.name)).unwrap_or(false) {
-                    self.errors.push(SemError{message: format!("redefinition of global var `{}`", v.name), span: v.name_span});
+                if self
+                    .scopes
+                    .last()
+                    .map(|s| s.contains_key(&v.name))
+                    .unwrap_or(false)
+                {
+                    self.errors.push(SemError {
+                        message: format!(
+                            "redefinition of global var `{}`",
+                            v.name
+                        ),
+                        span: v.name_span,
+                    });
                 } else {
                     self.declare_var(&v.name, decl_ty, v.name_span);
                 }
@@ -2018,7 +3042,7 @@ impl Checker {
         }
         // Handle attributed items as their inner
         for item in &prog.items {
-            if let Item::Attributed{attrs: _, item} = item {
+            if let Item::Attributed { attrs: _, item } = item {
                 if let Item::Function(f) = item.as_ref() {
                     // Will be handled in next pass, just check inner for now
                 }
@@ -2037,7 +3061,13 @@ impl Checker {
             if let Item::Extern(ex) = item {
                 for mem in &ex.members {
                     match mem {
-                        crate::ast::ExternMember::Function{ty, name, name_span, params, ..} => {
+                        crate::ast::ExternMember::Function {
+                            ty,
+                            name,
+                            name_span,
+                            params,
+                            ..
+                        } => {
                             let ret = self.resolve_type(ty);
                             if let Some(tn) = self.extern_trait_name(&ret) {
                                 self.errors.push(SemError{message: format!("extern function `{name}` cannot return trait type `{tn}` (no C representation)"), span: *name_span});
@@ -2057,12 +3087,47 @@ impl Checker {
                             }).collect();
                             // Extern params may declare `ref`/`out` (C
                             // out-parameters); call sites must match.
-                            let param_modes: Vec<ParamMode> = params.iter().map(|p| p.mode).collect();
-                            self.funcs.insert(name.clone(), FuncSig{ret, params: param_tys, param_modes, param_names: params.iter().map(|p| p.name.clone()).collect(), param_is_variadic: params.iter().map(|p| p.is_variadic).collect(), param_defaults: params.iter().map(|_| None).collect(), generic_params: Vec::new(), where_clause: None, is_async: false, span: *name_span});
+                            let param_modes: Vec<ParamMode> =
+                                params.iter().map(|p| p.mode).collect();
+                            self.funcs.insert(
+                                name.clone(),
+                                FuncSig {
+                                    ret,
+                                    params: param_tys,
+                                    param_modes,
+                                    param_names: params
+                                        .iter()
+                                        .map(|p| p.name.clone())
+                                        .collect(),
+                                    param_is_variadic: params
+                                        .iter()
+                                        .map(|p| p.is_variadic)
+                                        .collect(),
+                                    param_defaults: params
+                                        .iter()
+                                        .map(|_| None)
+                                        .collect(),
+                                    generic_params: Vec::new(),
+                                    where_clause: None,
+                                    is_async: false,
+                                    span: *name_span,
+                                },
+                            );
                         }
-                        crate::ast::ExternMember::Struct{name, name_span, fields, ..} => {
+                        crate::ast::ExternMember::Struct {
+                            name,
+                            name_span,
+                            fields,
+                            ..
+                        } => {
                             if self.structs.contains_key(name) {
-                                self.errors.push(SemError{message: format!("duplicate extern struct `{}`", name), span: *name_span});
+                                self.errors.push(SemError {
+                                    message: format!(
+                                        "duplicate extern struct `{}`",
+                                        name
+                                    ),
+                                    span: *name_span,
+                                });
                             } else {
                                 let mut seen = HashSet::new();
                                 let mut flds = Vec::new();
@@ -2074,32 +3139,73 @@ impl Checker {
                                         self.errors.push(SemError{message: format!("duplicate field `{}` in extern struct `{}`", f.name, name), span: f.name_span});
                                     }
                                     let fty = self.resolve_type(&f.ty);
-                                    if fty == Ty::Void { self.errors.push(SemError{message: format!("field `{}` cannot be `void`", f.name), span: f.span}); }
-                        if matches!(fty, Ty::Own(_)) {
-                            self.errors.push(SemError {
+                                    if fty == Ty::Void {
+                                        self.errors.push(SemError {
+                                            message: format!(
+                                                "field `{}` cannot be `void`",
+                                                f.name
+                                            ),
+                                            span: f.span,
+                                        });
+                                    }
+                                    if matches!(fty, Ty::Own(_)) {
+                                        self.errors.push(SemError {
                                 message: "own fields need structural destruction — rejected in phase 1".into(),
                                 span: f.span,
                             });
-                        } else if Self::contains_own(&fty) {
-                            self.errors.push(SemError {
+                                    } else if Self::contains_own(&fty) {
+                                        self.errors.push(SemError {
                                 message: format!("extern struct field `{}` cannot use `own` type (no C representation)", f.name),
                                 span: f.span,
                             });
-                        }
-                                    if let Some(tn) = self.extern_trait_name(&fty) {
+                                    }
+                                    if let Some(tn) =
+                                        self.extern_trait_name(&fty)
+                                    {
                                         self.errors.push(SemError{message: format!("extern struct field `{}` cannot use trait type `{tn}` (no C representation)", f.name), span: f.span});
                                     }
-                                    fmap.insert(f.name.clone(), (idx, fty.clone()));
-                                    fvis.insert(f.name.clone(), crate::ast::Visibility::Public);
+                                    fmap.insert(
+                                        f.name.clone(),
+                                        (idx, fty.clone()),
+                                    );
+                                    fvis.insert(
+                                        f.name.clone(),
+                                        crate::ast::Visibility::Public,
+                                    );
                                     fdefs.insert(f.name.clone(), None);
                                     flds.push((f.name.clone(), fty));
                                 }
-                                self.structs.insert(name.clone(), StructInfo{name: name.clone(), fields: flds, field_map: fmap, field_vis: fvis, field_defaults: fdefs, generic_params: vec![], where_clause: None, span: *name_span});
+                                self.structs.insert(
+                                    name.clone(),
+                                    StructInfo {
+                                        name: name.clone(),
+                                        fields: flds,
+                                        field_map: fmap,
+                                        field_vis: fvis,
+                                        field_defaults: fdefs,
+                                        generic_params: vec![],
+                                        where_clause: None,
+                                        span: *name_span,
+                                    },
+                                );
                             }
                         }
-                        crate::ast::ExternMember::Enum{name, name_span, variants, ..} => {
-                            if self.enums.contains_key(name) || self.structs.contains_key(name) {
-                                self.errors.push(SemError{message: format!("duplicate extern enum `{}`", name), span: *name_span});
+                        crate::ast::ExternMember::Enum {
+                            name,
+                            name_span,
+                            variants,
+                            ..
+                        } => {
+                            if self.enums.contains_key(name)
+                                || self.structs.contains_key(name)
+                            {
+                                self.errors.push(SemError {
+                                    message: format!(
+                                        "duplicate extern enum `{}`",
+                                        name
+                                    ),
+                                    span: *name_span,
+                                });
                             } else {
                                 let mut seen = HashSet::new();
                                 let mut vars = Vec::new();
@@ -2111,8 +3217,12 @@ impl Checker {
                                     let mut payload_tys = Vec::new();
                                     for p in &v.payload_params {
                                         let pt = self.resolve_type(&p.ty);
-                                        if p.default.is_some() { self.errors.push(SemError{message: format!("variant `{}` payload param `{}` cannot have a default value", v.name, p.name), span: p.name_span}); }
-                                        if let Some(tn) = self.extern_trait_name(&pt) {
+                                        if p.default.is_some() {
+                                            self.errors.push(SemError{message: format!("variant `{}` payload param `{}` cannot have a default value", v.name, p.name), span: p.name_span});
+                                        }
+                                        if let Some(tn) =
+                                            self.extern_trait_name(&pt)
+                                        {
                                             self.errors.push(SemError{message: format!("extern enum payload cannot use trait type `{tn}` (no C representation)"), span: p.span});
                                         }
                                         if Self::contains_own(&pt) {
@@ -2120,22 +3230,61 @@ impl Checker {
                                         }
                                         payload_tys.push(pt);
                                     }
-                                    let tag = if let Some(expr) = &v.discriminant {
+                                    let tag = if let Some(expr) =
+                                        &v.discriminant
+                                    {
                                         match &expr.kind {
-                                            ExprKind::IntLit(val) => *val as usize,
-                                            _ => { let _ = self.check_expr(expr); idx }
+                                            ExprKind::IntLit(val) => {
+                                                *val as usize
+                                            }
+                                            _ => {
+                                                let _ = self.check_expr(expr);
+                                                idx
+                                            }
                                         }
-                                    } else { idx };
-                                    vmap.insert(v.name.clone(), (tag, payload_tys.clone()));
-                                    vars.push(EnumVariantInfo{name: v.name.clone(), tag, payload_tys, discriminant_expr: v.discriminant.clone(), span: v.span});
+                                    } else {
+                                        idx
+                                    };
+                                    vmap.insert(
+                                        v.name.clone(),
+                                        (tag, payload_tys.clone()),
+                                    );
+                                    vars.push(EnumVariantInfo {
+                                        name: v.name.clone(),
+                                        tag,
+                                        payload_tys,
+                                        discriminant_expr: v
+                                            .discriminant
+                                            .clone(),
+                                        span: v.span,
+                                    });
                                 }
-                                self.enums.insert(name.clone(), EnumInfo{name: name.clone(), variants: vars, variant_map: vmap, generic_params: vec![], where_clause: None, span: *name_span});
+                                self.enums.insert(
+                                    name.clone(),
+                                    EnumInfo {
+                                        name: name.clone(),
+                                        variants: vars,
+                                        variant_map: vmap,
+                                        generic_params: vec![],
+                                        where_clause: None,
+                                        span: *name_span,
+                                    },
+                                );
                             }
                         }
-                        crate::ast::ExternMember::Const{ty, name, name_span, ..} => {
+                        crate::ast::ExternMember::Const {
+                            ty,
+                            name,
+                            name_span,
+                            ..
+                        } => {
                             let decl_ty = self.resolve_type(ty);
                             if decl_ty == Ty::Void {
-                                self.errors.push(SemError{message: "extern const cannot be `void`".into(), span: *name_span});
+                                self.errors.push(SemError {
+                                    message: "extern const cannot be `void`"
+                                        .into(),
+                                    span: *name_span,
+                                });
                             }
                             if let Some(tn) = self.extern_trait_name(&decl_ty) {
                                 self.errors.push(SemError{message: format!("extern const `{name}` cannot use trait type `{tn}` (no C representation)"), span: *name_span});
@@ -2143,8 +3292,19 @@ impl Checker {
                             if Self::contains_own(&decl_ty) {
                                 self.errors.push(SemError{message: format!("extern const `{name}` cannot use `own` type (no C representation)"), span: *name_span});
                             }
-                            if self.scopes.last().map(|s| s.contains_key(name)).unwrap_or(false) {
-                                self.errors.push(SemError{message: format!("redefinition of extern const `{}`", name), span: *name_span});
+                            if self
+                                .scopes
+                                .last()
+                                .map(|s| s.contains_key(name))
+                                .unwrap_or(false)
+                            {
+                                self.errors.push(SemError {
+                                    message: format!(
+                                        "redefinition of extern const `{}`",
+                                        name
+                                    ),
+                                    span: *name_span,
+                                });
                             } else {
                                 self.declare_const(name, decl_ty, *name_span);
                             }
@@ -2157,7 +3317,13 @@ impl Checker {
         for item in &prog.items {
             let func_opt = match item {
                 Item::Function(f) => Some(f),
-                Item::Attributed{attrs: _, item} => if let Item::Function(f) = item.as_ref() { Some(f) } else { None },
+                Item::Attributed { attrs: _, item } => {
+                    if let Item::Function(f) = item.as_ref() {
+                        Some(f)
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             };
             if let Some(f) = func_opt {
@@ -2172,7 +3338,10 @@ impl Checker {
                 ];
                 if RESERVED_RUNTIME.contains(&f.name.as_str()) {
                     self.errors.push(SemError {
-                        message: format!("function name `{}` is reserved for the runtime", f.name),
+                        message: format!(
+                            "function name `{}` is reserved for the runtime",
+                            f.name
+                        ),
                         span: f.name_span,
                     });
                 } else if self.funcs.contains_key(&f.name) {
@@ -2200,7 +3369,9 @@ impl Checker {
                                     if idx == 0 {
                                         // error already pushed in check_function, but for FuncSig keep as Array(Int) placeholder
                                     } else {
-                                        let prev_t = self.resolve_type(&f.params[idx-1].ty);
+                                        let prev_t = self.resolve_type(
+                                            &f.params[idx - 1].ty,
+                                        );
                                         t = Ty::Array(Box::new(prev_t));
                                     }
                                 } else {
@@ -2221,7 +3392,8 @@ impl Checker {
                         .collect();
                     self.check_param_defaults(&f.params, &param_tys);
                     let ret_ty = self.resolve_type(&f.ret_ty);
-                    let param_modes: Vec<ParamMode> = f.params.iter().map(|p| p.mode).collect();
+                    let param_modes: Vec<ParamMode> =
+                        f.params.iter().map(|p| p.mode).collect();
                     let mut seen = HashSet::new();
                     for p in &f.params {
                         if !seen.insert(&p.name) {
@@ -2240,9 +3412,21 @@ impl Checker {
                             ret: ret_ty,
                             params: param_tys,
                             param_modes,
-                            param_names: f.params.iter().map(|p| p.name.clone()).collect(),
-                            param_is_variadic: f.params.iter().map(|p| p.is_variadic).collect(),
-                            param_defaults: f.params.iter().map(|p| p.default.clone()).collect(),
+                            param_names: f
+                                .params
+                                .iter()
+                                .map(|p| p.name.clone())
+                                .collect(),
+                            param_is_variadic: f
+                                .params
+                                .iter()
+                                .map(|p| p.is_variadic)
+                                .collect(),
+                            param_defaults: f
+                                .params
+                                .iter()
+                                .map(|p| p.default.clone())
+                                .collect(),
                             generic_params: f.generic_params.clone(),
                             where_clause: f.where_clause.clone(),
                             is_async: f.is_async,
@@ -2258,13 +3442,25 @@ impl Checker {
             let is_void_main_with_args = main.ret == Ty::Void
                 && main.params.len() == 1
                 && main.params[0] == Ty::Array(Box::new(Ty::String))
-                && main.param_names.get(0).map(|s| s == "args").unwrap_or(false);
-            let is_int_main_no_args = main.ret == Ty::Int && main.params.is_empty();
+                && main
+                    .param_names
+                    .get(0)
+                    .map(|s| s == "args")
+                    .unwrap_or(false);
+            let is_int_main_no_args =
+                main.ret == Ty::Int && main.params.is_empty();
             let is_int_main_with_args = main.ret == Ty::Int
                 && main.params.len() == 1
                 && main.params[0] == Ty::Array(Box::new(Ty::String))
-                && main.param_names.get(0).map(|s| s == "args").unwrap_or(false);
-            if !(is_void_main || is_void_main_with_args || is_int_main_no_args || is_int_main_with_args)
+                && main
+                    .param_names
+                    .get(0)
+                    .map(|s| s == "args")
+                    .unwrap_or(false);
+            if !(is_void_main
+                || is_void_main_with_args
+                || is_int_main_no_args
+                || is_int_main_with_args)
             {
                 self.errors.push(SemError{message: format!("invalid `main` signature: expected `void main()` or `int main()` or `void main(string[] args)` or `int main(string[] args)`, found `{} main({})`", main.ret, main.params.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ")), span: main.span});
             }
@@ -2279,7 +3475,13 @@ impl Checker {
         for item in &prog.items {
             let func_opt = match item {
                 Item::Function(f) => Some(f),
-                Item::Attributed{attrs: _, item} => if let Item::Function(f) = item.as_ref() { Some(f) } else { None },
+                Item::Attributed { attrs: _, item } => {
+                    if let Item::Function(f) = item.as_ref() {
+                        Some(f)
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             };
             if let Some(f) = func_opt {
@@ -2287,7 +3489,17 @@ impl Checker {
             }
         }
         // Check class methods, constructors, properties
-        let class_items: Vec<ClassDecl> = prog.items.iter().filter_map(|it| if let Item::Class(c) = it { Some(c.clone()) } else { None }).collect();
+        let class_items: Vec<ClassDecl> = prog
+            .items
+            .iter()
+            .filter_map(|it| {
+                if let Item::Class(c) = it {
+                    Some(c.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
         for cls in class_items {
             for meth in &cls.methods {
                 self.check_method(&cls.name, meth);
@@ -2324,7 +3536,7 @@ impl Checker {
                     if idx == 0 {
                         self.errors.push(SemError{message: "variadic `... vda` without previous type must not be first param".into(), span: p.span});
                     } else {
-                        let prev_ty = self.resolve_type(&f.params[idx-1].ty);
+                        let prev_ty = self.resolve_type(&f.params[idx - 1].ty);
                         ty = Ty::Array(Box::new(prev_ty));
                     }
                 } else {
@@ -2332,7 +3544,11 @@ impl Checker {
                 }
                 // For derived `... vda` must be last
                 if p.ty.name() == "__derived__" && idx + 1 != f.params.len() {
-                    self.errors.push(SemError{message: "derived variadic `... vda` must be last".into(), span: p.span});
+                    self.errors.push(SemError {
+                        message: "derived variadic `... vda` must be last"
+                            .into(),
+                        span: p.span,
+                    });
                 }
             }
             self.declare_var(&p.name, ty, p.name_span);
@@ -2353,7 +3569,11 @@ impl Checker {
         self.cur_class = Some(class_name.to_string());
         self.push_scope();
         // implicit `this`
-        self.declare_var("this", Ty::Struct(class_name.to_string()), f.name_span);
+        self.declare_var(
+            "this",
+            Ty::Struct(class_name.to_string()),
+            f.name_span,
+        );
         for (idx, p) in f.params.iter().enumerate() {
             let mut ty = self.resolve_type(&p.ty);
             if p.is_variadic {
@@ -2361,14 +3581,18 @@ impl Checker {
                     if idx == 0 {
                         self.errors.push(SemError{message: "variadic `... vda` without previous type must not be first param".into(), span: p.span});
                     } else {
-                        let prev_ty = self.resolve_type(&f.params[idx-1].ty);
+                        let prev_ty = self.resolve_type(&f.params[idx - 1].ty);
                         ty = Ty::Array(Box::new(prev_ty));
                     }
                 } else {
                     ty = Ty::Array(Box::new(ty));
                 }
                 if p.ty.name() == "__derived__" && idx + 1 != f.params.len() {
-                    self.errors.push(SemError{message: "derived variadic `... vda` must be last".into(), span: p.span});
+                    self.errors.push(SemError {
+                        message: "derived variadic `... vda` must be last"
+                            .into(),
+                        span: p.span,
+                    });
                 }
             }
             self.declare_var(&p.name, ty, p.name_span);
@@ -2386,7 +3610,11 @@ impl Checker {
         self.cur_class = Some(class_name.to_string());
         self.cur_ret = Some(Ty::Void);
         self.push_scope();
-        self.declare_var("this", Ty::Struct(class_name.to_string()), ctor.name_span);
+        self.declare_var(
+            "this",
+            Ty::Struct(class_name.to_string()),
+            ctor.name_span,
+        );
         for p in &ctor.params {
             let ty = self.resolve_type(&p.ty);
             self.declare_var(&p.name, ty, p.name_span);
@@ -2417,7 +3645,11 @@ impl Checker {
         self.cur_class = Some(class_name.to_string());
         self.cur_ret = Some(Ty::Void);
         self.push_scope();
-        self.declare_var("this", Ty::Struct(class_name.to_string()), dtor.name_span);
+        self.declare_var(
+            "this",
+            Ty::Struct(class_name.to_string()),
+            dtor.name_span,
+        );
         let _ = self.check_block(&dtor.body, &Ty::Void);
         self.pop_scope();
         self.cur_ret = None;
@@ -2425,16 +3657,34 @@ impl Checker {
     }
 
     fn check_property(&mut self, class_name: &str, prop: &PropertyDecl) {
-        let prop_ty = prop.ty.as_ref().map(|t| self.resolve_type(t)).unwrap_or(Ty::Void);
+        let prop_ty = prop
+            .ty
+            .as_ref()
+            .map(|t| self.resolve_type(t))
+            .unwrap_or(Ty::Void);
         self.cur_class = Some(class_name.to_string());
         if let Some(getter) = &prop.getter {
-            let expected = if prop_ty != Ty::Void { prop_ty.clone() } else { Ty::Int };
+            let expected = if prop_ty != Ty::Void {
+                prop_ty.clone()
+            } else {
+                Ty::Int
+            };
             self.cur_ret = Some(expected.clone());
             self.push_scope();
-            self.declare_var("this", Ty::Struct(class_name.to_string()), prop.name_span);
+            self.declare_var(
+                "this",
+                Ty::Struct(class_name.to_string()),
+                prop.name_span,
+            );
             let always_returns = self.check_block(getter, &expected);
             if expected != Ty::Void && !always_returns {
-                self.errors.push(SemError{message: format!("property `{}` getter missing return", prop.name), span: prop.span});
+                self.errors.push(SemError {
+                    message: format!(
+                        "property `{}` getter missing return",
+                        prop.name
+                    ),
+                    span: prop.span,
+                });
             }
             self.pop_scope();
             self.cur_ret = None;
@@ -2442,11 +3692,21 @@ impl Checker {
         if let Some((param, body)) = &prop.setter {
             let pty = self.resolve_type(&param.ty);
             if prop_ty != Ty::Void && pty != prop_ty {
-                self.errors.push(SemError{message: format!("property `{}` setter type mismatch", prop.name), span: param.span});
+                self.errors.push(SemError {
+                    message: format!(
+                        "property `{}` setter type mismatch",
+                        prop.name
+                    ),
+                    span: param.span,
+                });
             }
             self.cur_ret = Some(Ty::Void);
             self.push_scope();
-            self.declare_var("this", Ty::Struct(class_name.to_string()), prop.name_span);
+            self.declare_var(
+                "this",
+                Ty::Struct(class_name.to_string()),
+                prop.name_span,
+            );
             self.declare_var(&param.name, pty, param.name_span);
             let _ = self.check_block(body, &Ty::Void);
             self.pop_scope();
@@ -2495,7 +3755,9 @@ impl Checker {
                     }
                 }
                 // Inferred-size `TYPE arr` requires an initializer to fix the size.
-                if matches!(decl_ty, Ty::FixedArray { size: None, .. }) && d.init.is_none() {
+                if matches!(decl_ty, Ty::FixedArray { size: None, .. })
+                    && d.init.is_none()
+                {
                     self.errors.push(SemError {
                         message: format!(
                             "array `{}` has inferred size but no initializer: use `arr[N]` or `= [...]`",
@@ -2521,10 +3783,20 @@ impl Checker {
                                 self.errors.push(SemError{message: format!("array size mismatch: declared `arr[{n}]` but initializer has {m} elements"), span: init.span});
                             }
                         }
-                        let compatible = if init_ty == decl_ty { true } else {
+                        let compatible = if init_ty == decl_ty {
+                            true
+                        } else {
                             match (&decl_ty, &init_ty) {
-                                (Ty::Generic(n1, _), Ty::Enum(n2)) if n1 == n2 => true,
-                                (Ty::Enum(n1), Ty::Generic(n2, _)) if n1 == n2 => true,
+                                (Ty::Generic(n1, _), Ty::Enum(n2))
+                                    if n1 == n2 =>
+                                {
+                                    true
+                                }
+                                (Ty::Enum(n1), Ty::Generic(n2, _))
+                                    if n1 == n2 =>
+                                {
+                                    true
+                                }
                                 // Size already diagnosed above; only elements matter here.
                                 (
                                     Ty::FixedArray { elem: de, .. },
@@ -2533,13 +3805,19 @@ impl Checker {
                                 _ => self.ty_assignable(&init_ty, &decl_ty),
                             }
                         };
-                        if !is_null && !compatible && decl_ty != Ty::Void && decl_ty != Ty::Any {
+                        if !is_null
+                            && !compatible
+                            && decl_ty != Ty::Void
+                            && decl_ty != Ty::Any
+                        {
                             self.errors.push(SemError{message: format!("type mismatch in initializer: expected `{decl_ty}`, found `{init_ty}`"), span: init.span});
                         }
                         self.reject_null_own(is_null, &decl_ty, init.span);
                         // Initializing an owned slot (`own` or struct-with-`own`)
                         // moves out of any owned slots named in the initializer.
-                        if matches!(decl_ty, Ty::Own(_)) || self.ty_has_own(&decl_ty) {
+                        if matches!(decl_ty, Ty::Own(_))
+                            || self.ty_has_own(&decl_ty)
+                        {
                             self.poison_moved_idents(init);
                         }
                     }
@@ -2554,11 +3832,17 @@ impl Checker {
                     self.check_expr(&c.init)
                 };
                 if decl_ty == Ty::Void {
-                    self.errors.push(SemError { message: "const cannot have `void` type".into(), span: c.span });
+                    self.errors.push(SemError {
+                        message: "const cannot have `void` type".into(),
+                        span: c.span,
+                    });
                 }
                 let init_ty = self.check_expr(&c.init);
                 let is_null = matches!(c.init.kind, ExprKind::Null);
-                if !is_null && !self.ty_assignable(&init_ty, &decl_ty) && decl_ty != Ty::Any {
+                if !is_null
+                    && !self.ty_assignable(&init_ty, &decl_ty)
+                    && decl_ty != Ty::Any
+                {
                     self.errors.push(SemError { message: format!("const initializer mismatch: expected `{decl_ty}`, found `{init_ty}`"), span: c.init.span });
                 }
                 self.reject_null_own(is_null, &decl_ty, c.init.span);
@@ -2571,7 +3855,9 @@ impl Checker {
                 let elem_tys: Vec<Ty> = match &expr_ty {
                     Ty::Tuple(tys) => tys.clone(),
                     Ty::Array(el) => vec![*el.clone(); d.targets.len()],
-                    Ty::FixedArray { elem, .. } => vec![*elem.clone(); d.targets.len()],
+                    Ty::FixedArray { elem, .. } => {
+                        vec![*elem.clone(); d.targets.len()]
+                    }
                     Ty::Vec(elem) => vec![*elem.clone(); d.targets.len()],
                     _ => {
                         // Check if expr is tuple literal directly
@@ -2592,14 +3878,24 @@ impl Checker {
                 }
                 for (idx, target) in d.targets.iter().enumerate() {
                     match target {
-                        DestructureTarget::Wildcard(_) => {},
+                        DestructureTarget::Wildcard(_) => {}
                         DestructureTarget::Ident(name, span) => {
-                            let expected_ty = elem_tys.get(idx).cloned().unwrap_or(Ty::Int);
+                            let expected_ty =
+                                elem_tys.get(idx).cloned().unwrap_or(Ty::Int);
                             if let Some(existing) = self.lookup_var(name) {
                                 if self.is_const(name) {
-                                    self.errors.push(SemError { message: format!("cannot assign to const `{}`", name), span: *span });
+                                    self.errors.push(SemError {
+                                        message: format!(
+                                            "cannot assign to const `{}`",
+                                            name
+                                        ),
+                                        span: *span,
+                                    });
                                 }
-                                if existing != expected_ty && existing != Ty::Any && expected_ty != Ty::Any {
+                                if existing != expected_ty
+                                    && existing != Ty::Any
+                                    && expected_ty != Ty::Any
+                                {
                                     self.errors.push(SemError { message: format!("destructuring type mismatch for `{}`: expected `{}`, found `{}`", name, existing, expected_ty), span: *span });
                                 }
                             } else {
@@ -2613,7 +3909,13 @@ impl Checker {
             Stmt::Assert(a) => {
                 let cond_ty = self.check_expr(&a.cond);
                 if cond_ty != Ty::Bool {
-                    self.errors.push(SemError { message: format!("assert condition must be `bool`, found `{}`", cond_ty), span: a.cond.span });
+                    self.errors.push(SemError {
+                        message: format!(
+                            "assert condition must be `bool`, found `{}`",
+                            cond_ty
+                        ),
+                        span: a.cond.span,
+                    });
                 }
                 if let Some(msg) = &a.message {
                     let msg_ty = self.check_expr(msg);
@@ -2643,7 +3945,8 @@ impl Checker {
             Stmt::Scope(b) => {
                 if !self.in_async {
                     self.errors.push(SemError {
-                        message: "`scope` requires an `async` function body".into(),
+                        message: "`scope` requires an `async` function body"
+                            .into(),
                         span: b.span,
                     });
                 }
@@ -2678,7 +3981,8 @@ impl Checker {
             Stmt::Yield(span) => {
                 if !self.in_async {
                     self.errors.push(SemError {
-                        message: "`yield` requires an `async` function body".into(),
+                        message: "`yield` requires an `async` function body"
+                            .into(),
                         span: *span,
                     });
                 }
@@ -2785,7 +4089,10 @@ impl Checker {
                 let second_ty: Option<Ty> = match &f.var2 {
                     None => None,
                     Some(_) => Some(match &iter_ty {
-                        Ty::Array(_) | Ty::FixedArray { .. } | Ty::Vec(_) | Ty::String => Ty::Int,
+                        Ty::Array(_)
+                        | Ty::FixedArray { .. }
+                        | Ty::Vec(_)
+                        | Ty::String => Ty::Int,
                         Ty::Map { value, .. } => (**value).clone(),
                         _ => Ty::Int,
                     }),
@@ -2811,8 +4118,10 @@ impl Checker {
                                 span: e.span,
                             });
                         }
-                    },
-                    DeferInner::Block(b) => { let _ = self.check_block(b, ret_ty); },
+                    }
+                    DeferInner::Block(b) => {
+                        let _ = self.check_block(b, ret_ty);
+                    }
                 }
                 false
             }
@@ -2821,10 +4130,14 @@ impl Checker {
                 match &d.target.kind {
                     ExprKind::Ident(name) => {
                         let lookup = name.rsplit("::").next().unwrap_or(name);
-                        let var_ty = self.lookup_var(name).or_else(|| self.lookup_var(lookup));
+                        let var_ty = self
+                            .lookup_var(name)
+                            .or_else(|| self.lookup_var(lookup));
                         match var_ty {
                             Some(Ty::Own(_)) => {
-                                if self.is_poisoned(name) || self.is_poisoned(lookup) {
+                                if self.is_poisoned(name)
+                                    || self.is_poisoned(lookup)
+                                {
                                     self.errors.push(SemError {
                                         message: format!("use of moved or deleted value `{name}`"),
                                         span: d.target.span,
@@ -2836,7 +4149,8 @@ impl Checker {
                             }
                             Some(_) => {
                                 self.errors.push(SemError {
-                                    message: "delete requires an `own` value".into(),
+                                    message: "delete requires an `own` value"
+                                        .into(),
                                     span: d.target.span,
                                 });
                             }
@@ -2846,14 +4160,17 @@ impl Checker {
                         }
                         if name == "this" {
                             self.errors.push(SemError {
-                                message: "cannot delete `this` (borrowed receiver)".into(),
+                                message:
+                                    "cannot delete `this` (borrowed receiver)"
+                                        .into(),
                                 span: d.target.span,
                             });
                         }
                     }
                     _ => {
                         self.errors.push(SemError {
-                            message: "delete requires a named `own` variable".into(),
+                            message: "delete requires a named `own` variable"
+                                .into(),
                             span: d.target.span,
                         });
                         if !matches!(ty, Ty::Own(_)) && ty != Ty::Any {
@@ -2865,21 +4182,43 @@ impl Checker {
             }
             Stmt::Break(b) => {
                 if let Some(label) = &b.label {
-                    if !self.loop_stack.iter().any(|l| l.as_ref() == Some(label)) {
-                        self.errors.push(SemError{message: format!("break label `{label}` not found"), span: b.span});
+                    if !self
+                        .loop_stack
+                        .iter()
+                        .any(|l| l.as_ref() == Some(label))
+                    {
+                        self.errors.push(SemError {
+                            message: format!("break label `{label}` not found"),
+                            span: b.span,
+                        });
                     }
                 } else if self.loop_depth() == 0 {
-                    self.errors.push(SemError{message: "break outside loop".into(), span: b.span});
+                    self.errors.push(SemError {
+                        message: "break outside loop".into(),
+                        span: b.span,
+                    });
                 }
                 false
             }
             Stmt::Continue(c) => {
                 if let Some(label) = &c.label {
-                    if !self.loop_stack.iter().any(|l| l.as_ref() == Some(label)) {
-                        self.errors.push(SemError{message: format!("continue label `{label}` not found"), span: c.span});
+                    if !self
+                        .loop_stack
+                        .iter()
+                        .any(|l| l.as_ref() == Some(label))
+                    {
+                        self.errors.push(SemError {
+                            message: format!(
+                                "continue label `{label}` not found"
+                            ),
+                            span: c.span,
+                        });
                     }
                 } else if self.loop_depth() == 0 {
-                    self.errors.push(SemError{message: "continue outside loop".into(), span: c.span});
+                    self.errors.push(SemError {
+                        message: "continue outside loop".into(),
+                        span: c.span,
+                    });
                 }
                 false
             }
@@ -2902,7 +4241,9 @@ impl Checker {
                             && self.is_poisoned(&base)
                         {
                             self.errors.push(SemError {
-                                message: format!("use of moved or deleted value `{name}`"),
+                                message: format!(
+                                    "use of moved or deleted value `{name}`"
+                                ),
                                 span: expr.span,
                             });
                         }
@@ -2911,18 +4252,25 @@ impl Checker {
                     if self.enums.contains_key(&base) {
                         return Ty::Enum(base.clone());
                     }
-                    if self.structs.contains_key(&base) || self.classes.contains_key(&base) {
+                    if self.structs.contains_key(&base)
+                        || self.classes.contains_key(&base)
+                    {
                         return Ty::Struct(base.clone());
                     }
                     // Module-qualified but unknown symbol: precise diagnostic.
-                    let prefix = name.rsplit_once("::").map(|(p, _)| p).unwrap_or(name);
+                    let prefix =
+                        name.rsplit_once("::").map(|(p, _)| p).unwrap_or(name);
                     self.errors.push(SemError {
-                        message: format!("unknown symbol `{base}` in module `{prefix}`"),
+                        message: format!(
+                            "unknown symbol `{base}` in module `{prefix}`"
+                        ),
                         span: expr.span,
                     });
                     return Ty::Int;
                 }
-                if let Some(ty) = self.lookup_var(name).or_else(|| self.lookup_var(lookup)) {
+                if let Some(ty) =
+                    self.lookup_var(name).or_else(|| self.lookup_var(lookup))
+                {
                     // Reading a moved/deleted owned slot is an error: `own`
                     // directly, or structs with transitive `own` fields.
                     // (Plain assignment targets rebirth via unpoisoning in
@@ -2931,7 +4279,9 @@ impl Checker {
                         && (self.is_poisoned(name) || self.is_poisoned(lookup))
                     {
                         self.errors.push(SemError {
-                            message: format!("use of moved or deleted value `{name}`"),
+                            message: format!(
+                                "use of moved or deleted value `{name}`"
+                            ),
                             span: expr.span,
                         });
                     }
@@ -2941,7 +4291,10 @@ impl Checker {
                     // Only diagnose when the name is not a local at all.
                     if name == lookup && self.scope_index_of(name).is_none() {
                         if let Some(msg) = self.ambiguity_error(name) {
-                            self.errors.push(SemError { message: msg, span: expr.span });
+                            self.errors.push(SemError {
+                                message: msg,
+                                span: expr.span,
+                            });
                         }
                     }
                     ty
@@ -2951,7 +4304,9 @@ impl Checker {
                         if self.enums.contains_key(first) {
                             return Ty::Enum(first.to_string());
                         }
-                        if self.structs.contains_key(first) || self.classes.contains_key(first) {
+                        if self.structs.contains_key(first)
+                            || self.classes.contains_key(first)
+                        {
                             return Ty::Struct(first.to_string());
                         }
                     }
@@ -2959,13 +4314,17 @@ impl Checker {
                     if self.enums.contains_key(name) {
                         return Ty::Enum(name.clone());
                     }
-                    if self.structs.contains_key(name) || self.classes.contains_key(name) {
+                    if self.structs.contains_key(name)
+                        || self.classes.contains_key(name)
+                    {
                         return Ty::Struct(name.clone());
                     }
                     if self.enums.contains_key(lookup) {
                         return Ty::Enum(lookup.to_string());
                     }
-                    if self.structs.contains_key(lookup) || self.classes.contains_key(lookup) {
+                    if self.structs.contains_key(lookup)
+                        || self.classes.contains_key(lookup)
+                    {
                         return Ty::Struct(lookup.to_string());
                     }
                     self.errors.push(SemError {
@@ -3032,7 +4391,12 @@ impl Checker {
             ExprKind::Postfix { op, expr: inner } => {
                 let t = self.check_expr(inner);
                 if !t.is_int_like() {
-                    self.errors.push(SemError{message: format!("postfix `{op:?}` requires int type, found `{t}`"), span: expr.span});
+                    self.errors.push(SemError {
+                        message: format!(
+                            "postfix `{op:?}` requires int type, found `{t}`"
+                        ),
+                        span: expr.span,
+                    });
                 }
                 t
             }
@@ -3132,11 +4496,22 @@ impl Checker {
                     BinOp::Is | BinOp::IsNot => {
                         // `own` identity: compare data pointers, not structure.
                         // Allow `own T is own U` (any inner) and `own is null`.
-                        let own_pair = matches!(&lt, Ty::Own(_)) && (matches!(&rt, Ty::Own(_)) || matches!(&rt, Ty::Any));
-                        let own_pair_rev = matches!(&rt, Ty::Own(_)) && matches!(&lt, Ty::Any);
-                        let string_null = (lt == Ty::String && rt == Ty::Any) || (rt == Ty::String && lt == Ty::Any);
-                        let pointer_null = matches!(&lt, Ty::Pointer(_)) && rt == Ty::Any || matches!(&rt, Ty::Pointer(_)) && lt == Ty::Any;
-                        if !(own_pair || own_pair_rev || string_null || pointer_null) && lt != rt {
+                        let own_pair = matches!(&lt, Ty::Own(_))
+                            && (matches!(&rt, Ty::Own(_))
+                                || matches!(&rt, Ty::Any));
+                        let own_pair_rev =
+                            matches!(&rt, Ty::Own(_)) && matches!(&lt, Ty::Any);
+                        let string_null = (lt == Ty::String && rt == Ty::Any)
+                            || (rt == Ty::String && lt == Ty::Any);
+                        let pointer_null = matches!(&lt, Ty::Pointer(_))
+                            && rt == Ty::Any
+                            || matches!(&rt, Ty::Pointer(_)) && lt == Ty::Any;
+                        if !(own_pair
+                            || own_pair_rev
+                            || string_null
+                            || pointer_null)
+                            && lt != rt
+                        {
                             self.errors.push(SemError{message: format!("`is` requires matching types, found `{lt}` and `{rt}`"), span: expr.span});
                         }
                         Ty::Bool
@@ -3166,7 +4541,13 @@ impl Checker {
                 let lhs_ty = self.check_lvalue(lhs);
                 if let ExprKind::Ident(name) = &lhs.kind {
                     if self.is_const(name) {
-                        self.errors.push(SemError{message: format!("cannot assign to const `{}`", name), span: lhs.span});
+                        self.errors.push(SemError {
+                            message: format!(
+                                "cannot assign to const `{}`",
+                                name
+                            ),
+                            span: lhs.span,
+                        });
                     }
                     // Rebirth: overwriting a moved/deleted slot with a fresh
                     // value makes it live again.
@@ -3176,7 +4557,12 @@ impl Checker {
                 if let ExprKind::MemberAccess { object, .. } = &lhs.kind {
                     if let ExprKind::Ident(base) = &object.kind {
                         if self.is_poisoned(base) {
-                            self.errors.push(SemError{message: format!("use of moved or deleted value `{base}`"), span: object.span});
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "use of moved or deleted value `{base}`"
+                                ),
+                                span: object.span,
+                            });
                         }
                     }
                 }
@@ -3189,7 +4575,10 @@ impl Checker {
                 let truncating_byte_store = rhs_ty.is_int_like()
                     && matches!(&lhs_ty, Ty::Char)
                     && matches!(&lhs.kind, ExprKind::Index { .. });
-                if !is_null && !truncating_byte_store && !self.ty_assignable(&rhs_ty, &lhs_ty) {
+                if !is_null
+                    && !truncating_byte_store
+                    && !self.ty_assignable(&rhs_ty, &lhs_ty)
+                {
                     self.errors.push(SemError{message: format!("assignment type mismatch: expected `{lhs_ty}`, found `{rhs_ty}`"), span: expr.span});
                 }
                 self.reject_null_own(is_null, &lhs_ty, expr.span);
@@ -3207,24 +4596,66 @@ impl Checker {
                 }
                 lhs_ty
             }
-            ExprKind::Conditional { cond, then_branch, else_branch } => {
+            ExprKind::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 let ct = self.check_expr(cond);
                 if ct != Ty::Bool {
-                    self.errors.push(SemError{message: format!("conditional cond requires `bool`, found `{ct}`"), span: cond.span});
+                    self.errors.push(SemError {
+                        message: format!(
+                            "conditional cond requires `bool`, found `{ct}`"
+                        ),
+                        span: cond.span,
+                    });
                 }
                 let tt = self.check_expr(then_branch);
                 let et = self.check_expr(else_branch);
                 if tt != et {
-                    self.errors.push(SemError{message: format!("conditional branches mismatch: `{tt}` vs `{et}`"), span: expr.span});
+                    self.errors.push(SemError {
+                        message: format!(
+                            "conditional branches mismatch: `{tt}` vs `{et}`"
+                        ),
+                        span: expr.span,
+                    });
                 }
                 tt
             }
-            ExprKind::Range { start, end, inclusive: _ } => {
-                if let Some(s) = start { let st = self.check_expr(s); if st != Ty::Int { self.errors.push(SemError{message: format!("range start requires `int`, found `{st}`"), span: s.span}); } }
-                if let Some(e) = end { let et = self.check_expr(e); if et != Ty::Int { self.errors.push(SemError{message: format!("range end requires `int`, found `{et}`"), span: e.span}); } }
+            ExprKind::Range {
+                start,
+                end,
+                inclusive: _,
+            } => {
+                if let Some(s) = start {
+                    let st = self.check_expr(s);
+                    if st != Ty::Int {
+                        self.errors.push(SemError {
+                            message: format!(
+                                "range start requires `int`, found `{st}`"
+                            ),
+                            span: s.span,
+                        });
+                    }
+                }
+                if let Some(e) = end {
+                    let et = self.check_expr(e);
+                    if et != Ty::Int {
+                        self.errors.push(SemError {
+                            message: format!(
+                                "range end requires `int`, found `{et}`"
+                            ),
+                            span: e.span,
+                        });
+                    }
+                }
                 Ty::Array(Box::new(Ty::Int))
             }
-            ExprKind::NullableMemberAccess { object, field, field_span: _ } => {
+            ExprKind::NullableMemberAccess {
+                object,
+                field,
+                field_span: _,
+            } => {
                 let obj_ty = self.check_expr(object);
                 // For now, treat like normal member access but allow nullable
                 if let Ty::Struct(ref sname) = obj_ty {
@@ -3239,7 +4670,8 @@ impl Checker {
                         }
                     }
                     if self.traits.contains_key(sname) {
-                        return self.check_trait_field(sname, field, &expr.span);
+                        return self
+                            .check_trait_field(sname, field, &expr.span);
                     }
                 }
                 // For optional types, unwrap
@@ -3252,7 +4684,12 @@ impl Checker {
                         }
                     }
                 }
-                self.errors.push(SemError{message: format!("unknown field `{field}` for nullable access"), span: expr.span});
+                self.errors.push(SemError {
+                    message: format!(
+                        "unknown field `{field}` for nullable access"
+                    ),
+                    span: expr.span,
+                });
                 Ty::Int
             }
             ExprKind::Call {
@@ -3274,15 +4711,17 @@ impl Checker {
                     && !self.classes.contains_key(&callee_key)
                     && self.lookup_var(&callee_key).is_none()
                 {
-                    let prefix = callee.rsplit_once("::").map(|(p, _)| p).unwrap_or(callee);
+                    let prefix = callee
+                        .rsplit_once("::")
+                        .map(|(p, _)| p)
+                        .unwrap_or(callee);
                     // Enum-qualified calls (`Color.Red(..)`?) fall through to
                     // the normal undefined-function path below.
                     if self.import_aliases.contains_key(prefix)
                         || self.import_fulls.contains(prefix)
-                        || prefix
-                            .rsplit("::")
-                            .next()
-                            .is_some_and(|l| self.import_aliases.contains_key(l))
+                        || prefix.rsplit("::").next().is_some_and(|l| {
+                            self.import_aliases.contains_key(l)
+                        })
                     {
                         self.errors.push(SemError {
                             message: format!("unknown symbol `{callee_key}` in module `{prefix}`"),
@@ -3300,7 +4739,10 @@ impl Checker {
                     && self.classes.get(callee).is_none()
                 {
                     if let Some(msg) = self.ambiguity_error(callee) {
-                        self.errors.push(SemError { message: msg, span: *callee_span });
+                        self.errors.push(SemError {
+                            message: msg,
+                            span: *callee_span,
+                        });
                     }
                 }
                 // Handle generic function calls: substitute type args and check where bounds
@@ -3308,84 +4750,164 @@ impl Checker {
                 if let Some(func) = self.funcs.get(&callee_key).cloned() {
                     if !func.generic_params.is_empty() {
                         if !type_args.is_empty() {
-                            self.check_generic_bounds(&func.generic_params, &func.where_clause, type_args, *callee_span);
+                            self.check_generic_bounds(
+                                &func.generic_params,
+                                &func.where_clause,
+                                type_args,
+                                *callee_span,
+                            );
                             // Build map from generic param name -> concrete Ty using actual param order
-                            let mut generic_subst: std::collections::HashMap<String, Ty> = std::collections::HashMap::new();
-                            for (gp, ta) in func.generic_params.iter().zip(type_args.iter()) {
-                                generic_subst.insert(gp.name.clone(), self.resolve_type(ta));
+                            let mut generic_subst: std::collections::HashMap<
+                                String,
+                                Ty,
+                            > = std::collections::HashMap::new();
+                            for (gp, ta) in
+                                func.generic_params.iter().zip(type_args.iter())
+                            {
+                                generic_subst.insert(
+                                    gp.name.clone(),
+                                    self.resolve_type(ta),
+                                );
                             }
                             // also handle extra type_args beyond generic_params via T/U fallback (compat)
-                            for (i, ta) in type_args.iter().enumerate().skip(func.generic_params.len()) {
+                            for (i, ta) in type_args
+                                .iter()
+                                .enumerate()
+                                .skip(func.generic_params.len())
+                            {
                                 let name = format!("T{}", i);
-                                generic_subst.insert(name, self.resolve_type(ta));
+                                generic_subst
+                                    .insert(name, self.resolve_type(ta));
                             }
-                            let subst_ty = |ty: &Ty| -> Ty { Self::subst_generic_ty(ty, &generic_subst) };
-                            let substituted_params: Vec<Ty> = func.params.iter().map(|p| subst_ty(p)).collect();
+                            let subst_ty = |ty: &Ty| -> Ty {
+                                Self::subst_generic_ty(ty, &generic_subst)
+                            };
+                            let substituted_params: Vec<Ty> = func
+                                .params
+                                .iter()
+                                .map(|p| subst_ty(p))
+                                .collect();
                             let substituted_sig = FuncSig {
                                 ret: subst_ty(&func.ret),
                                 params: substituted_params,
                                 param_modes: func.param_modes.clone(),
                                 param_names: func.param_names.clone(),
-                                param_is_variadic: func.param_is_variadic.clone(),
+                                param_is_variadic: func
+                                    .param_is_variadic
+                                    .clone(),
                                 param_defaults: func.param_defaults.clone(),
                                 generic_params: vec![],
                                 where_clause: None,
                                 is_async: func.is_async,
                                 span: func.span,
                             };
-                            self.check_call_with_sig(args, &substituted_sig, *callee_span, callee);
+                            self.check_call_with_sig(
+                                args,
+                                &substituted_sig,
+                                *callee_span,
+                                callee,
+                            );
                             return substituted_sig.ret;
                         } else {
                             // Inference: no explicit type args, try to deduce from actual args
                             // Only attempt if we can type-check args without the generic sig
                             // Gather actual arg types
-                            if func.params.len() == args.len() || func.param_is_variadic.iter().any(|&v| v) {
-                                let mut inferred: std::collections::HashMap<String, Ty> = std::collections::HashMap::new();
+                            if func.params.len() == args.len()
+                                || func.param_is_variadic.iter().any(|&v| v)
+                            {
+                                let mut inferred: std::collections::HashMap<
+                                    String,
+                                    Ty,
+                                > = std::collections::HashMap::new();
                                 let mut ok = true;
                                 // For variadic, only infer from fixed part plus variadic element mapping
-                                let variadic_idx = func.param_is_variadic.iter().position(|&v| v);
+                                let variadic_idx = func
+                                    .param_is_variadic
+                                    .iter()
+                                    .position(|&v| v);
                                 if let Some(vidx) = variadic_idx {
                                     let fixed = vidx;
-                                    for (i, arg) in args.iter().take(fixed).enumerate() {
+                                    for (i, arg) in
+                                        args.iter().take(fixed).enumerate()
+                                    {
                                         let aty = self.check_call_arg(arg);
-                                        if let Some(param_ty) = func.params.get(i) {
-                                            Self::unify_generic(param_ty, &aty, &mut inferred);
+                                        if let Some(param_ty) =
+                                            func.params.get(i)
+                                        {
+                                            Self::unify_generic(
+                                                param_ty,
+                                                &aty,
+                                                &mut inferred,
+                                            );
                                         }
                                     }
                                     if let Some(vty) = func.params.get(vidx) {
                                         if let Ty::Array(elem) = vty {
                                             for arg in args.iter().skip(fixed) {
-                                                let aty = self.check_call_arg(arg);
-                                                Self::unify_generic(elem, &aty, &mut inferred);
+                                                let aty =
+                                                    self.check_call_arg(arg);
+                                                Self::unify_generic(
+                                                    elem,
+                                                    &aty,
+                                                    &mut inferred,
+                                                );
                                             }
                                         }
                                     }
                                 } else {
                                     for (i, arg) in args.iter().enumerate() {
-                                        if let Some(param_ty) = func.params.get(i) {
+                                        if let Some(param_ty) =
+                                            func.params.get(i)
+                                        {
                                             let aty = self.check_call_arg(arg);
-                                            Self::unify_generic(param_ty, &aty, &mut inferred);
+                                            Self::unify_generic(
+                                                param_ty,
+                                                &aty,
+                                                &mut inferred,
+                                            );
                                         }
                                     }
                                 }
                                 // Check if we inferred all generic params
-                                let all_inferred = func.generic_params.iter().all(|gp| inferred.contains_key(&gp.name));
+                                let all_inferred = func
+                                    .generic_params
+                                    .iter()
+                                    .all(|gp| inferred.contains_key(&gp.name));
                                 if all_inferred && !inferred.is_empty() {
                                     // Validate where bounds with inferred concrete types
-                                    let inferred_type_args: Vec<Type> = func.generic_params.iter().map(|gp| {
-                                        let ty = &inferred[&gp.name];
-                                        Self::ty_to_type(ty)
-                                    }).collect();
-                                    self.check_generic_bounds(&func.generic_params, &func.where_clause, &inferred_type_args, *callee_span);
-                                    let subst_ty = |ty: &Ty| -> Ty { Self::subst_generic_ty(ty, &inferred) };
-                                    let substituted_params: Vec<Ty> = func.params.iter().map(|p| subst_ty(p)).collect();
+                                    let inferred_type_args: Vec<Type> = func
+                                        .generic_params
+                                        .iter()
+                                        .map(|gp| {
+                                            let ty = &inferred[&gp.name];
+                                            Self::ty_to_type(ty)
+                                        })
+                                        .collect();
+                                    self.check_generic_bounds(
+                                        &func.generic_params,
+                                        &func.where_clause,
+                                        &inferred_type_args,
+                                        *callee_span,
+                                    );
+                                    let subst_ty = |ty: &Ty| -> Ty {
+                                        Self::subst_generic_ty(ty, &inferred)
+                                    };
+                                    let substituted_params: Vec<Ty> = func
+                                        .params
+                                        .iter()
+                                        .map(|p| subst_ty(p))
+                                        .collect();
                                     let substituted_sig = FuncSig {
                                         ret: subst_ty(&func.ret),
                                         params: substituted_params,
                                         param_modes: func.param_modes.clone(),
                                         param_names: func.param_names.clone(),
-                                        param_is_variadic: func.param_is_variadic.clone(),
-                                        param_defaults: func.param_defaults.clone(),
+                                        param_is_variadic: func
+                                            .param_is_variadic
+                                            .clone(),
+                                        param_defaults: func
+                                            .param_defaults
+                                            .clone(),
                                         generic_params: vec![],
                                         where_clause: None,
                                         is_async: func.is_async,
@@ -3398,7 +4920,9 @@ impl Checker {
                                     // For simplicity, just return inferred ret; the arg type errors would have been handled via unify not producing errors.
                                     // However, if some arg type doesn't match inferred param, we should error. Do a second pass quickly:
                                     for (i, arg) in args.iter().enumerate() {
-                                        if let Some(exp) = substituted_sig.params.get(i) {
+                                        if let Some(exp) =
+                                            substituted_sig.params.get(i)
+                                        {
                                             let aty = self.check_call_arg(arg);
                                             if !self.ty_assignable(&aty, exp) {
                                                 // already reported? skip duplicate; but ensure one error
@@ -3408,7 +4932,9 @@ impl Checker {
                                     return substituted_sig.ret;
                                 } else if !inferred.is_empty() {
                                     // Partial inference: still substitute what we have and return that (allows fallback)
-                                    let subst_ty = |ty: &Ty| -> Ty { Self::subst_generic_ty(ty, &inferred) };
+                                    let subst_ty = |ty: &Ty| -> Ty {
+                                        Self::subst_generic_ty(ty, &inferred)
+                                    };
                                     let substituted_ret = subst_ty(&func.ret);
                                     if substituted_ret != func.ret {
                                         return substituted_ret;
@@ -3419,7 +4945,9 @@ impl Checker {
                     } else if !type_args.is_empty() {
                         // Non-generic function called with type args
                         self.errors.push(SemError{message: format!("function is not generic but {} type arguments provided", type_args.len()), span: *callee_span});
-                        for arg in args { let _ = self.check_call_arg(arg); }
+                        for arg in args {
+                            let _ = self.check_call_arg(arg);
+                        }
                         return func.ret;
                     }
                 }
@@ -3440,41 +4968,78 @@ impl Checker {
                     // For now simply: if callee class exists, return struct type, and type-check args as if they were field types or ctor params? We'll look up class struct fields and match.
                     let struct_ty = Ty::Struct(callee_key.clone());
                     // If class has explicit constructors, check against them (visibility: Default is public for ctors)
-                    if let Some(cinfo) = self.classes.get(&callee_key).cloned() {
+                    if let Some(cinfo) = self.classes.get(&callee_key).cloned()
+                    {
                         if !cinfo.constructors.is_empty() {
-                            let mut matched: Option<(FuncSig, crate::ast::Visibility)> = None;
+                            let mut matched: Option<(
+                                FuncSig,
+                                crate::ast::Visibility,
+                            )> = None;
                             for (sig, vis) in &cinfo.constructors {
                                 let min = Self::min_args_for_sig(sig);
-                                if args.len() >= min && args.len() <= sig.params.len() {
+                                if args.len() >= min
+                                    && args.len() <= sig.params.len()
+                                {
                                     matched = Some((sig.clone(), *vis));
                                     break;
                                 }
                             }
                             if let Some((sig, vis)) = matched {
-                                if vis == crate::ast::Visibility::Private && self.cur_class.as_deref() != Some(callee_key.as_str()) {
+                                if vis == crate::ast::Visibility::Private
+                                    && self.cur_class.as_deref()
+                                        != Some(callee_key.as_str())
+                                {
                                     self.errors.push(SemError{message: format!("constructor for `{callee}` is private"), span: *callee_span});
                                 }
                                 for (i, arg) in args.iter().enumerate() {
-                                    let pidx = if let CallArg::Named { name, .. } = arg {
-                                        sig.param_names.iter().position(|n| n == name).unwrap_or(i)
-                                    } else { i };
-                                    self.declare_out_arg(arg, sig.params.get(pidx));
+                                    let pidx = if let CallArg::Named {
+                                        name,
+                                        ..
+                                    } = arg
+                                    {
+                                        sig.param_names
+                                            .iter()
+                                            .position(|n| n == name)
+                                            .unwrap_or(i)
+                                    } else {
+                                        i
+                                    };
+                                    self.declare_out_arg(
+                                        arg,
+                                        sig.params.get(pidx),
+                                    );
                                     let aty = self.check_call_arg(arg);
-                                    if !self.ty_assignable(&aty, &sig.params[pidx]) {
+                                    if !self
+                                        .ty_assignable(&aty, &sig.params[pidx])
+                                    {
                                         self.errors.push(SemError{message: format!("ctor arg {}: expected `{}`, found `{aty}`", i+1, sig.params[pidx]), span: arg.span()});
                                     }
-                                    self.check_arg_mode(arg, &sig, pidx, callee, i + 1);
+                                    self.check_arg_mode(
+                                        arg,
+                                        &sig,
+                                        pidx,
+                                        callee,
+                                        i + 1,
+                                    );
                                 }
                                 return struct_ty;
                             } else {
                                 self.errors.push(SemError{message: format!("no matching constructor for `{callee}` with {} args", args.len()), span: *callee_span});
-                                for arg in args { let _ = self.check_call_arg(arg); }
+                                for arg in args {
+                                    let _ = self.check_call_arg(arg);
+                                }
                                 return struct_ty;
                             }
                         }
                     }
                     // No explicit ctor: check against fields (struct literal via call)
-                    let field_tys: Vec<Ty> = self.structs.get(&callee_key).map(|s| s.fields.iter().map(|(_,ty)| ty.clone()).collect()).unwrap_or_default();
+                    let field_tys: Vec<Ty> = self
+                        .structs
+                        .get(&callee_key)
+                        .map(|s| {
+                            s.fields.iter().map(|(_, ty)| ty.clone()).collect()
+                        })
+                        .unwrap_or_default();
                     if !field_tys.is_empty() && args.len() == field_tys.len() {
                         for (i, arg) in args.iter().enumerate() {
                             let aty = self.check_call_arg(arg);
@@ -3486,7 +5051,9 @@ impl Checker {
                         return struct_ty;
                     }
                     // Fallback: just type-check args and return struct
-                    for arg in args { let _ = self.check_call_arg(arg); }
+                    for arg in args {
+                        let _ = self.check_call_arg(arg);
+                    }
                     return struct_ty;
                 }
                 // NOTE (real stdlib): no builtin IO shortcut. `print`/`println`/
@@ -3505,10 +5072,17 @@ impl Checker {
                         });
                     }
                     if sig.param_is_variadic.iter().any(|&v| v) {
-                        self.check_call_with_sig(args, &sig, *callee_span, callee);
+                        self.check_call_with_sig(
+                            args,
+                            &sig,
+                            *callee_span,
+                            callee,
+                        );
                     } else {
                         let min_required = Self::min_args_for_sig(&sig);
-                        if args.len() < min_required || args.len() > sig.params.len() {
+                        if args.len() < min_required
+                            || args.len() > sig.params.len()
+                        {
                             if min_required == sig.params.len() {
                                 self.errors.push(SemError {
                                     message: format!(
@@ -3531,9 +5105,15 @@ impl Checker {
                             }
                         }
                         for (i, arg) in args.iter().enumerate() {
-                            let pidx = if let CallArg::Named { name, .. } = arg {
-                                sig.param_names.iter().position(|n| n == name).unwrap_or(i)
-                            } else { i };
+                            let pidx = if let CallArg::Named { name, .. } = arg
+                            {
+                                sig.param_names
+                                    .iter()
+                                    .position(|n| n == name)
+                                    .unwrap_or(i)
+                            } else {
+                                i
+                            };
                             self.declare_out_arg(arg, sig.params.get(pidx));
                             let aty = self.check_call_arg(arg);
                             if let Some(param_ty) = sig.params.get(pidx) {
@@ -3547,12 +5127,19 @@ impl Checker {
                             self.check_arg_mode(arg, &sig, pidx, callee, i + 1);
                         }
                         // Missing named arguments must have defaults.
-                        if args.iter().any(|a| matches!(a, CallArg::Named{..})) {
+                        if args
+                            .iter()
+                            .any(|a| matches!(a, CallArg::Named { .. }))
+                        {
                             let mut provided = std::collections::HashSet::new();
                             let mut n_pos = 0;
                             for a in args {
                                 if let CallArg::Named { name, .. } = a {
-                                    if let Some(pidx) = sig.param_names.iter().position(|n| n == name) {
+                                    if let Some(pidx) = sig
+                                        .param_names
+                                        .iter()
+                                        .position(|n| n == name)
+                                    {
                                         provided.insert(pidx);
                                     }
                                 } else {
@@ -3560,8 +5147,16 @@ impl Checker {
                                     n_pos += 1;
                                 }
                             }
-                            for (pidx, pname) in sig.param_names.iter().enumerate() {
-                                if !provided.contains(&pidx) && sig.param_defaults.get(pidx).and_then(|d| d.as_ref()).is_none() {
+                            for (pidx, pname) in
+                                sig.param_names.iter().enumerate()
+                            {
+                                if !provided.contains(&pidx)
+                                    && sig
+                                        .param_defaults
+                                        .get(pidx)
+                                        .and_then(|d| d.as_ref())
+                                        .is_none()
+                                {
                                     self.errors.push(SemError{message: format!("missing argument `{}` for `{callee}` (no default value)", pname), span: *callee_span});
                                 }
                             }
@@ -3576,7 +5171,10 @@ impl Checker {
                     } else {
                         sig.ret
                     }
-                } else if let Some(var_ty) = self.lookup_var(&callee_key).or_else(|| self.lookup_var(callee)) {
+                } else if let Some(var_ty) = self
+                    .lookup_var(&callee_key)
+                    .or_else(|| self.lookup_var(callee))
+                {
                     // variable call (closure / function pointer)
                     if let Ty::Function(ret, params) = var_ty {
                         if params.len() != args.len() {
@@ -3584,15 +5182,23 @@ impl Checker {
                         }
                         for (i, arg) in args.iter().enumerate() {
                             let aty = self.check_call_arg(arg);
-                            if let Some(pt) = params.get(i) { if !self.ty_assignable(&aty, pt) { self.errors.push(SemError{message: format!("argument {}: expected `{}`, found `{aty}`", i+1, pt), span: arg.span()}); } }
+                            if let Some(pt) = params.get(i) {
+                                if !self.ty_assignable(&aty, pt) {
+                                    self.errors.push(SemError{message: format!("argument {}: expected `{}`, found `{aty}`", i+1, pt), span: arg.span()});
+                                }
+                            }
                         }
                         *ret
                     } else if let Ty::Any = var_ty {
-                        for arg in args { let _ = self.check_call_arg(arg); }
+                        for arg in args {
+                            let _ = self.check_call_arg(arg);
+                        }
                         Ty::Int
                     } else {
                         self.errors.push(SemError{message: format!("`{callee}` is not a function (found `{var_ty}`)"), span: *callee_span});
-                        for arg in args { let _ = self.check_call_arg(arg); }
+                        for arg in args {
+                            let _ = self.check_call_arg(arg);
+                        }
                         Ty::Int
                     }
                 } else {
@@ -3617,8 +5223,15 @@ impl Checker {
                 if let Ty::Generic(base, args) = &effective_ty {
                     if let Some(sinfo) = self.structs.get(base).cloned() {
                         if sinfo.generic_params.len() == args.len() {
-                            if let Some((_, fty_raw)) = sinfo.field_map.get(field) {
-                                let map: HashMap<String, Ty> = sinfo.generic_params.iter().map(|gp| gp.name.clone()).zip(args.iter().cloned()).collect();
+                            if let Some((_, fty_raw)) =
+                                sinfo.field_map.get(field)
+                            {
+                                let map: HashMap<String, Ty> = sinfo
+                                    .generic_params
+                                    .iter()
+                                    .map(|gp| gp.name.clone())
+                                    .zip(args.iter().cloned())
+                                    .collect();
                                 return Self::subst_generic_ty(fty_raw, &map);
                             }
                         }
@@ -3632,53 +5245,155 @@ impl Checker {
                         if let Some((_, fty)) = sinfo.field_map.get(field) {
                             if let Some(vis) = sinfo.field_vis.get(field) {
                                 // For struct, Default is public, only Private is private
-                                if *vis == crate::ast::Visibility::Private && self.cur_class.as_deref() != Some(sname.as_str()) {
-                                    self.errors.push(SemError{message: format!("field `{field}` is private"), span: *field_span});
+                                if *vis == crate::ast::Visibility::Private
+                                    && self.cur_class.as_deref()
+                                        != Some(sname.as_str())
+                                {
+                                    self.errors.push(SemError {
+                                        message: format!(
+                                            "field `{field}` is private"
+                                        ),
+                                        span: *field_span,
+                                    });
                                 }
-                            } else if let Some(cinfo) = self.classes.get(sname) {
+                            } else if let Some(cinfo) = self.classes.get(sname)
+                            {
                                 if let Some(vis) = cinfo.field_vis.get(field) {
-                                    if *vis != crate::ast::Visibility::Public && self.cur_class.as_deref() != Some(sname.as_str()) {
-                                        self.errors.push(SemError{message: format!("field `{field}` is private"), span: *field_span});
+                                    if *vis != crate::ast::Visibility::Public
+                                        && self.cur_class.as_deref()
+                                            != Some(sname.as_str())
+                                    {
+                                        self.errors.push(SemError {
+                                            message: format!(
+                                                "field `{field}` is private"
+                                            ),
+                                            span: *field_span,
+                                        });
                                     }
-                                } else if self.cur_class.as_deref() != Some(sname.as_str()) {
-                                    self.errors.push(SemError{message: format!("field `{field}` is private"), span: *field_span});
+                                } else if self.cur_class.as_deref()
+                                    != Some(sname.as_str())
+                                {
+                                    self.errors.push(SemError {
+                                        message: format!(
+                                            "field `{field}` is private"
+                                        ),
+                                        span: *field_span,
+                                    });
                                 }
                             }
                             fty.clone()
                         } else if let Some(cinfo) = self.classes.get(sname) {
                             if let Some(prop) = cinfo.properties.get(field) {
-                                if prop.visibility != crate::ast::Visibility::Public && self.cur_class.as_deref() != Some(sname.as_str()) {
-                                    self.errors.push(SemError{message: format!("property `{field}` is private"), span: *field_span});
+                                if prop.visibility
+                                    != crate::ast::Visibility::Public
+                                    && self.cur_class.as_deref()
+                                        != Some(sname.as_str())
+                                {
+                                    self.errors.push(SemError {
+                                        message: format!(
+                                            "property `{field}` is private"
+                                        ),
+                                        span: *field_span,
+                                    });
                                 }
-                                if prop.has_get { prop.ty.clone() } else { self.errors.push(SemError{message: format!("property `{field}` has no getter"), span: *field_span}); Ty::Int }
+                                if prop.has_get {
+                                    prop.ty.clone()
+                                } else {
+                                    self.errors.push(SemError {
+                                        message: format!(
+                                            "property `{field}` has no getter"
+                                        ),
+                                        span: *field_span,
+                                    });
+                                    Ty::Int
+                                }
                             } else {
-                                self.errors.push(SemError { message: format!("struct `{sname}` has no field `{field}`"), span: *field_span, }); Ty::Int
+                                self.errors.push(SemError { message: format!("struct `{sname}` has no field `{field}`"), span: *field_span, });
+                                Ty::Int
                             }
                         } else {
-                            self.errors.push(SemError { message: format!("struct `{sname}` has no field `{field}`"), span: *field_span, }); Ty::Int
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "struct `{sname}` has no field `{field}`"
+                                ),
+                                span: *field_span,
+                            });
+                            Ty::Int
                         }
                     } else if let Some(cinfo) = self.classes.get(sname) {
                         if let Some(prop) = cinfo.properties.get(field) {
-                            if prop.visibility != crate::ast::Visibility::Public && self.cur_class.as_deref() != Some(sname.as_str()) {
-                                self.errors.push(SemError{message: format!("property `{field}` is private"), span: *field_span});
+                            if prop.visibility != crate::ast::Visibility::Public
+                                && self.cur_class.as_deref()
+                                    != Some(sname.as_str())
+                            {
+                                self.errors.push(SemError {
+                                    message: format!(
+                                        "property `{field}` is private"
+                                    ),
+                                    span: *field_span,
+                                });
                             }
-                            if prop.has_get { prop.ty.clone() } else { self.errors.push(SemError{message: format!("property `{field}` has no getter"), span: *field_span}); Ty::Int }
+                            if prop.has_get {
+                                prop.ty.clone()
+                            } else {
+                                self.errors.push(SemError {
+                                    message: format!(
+                                        "property `{field}` has no getter"
+                                    ),
+                                    span: *field_span,
+                                });
+                                Ty::Int
+                            }
                         } else {
-                            self.errors.push(SemError { message: format!("struct `{sname}` has no field `{field}`"), span: *field_span, }); Ty::Int
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "struct `{sname}` has no field `{field}`"
+                                ),
+                                span: *field_span,
+                            });
+                            Ty::Int
                         }
                     } else if self.traits.contains_key(sname) {
                         // Trait-typed receiver: structural field dispatch
                         // (see `check_trait_field`).
                         self.check_trait_field(sname, field, field_span)
                     } else {
-                        self.errors.push(SemError { message: format!("unknown struct `{sname}`"), span: object.span, }); Ty::Int
+                        self.errors.push(SemError {
+                            message: format!("unknown struct `{sname}`"),
+                            span: object.span,
+                        });
+                        Ty::Int
                     }
                 } else if let Ty::Enum(ref ename) = obj_ty {
                     if let Some(einfo) = self.enums.get(ename) {
-                        if let Some((_, _)) = einfo.variant_map.get(field) { Ty::Enum(ename.clone()) } else { self.errors.push(SemError{message: format!("enum `{}` has no variant `{}`", ename, field), span: *field_span}); Ty::Int }
-                    } else { self.errors.push(SemError{message: format!("unknown enum `{}`", ename), span: *field_span}); Ty::Int }
+                        if let Some((_, _)) = einfo.variant_map.get(field) {
+                            Ty::Enum(ename.clone())
+                        } else {
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "enum `{}` has no variant `{}`",
+                                    ename, field
+                                ),
+                                span: *field_span,
+                            });
+                            Ty::Int
+                        }
+                    } else {
+                        self.errors.push(SemError {
+                            message: format!("unknown enum `{}`", ename),
+                            span: *field_span,
+                        });
+                        Ty::Int
+                    }
                 } else {
-                    self.errors.push(SemError { message: format!("field access on non-struct `{}`, field `{}`", obj_ty, field), span: *field_span, }); Ty::Int
+                    self.errors.push(SemError {
+                        message: format!(
+                            "field access on non-struct `{}`, field `{}`",
+                            obj_ty, field
+                        ),
+                        span: *field_span,
+                    });
+                    Ty::Int
                 }
             }
             ExprKind::StructLit { ty, fields } => {
@@ -3687,14 +5402,24 @@ impl Checker {
                 if let Ty::Generic(base, args) = &lit_ty {
                     if let Some(sinfo) = self.structs.get(base).cloned() {
                         if sinfo.generic_params.len() == args.len() {
-                            let map: HashMap<String, Ty> = sinfo.generic_params.iter().map(|gp| gp.name.clone()).zip(args.iter().cloned()).collect();
+                            let map: HashMap<String, Ty> = sinfo
+                                .generic_params
+                                .iter()
+                                .map(|gp| gp.name.clone())
+                                .zip(args.iter().cloned())
+                                .collect();
                             let mut seen = HashSet::new();
                             for (fname, fspan, fexpr) in fields {
                                 if !seen.insert(fname) {
                                     self.errors.push(SemError { message: format!("duplicate field `{fname}` in struct literal"), span: *fspan });
                                 }
-                                if let Some((_, expected_raw)) = sinfo.field_map.get(fname) {
-                                    let expected_ty = Self::subst_generic_ty(expected_raw, &map);
+                                if let Some((_, expected_raw)) =
+                                    sinfo.field_map.get(fname)
+                                {
+                                    let expected_ty = Self::subst_generic_ty(
+                                        expected_raw,
+                                        &map,
+                                    );
                                     let got = self.check_expr(fexpr);
                                     if &got != &expected_ty {
                                         self.errors.push(SemError{message: format!("field `{fname}`: expected `{expected_ty}`, found `{got}`"), span: fexpr.span});
@@ -3741,7 +5466,9 @@ impl Checker {
                             self.errors.push(SemError{message: format!("field `{fname}`: expected `{expected_ty}`, found `{got}`"), span: fexpr.span});
                         }
                         // Moving into an owned field poisons the sources.
-                        if matches!(expected_ty, Ty::Own(_)) || self.ty_has_own(expected_ty) {
+                        if matches!(expected_ty, Ty::Own(_))
+                            || self.ty_has_own(expected_ty)
+                        {
                             self.poison_moved_idents(fexpr);
                         }
                     } else {
@@ -3757,7 +5484,11 @@ impl Checker {
                 // Check missing fields — allow if field has default `= expr`
                 for (fname, _) in &sinfo.fields {
                     if !seen.contains(fname) {
-                        let has_default = sinfo.field_defaults.get(fname).and_then(|o| o.as_ref()).is_some();
+                        let has_default = sinfo
+                            .field_defaults
+                            .get(fname)
+                            .and_then(|o| o.as_ref())
+                            .is_some();
                         if !has_default {
                             self.errors.push(SemError {
                                 message: format!(
@@ -3795,7 +5526,10 @@ impl Checker {
                                 self.errors.push(SemError{message: format!("map value mismatch: expected `{v0}`, found `{vt}`"), span: v.span});
                             }
                         }
-                        return Ty::Map { key: Box::new(k0), value: Box::new(v0) };
+                        return Ty::Map {
+                            key: Box::new(k0),
+                            value: Box::new(v0),
+                        };
                     }
                     _ => {
                         self.errors.push(SemError{message: format!("map literal requires map type, found `{lit_ty}`"), span: expr.span});
@@ -3804,9 +5538,9 @@ impl Checker {
                 };
                 // Only int-like and string keys are supported by codegen.
                 match &key_ty {
-                    Ty::String => {},
-                    t if t.is_int_like() => {},
-                    Ty::Any => {},
+                    Ty::String => {}
+                    t if t.is_int_like() => {}
+                    Ty::Any => {}
                     other => {
                         self.errors.push(SemError{message: format!("unsupported map key type `{other}`: keys must be `string` or int types"), span: expr.span});
                     }
@@ -3821,7 +5555,10 @@ impl Checker {
                         self.errors.push(SemError{message: format!("map value mismatch: expected `{val_ty}`, found `{vt}`"), span: v.span});
                     }
                 }
-                Ty::Map { key: Box::new(key_ty), value: Box::new(val_ty) }
+                Ty::Map {
+                    key: Box::new(key_ty),
+                    value: Box::new(val_ty),
+                }
             }
             ExprKind::StringLit(_) => Ty::String,
             ExprKind::CharLit(_) => Ty::Char,
@@ -3877,27 +5614,50 @@ impl Checker {
                     }
                 }
             }
-            ExprKind::Slice { object, start, end, inclusive: _ } => {
+            ExprKind::Slice {
+                object,
+                start,
+                end,
+                inclusive: _,
+            } => {
                 let obj_ty = self.check_expr(object);
                 if let Some(s) = start {
                     let st = self.check_expr(s);
                     if st != Ty::Int {
-                        self.errors.push(SemError { message: format!("slice start must be `int`, found `{st}`"), span: s.span });
+                        self.errors.push(SemError {
+                            message: format!(
+                                "slice start must be `int`, found `{st}`"
+                            ),
+                            span: s.span,
+                        });
                     }
                 }
                 if let Some(e) = end {
                     let et = self.check_expr(e);
                     if et != Ty::Int {
-                        self.errors.push(SemError { message: format!("slice end must be `int`, found `{et}`"), span: e.span });
+                        self.errors.push(SemError {
+                            message: format!(
+                                "slice end must be `int`, found `{et}`"
+                            ),
+                            span: e.span,
+                        });
                     }
                 }
                 match obj_ty {
                     Ty::Array(el) => Ty::Array(el.clone()), // slice retains array type
-                    Ty::FixedArray { elem, size } => Ty::FixedArray { elem: elem.clone(), size }, // slice retains fixed-array type (MVP)
+                    Ty::FixedArray { elem, size } => Ty::FixedArray {
+                        elem: elem.clone(),
+                        size,
+                    }, // slice retains fixed-array type (MVP)
                     Ty::Vec(elem) => Ty::Vec(elem.clone()), // slice retains vector type (MVP)
                     Ty::String => Ty::String, // string slice -> string
                     _ => {
-                        self.errors.push(SemError { message: format!("cannot slice non-array type `{obj_ty}`"), span: object.span });
+                        self.errors.push(SemError {
+                            message: format!(
+                                "cannot slice non-array type `{obj_ty}`"
+                            ),
+                            span: object.span,
+                        });
                         Ty::Int
                     }
                 }
@@ -3906,11 +5666,19 @@ impl Checker {
                 if let Some(cls) = &self.cur_class {
                     Ty::Struct(cls.clone())
                 } else {
-                    self.errors.push(SemError{message: "`this` outside class method".into(), span: expr.span});
+                    self.errors.push(SemError {
+                        message: "`this` outside class method".into(),
+                        span: expr.span,
+                    });
                     Ty::Int
                 }
             }
-            ExprKind::MethodCall{object, method, method_span, args} => {
+            ExprKind::MethodCall {
+                object,
+                method,
+                method_span,
+                args,
+            } => {
                 let obj_ty = self.check_expr(object);
                 // Vector `push` (types skill §10-11): `v.push(x)` appends and
                 // returns void. On an undetermined (`vec[]`) vector the first
@@ -3918,8 +5686,16 @@ impl Checker {
                 if let Ty::Vec(elem) = &obj_ty {
                     if method == "push" {
                         if args.len() != 1 {
-                            self.errors.push(SemError{message: format!("`push` expects 1 arg, found {}", args.len()), span: *method_span});
-                            for a in args { let _ = self.check_call_arg(a); }
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "`push` expects 1 arg, found {}",
+                                    args.len()
+                                ),
+                                span: *method_span,
+                            });
+                            for a in args {
+                                let _ = self.check_call_arg(a);
+                            }
                             return Ty::Void;
                         }
                         let aty = self.check_call_arg(&args[0]);
@@ -3928,9 +5704,16 @@ impl Checker {
                             // fixes `xs` as an `int` vector from here on.
                             if let ExprKind::Ident(name) = &object.kind {
                                 if self.is_const(name) {
-                                    self.errors.push(SemError{message: format!("cannot push to const vector `{}`", name), span: *method_span});
+                                    self.errors.push(SemError {
+                                        message: format!(
+                                            "cannot push to const vector `{}`",
+                                            name
+                                        ),
+                                        span: *method_span,
+                                    });
                                 } else {
-                                    let established = Ty::Vec(Box::new(aty.clone()));
+                                    let established =
+                                        Ty::Vec(Box::new(aty.clone()));
                                     self.set_var_ty(name, established);
                                 }
                             }
@@ -3939,14 +5722,26 @@ impl Checker {
                             return Ty::Void;
                         }
                         if !Ty::assignable(&aty, elem) {
-                            self.errors.push(SemError{message: format!("`push` expects `{}`, found `{}`", elem, aty), span: args[0].span()});
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "`push` expects `{}`, found `{}`",
+                                    elem, aty
+                                ),
+                                span: args[0].span(),
+                            });
                         }
                         return Ty::Void;
                     }
                 }
                 // Collection and string methods (types skill: stdlib behavior,
                 // compiler-validated). Returns Some when handled.
-                if let Some(ret) = self.check_collection_method(object, method, method_span, args, &obj_ty) {
+                if let Some(ret) = self.check_collection_method(
+                    object,
+                    method,
+                    method_span,
+                    args,
+                    &obj_ty,
+                ) {
                     return ret;
                 }
                 // Auto-deref for `own T` receivers (`. ` through owning pointers).
@@ -3954,8 +5749,15 @@ impl Checker {
                 let sname = match effective_ty {
                     Ty::Struct(ref n) => n.clone(),
                     _ => {
-                        self.errors.push(SemError{message: format!("method call on non-class type `{obj_ty}`"), span: object.span});
-                        for a in args { let _ = self.check_call_arg(a); }
+                        self.errors.push(SemError {
+                            message: format!(
+                                "method call on non-class type `{obj_ty}`"
+                            ),
+                            span: object.span,
+                        });
+                        for a in args {
+                            let _ = self.check_call_arg(a);
+                        }
                         return Ty::Int;
                     }
                 };
@@ -3964,37 +5766,85 @@ impl Checker {
                     if let Some(meth) = cls.methods.get(method) {
                         // visibility: Default is private for methods
                         if let Some(vis) = cls.method_vis.get(method) {
-                            if *vis != crate::ast::Visibility::Public && self.cur_class.as_deref() != Some(sname.as_str()) {
-                                self.errors.push(SemError{message: format!("method `{method}` is private"), span: *method_span});
+                            if *vis != crate::ast::Visibility::Public
+                                && self.cur_class.as_deref()
+                                    != Some(sname.as_str())
+                            {
+                                self.errors.push(SemError {
+                                    message: format!(
+                                        "method `{method}` is private"
+                                    ),
+                                    span: *method_span,
+                                });
                             }
-                        } else if self.cur_class.as_deref() != Some(sname.as_str()) {
-                            self.errors.push(SemError{message: format!("method `{method}` is private"), span: *method_span});
+                        } else if self.cur_class.as_deref()
+                            != Some(sname.as_str())
+                        {
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "method `{method}` is private"
+                                ),
+                                span: *method_span,
+                            });
                         }
-                        self.check_method_call_args(args, meth, method, method_span);
+                        self.check_method_call_args(
+                            args,
+                            meth,
+                            method,
+                            method_span,
+                        );
                         meth.ret.clone()
                     } else {
                         // Also check if class was actually struct with no methods? Then try struct field? but method not found
-                        self.errors.push(SemError{message: format!("class `{sname}` has no method `{method}`"), span: *method_span});
-                        for a in args { let _ = self.check_call_arg(a); }
+                        self.errors.push(SemError {
+                            message: format!(
+                                "class `{sname}` has no method `{method}`"
+                            ),
+                            span: *method_span,
+                        });
+                        for a in args {
+                            let _ = self.check_call_arg(a);
+                        }
                         Ty::Int
                     }
                 } else if self.traits.contains_key(&sname) {
                     // Trait-typed receiver: interface dispatch (see
                     // `check_trait_method_call`).
-                    self.check_trait_method_call(&sname, method, method_span, args, object.span)
+                    self.check_trait_method_call(
+                        &sname,
+                        method,
+                        method_span,
+                        args,
+                        object.span,
+                    )
                 } else {
                     // Try structs map for method? For now treat as class not found, check if struct has method? struct has no methods
-                    self.errors.push(SemError{message: format!("unknown class `{sname}`"), span: object.span});
-                    for a in args { let _ = self.check_call_arg(a); }
+                    self.errors.push(SemError {
+                        message: format!("unknown class `{sname}`"),
+                        span: object.span,
+                    });
+                    for a in args {
+                        let _ = self.check_call_arg(a);
+                    }
                     Ty::Int
                 }
             }
-            ExprKind::EnumVariant{enum_name, variant, variant_span, args} => {
+            ExprKind::EnumVariant {
+                enum_name,
+                variant,
+                variant_span,
+                args,
+            } => {
                 let enum_ty: Ty = if let Some(en) = enum_name {
                     if !self.enums.contains_key(en) {
-                        self.errors.push(SemError{message: format!("unknown enum `{en}`"), span: *variant_span});
+                        self.errors.push(SemError {
+                            message: format!("unknown enum `{en}`"),
+                            span: *variant_span,
+                        });
                         Ty::Int
-                    } else { Ty::Enum(en.clone()) }
+                    } else {
+                        Ty::Enum(en.clone())
+                    }
                 } else {
                     let mut found: Option<String> = None;
                     let mut found_ty: Option<Ty> = None;
@@ -4009,38 +5859,62 @@ impl Checker {
                             found_ty = Some(Ty::Enum(ename.clone()));
                         }
                     }
-                    if let Some(t) = found_ty { t } else {
-                        self.errors.push(SemError{message: format!("unknown variant `{variant}`"), span: *variant_span});
+                    if let Some(t) = found_ty {
+                        t
+                    } else {
+                        self.errors.push(SemError {
+                            message: format!("unknown variant `{variant}`"),
+                            span: *variant_span,
+                        });
                         Ty::Int
                     }
                 };
-                let enum_name_str = match &enum_ty { Ty::Enum(n) => n.clone(), _ => "".to_string() };
+                let enum_name_str = match &enum_ty {
+                    Ty::Enum(n) => n.clone(),
+                    _ => "".to_string(),
+                };
                 if let Some(einfo) = self.enums.get(&enum_name_str).cloned() {
-                    if let Some((_, payload_tys)) = einfo.variant_map.get(variant.rsplit("::").next().unwrap_or(variant)) {
+                    if let Some((_, payload_tys)) = einfo
+                        .variant_map
+                        .get(variant.rsplit("::").next().unwrap_or(variant))
+                    {
                         if !payload_tys.is_empty() {
                             if args.len() != payload_tys.len() {
                                 self.errors.push(SemError{message: format!("variant `{variant}` expects {} payload(s), found {}", payload_tys.len(), args.len()), span: *variant_span});
                             } else {
-                                for (pty, arg) in payload_tys.iter().zip(args.iter()) {
+                                for (pty, arg) in
+                                    payload_tys.iter().zip(args.iter())
+                                {
                                     if matches!(arg, CallArg::Out { .. }) {
                                         self.errors.push(SemError { message: format!("`out` argument not allowed in enum payload `{variant}`"), span: arg.span() });
                                     }
                                     let aty = self.check_call_arg(arg);
                                     let is_generic = matches!(pty, Ty::Generic(n, _) if n.len() == 1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false));
-                                    if !self.ty_assignable(&aty, pty) && !is_generic {
+                                    if !self.ty_assignable(&aty, pty)
+                                        && !is_generic
+                                    {
                                         self.errors.push(SemError{message: format!("variant `{variant}` payload: expected `{}`, found `{}`", pty, aty), span: arg.span()});
                                     }
                                 }
                             }
                         } else {
                             if !args.is_empty() {
-                                self.errors.push(SemError{message: format!("variant `{variant}` expects no args"), span: *variant_span});
+                                self.errors.push(SemError {
+                                    message: format!(
+                                        "variant `{variant}` expects no args"
+                                    ),
+                                    span: *variant_span,
+                                });
                             }
-                            for a in args { let _ = self.check_call_arg(a); }
+                            for a in args {
+                                let _ = self.check_call_arg(a);
+                            }
                         }
                     }
                 } else {
-                    for a in args { let _ = self.check_call_arg(a); }
+                    for a in args {
+                        let _ = self.check_call_arg(a);
+                    }
                 }
                 enum_ty
             }
@@ -4083,20 +5957,38 @@ impl Checker {
                                 self.errors.push(SemError{message: format!("pattern `bool` mismatches scrutinee `{scrut_ty}`"), span: *span});
                             }
                         }
-                        Pattern::Var(_, _) => { has_wildcard = true; arm_has_wildcard = true; }
+                        Pattern::Var(_, _) => {
+                            has_wildcard = true;
+                            arm_has_wildcard = true;
+                        }
                         Pattern::Alternative(pats, span) => {
                             // `a | b` or `a or b` : each alternative must match scrutinee type
                             if pats.is_empty() {
-                                self.errors.push(SemError{message: "empty alternative pattern".into(), span: *span});
+                                self.errors.push(SemError {
+                                    message: "empty alternative pattern".into(),
+                                    span: *span,
+                                });
                             }
                             let mut any_wildcard = false;
                             for pat in pats {
                                 match pat {
                                     Pattern::Wildcard(_) => any_wildcard = true,
                                     Pattern::Var(_, _) => any_wildcard = true,
-                                    Pattern::LitInt(_, s) => if scrut_ty != Ty::Int { self.errors.push(SemError{message: format!("pattern `int` mismatches scrutinee `{scrut_ty}`"), span: *s}); },
-                                    Pattern::LitBool(_, s) => if scrut_ty != Ty::Bool { self.errors.push(SemError{message: format!("pattern `bool` mismatches scrutinee `{scrut_ty}`"), span: *s}); },
-                                    Pattern::Enum{variant, variant_span, ..} => {
+                                    Pattern::LitInt(_, s) => {
+                                        if scrut_ty != Ty::Int {
+                                            self.errors.push(SemError{message: format!("pattern `int` mismatches scrutinee `{scrut_ty}`"), span: *s});
+                                        }
+                                    }
+                                    Pattern::LitBool(_, s) => {
+                                        if scrut_ty != Ty::Bool {
+                                            self.errors.push(SemError{message: format!("pattern `bool` mismatches scrutinee `{scrut_ty}`"), span: *s});
+                                        }
+                                    }
+                                    Pattern::Enum {
+                                        variant,
+                                        variant_span,
+                                        ..
+                                    } => {
                                         if !matches!(scrut_ty, Ty::Enum(_)) {
                                             self.errors.push(SemError{message: format!("enum pattern on non-enum scrutinee `{}`", scrut_ty), span: *variant_span});
                                         }
@@ -4106,22 +5998,34 @@ impl Checker {
                                             self.errors.push(SemError{message: format!("tuple pattern on non-tuple scrutinee `{}`", scrut_ty), span: *s});
                                         }
                                     }
-                                    Pattern::Alternative(_, _) => {},
+                                    Pattern::Alternative(_, _) => {}
                                 }
                             }
-                            if any_wildcard { has_wildcard = true; arm_has_wildcard = true; }
+                            if any_wildcard {
+                                has_wildcard = true;
+                                arm_has_wildcard = true;
+                            }
                         }
                         Pattern::Tuple(pats, span) => {
                             if let Ty::Tuple(tys) = &scrut_ty {
                                 if pats.len() != tys.len() {
                                     self.errors.push(SemError{message: format!("tuple pattern expects {} elements, found {} (scrutinee `{}`)", tys.len(), pats.len(), scrut_ty), span: *span});
                                 } else {
-                                    for (pat, ty) in pats.iter().zip(tys.iter()) {
+                                    for (pat, ty) in pats.iter().zip(tys.iter())
+                                    {
                                         match pat {
-                                            Pattern::Wildcard(_) => {},
-                                            Pattern::Var(_, _) => {},
-                                            Pattern::LitInt(_, s) => if *ty != Ty::Int { self.errors.push(SemError{message: format!("tuple element expects `int`, found `{}`", ty), span: *s}); },
-                                            Pattern::LitBool(_, s) => if *ty != Ty::Bool { self.errors.push(SemError{message: format!("tuple element expects `bool`, found `{}`", ty), span: *s}); },
+                                            Pattern::Wildcard(_) => {}
+                                            Pattern::Var(_, _) => {}
+                                            Pattern::LitInt(_, s) => {
+                                                if *ty != Ty::Int {
+                                                    self.errors.push(SemError{message: format!("tuple element expects `int`, found `{}`", ty), span: *s});
+                                                }
+                                            }
+                                            Pattern::LitBool(_, s) => {
+                                                if *ty != Ty::Bool {
+                                                    self.errors.push(SemError{message: format!("tuple element expects `bool`, found `{}`", ty), span: *s});
+                                                }
+                                            }
                                             _ => {}
                                         }
                                     }
@@ -4130,12 +6034,23 @@ impl Checker {
                                 self.errors.push(SemError{message: format!("tuple pattern on non-tuple scrutinee `{}`", scrut_ty), span: *span});
                             }
                         }
-                        Pattern::Enum{variant, variant_span, payload} => {
+                        Pattern::Enum {
+                            variant,
+                            variant_span,
+                            payload,
+                        } => {
                             if let Ty::Enum(ref ename) = scrut_ty {
-                                if let Some(einfo) = self.enums.get(ename).cloned() {
+                                if let Some(einfo) =
+                                    self.enums.get(ename).cloned()
+                                {
                                     // Qualified `Color.Red` parses as `Color::Red`; strip to `Red` for lookup.
-                                    let vbase: &str = variant.rsplit("::").next().unwrap_or(variant);
-                                    if let Some((_, payload_tys)) = einfo.variant_map.get(vbase) {
+                                    let vbase: &str = variant
+                                        .rsplit("::")
+                                        .next()
+                                        .unwrap_or(variant);
+                                    if let Some((_, payload_tys)) =
+                                        einfo.variant_map.get(vbase)
+                                    {
                                         match (payload, payload_tys.as_slice()) {
                                             (Some(pats), [expected]) if pats.len() == 1 => {
                                                 match &pats[0] {
@@ -4170,7 +6085,13 @@ impl Checker {
                                         self.errors.push(SemError{message: format!("unknown variant `{}` for enum `{}`", variant, ename), span: *variant_span});
                                     }
                                 } else {
-                                    self.errors.push(SemError{message: format!("unknown enum `{}`", ename), span: *variant_span});
+                                    self.errors.push(SemError {
+                                        message: format!(
+                                            "unknown enum `{}`",
+                                            ename
+                                        ),
+                                        span: *variant_span,
+                                    });
                                 }
                             } else {
                                 self.errors.push(SemError{message: format!("enum pattern on non-enum scrutinee `{}`", scrut_ty), span: *variant_span});
@@ -4188,20 +6109,67 @@ impl Checker {
                             // For `a | b` or `a or b`, bind vars from first Var alternative if any
                             for pat in pats {
                                 match pat {
-                                    Pattern::Var(name, span) => { self.declare_var(name, scrut_ty.clone(), *span); break; },
+                                    Pattern::Var(name, span) => {
+                                        self.declare_var(
+                                            name,
+                                            scrut_ty.clone(),
+                                            *span,
+                                        );
+                                        break;
+                                    }
                                     Pattern::Tuple(subs, _) => {
                                         if let Ty::Tuple(tys) = &scrut_ty {
-                                            for (spat, ty) in subs.iter().zip(tys.iter()) {
-                                                if let Pattern::Var(n, s) = spat { self.declare_var(n, ty.clone(), *s); }
+                                            for (spat, ty) in
+                                                subs.iter().zip(tys.iter())
+                                            {
+                                                if let Pattern::Var(n, s) = spat
+                                                {
+                                                    self.declare_var(
+                                                        n,
+                                                        ty.clone(),
+                                                        *s,
+                                                    );
+                                                }
                                             }
                                         }
                                         break;
                                     }
-                                    Pattern::Enum{ payload: Some(subs), variant, ..} => {
+                                    Pattern::Enum {
+                                        payload: Some(subs),
+                                        variant,
+                                        ..
+                                    } => {
                                         if let Ty::Enum(ref ename) = scrut_ty {
-                                            if let Some(payload_tys) = self.enums.get(ename).and_then(|einfo| einfo.variant_map.get(variant.rsplit("::").next().unwrap_or(variant)).map(|(_, v)| v.clone())) {
-                                                for (spat, ty) in subs.iter().zip(payload_tys.iter()) {
-                                                    if let Pattern::Var(n, s) = spat { self.declare_var(n, ty.clone(), *s); }
+                                            if let Some(payload_tys) = self
+                                                .enums
+                                                .get(ename)
+                                                .and_then(|einfo| {
+                                                    einfo
+                                                        .variant_map
+                                                        .get(
+                                                            variant
+                                                                .rsplit("::")
+                                                                .next()
+                                                                .unwrap_or(
+                                                                    variant,
+                                                                ),
+                                                        )
+                                                        .map(|(_, v)| v.clone())
+                                                })
+                                            {
+                                                for (spat, ty) in subs
+                                                    .iter()
+                                                    .zip(payload_tys.iter())
+                                                {
+                                                    if let Pattern::Var(n, s) =
+                                                        spat
+                                                    {
+                                                        self.declare_var(
+                                                            n,
+                                                            ty.clone(),
+                                                            *s,
+                                                        );
+                                                    }
                                                 }
                                             }
                                         }
@@ -4216,34 +6184,97 @@ impl Checker {
                                 for (pat, ty) in pats.iter().zip(tys.iter()) {
                                     if let Pattern::Var(n, s) = pat {
                                         self.declare_var(n, ty.clone(), *s);
-                                    } else if let Pattern::Tuple(inner, _) = pat {
+                                    } else if let Pattern::Tuple(inner, _) = pat
+                                    {
                                         // nested tuple like ((a,b), c) - not common, ignore for now
                                         if let Ty::Tuple(inner_tys) = ty {
-                                            for (ipat, ity) in inner.iter().zip(inner_tys.iter()) {
-                                                if let Pattern::Var(n2, s2) = ipat { self.declare_var(n2, ity.clone(), *s2); }
+                                            for (ipat, ity) in inner
+                                                .iter()
+                                                .zip(inner_tys.iter())
+                                            {
+                                                if let Pattern::Var(n2, s2) =
+                                                    ipat
+                                                {
+                                                    self.declare_var(
+                                                        n2,
+                                                        ity.clone(),
+                                                        *s2,
+                                                    );
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                        Pattern::Enum{ payload: Some(pats), variant, ..} => {
+                        Pattern::Enum {
+                            payload: Some(pats),
+                            variant,
+                            ..
+                        } => {
                             if pats.len() == 1 {
                                 if let Pattern::Var(vname, vspan) = &pats[0] {
                                     if let Ty::Enum(ref ename) = scrut_ty {
-                                        if let Some(payload_tys) = self.enums.get(ename).and_then(|einfo| einfo.variant_map.get(variant.rsplit("::").next().unwrap_or(variant)).map(|(_, v)| v.clone())) {
-                                            if let Some(pty) = payload_tys.first() {
-                                                self.declare_var(vname, pty.clone(), *vspan);
+                                        if let Some(payload_tys) = self
+                                            .enums
+                                            .get(ename)
+                                            .and_then(|einfo| {
+                                                einfo
+                                                    .variant_map
+                                                    .get(
+                                                        variant
+                                                            .rsplit("::")
+                                                            .next()
+                                                            .unwrap_or(variant),
+                                                    )
+                                                    .map(|(_, v)| v.clone())
+                                            })
+                                        {
+                                            if let Some(pty) =
+                                                payload_tys.first()
+                                            {
+                                                self.declare_var(
+                                                    vname,
+                                                    pty.clone(),
+                                                    *vspan,
+                                                );
                                             }
                                         }
                                     }
-                                } else if let Pattern::Tuple(subs, _) = &pats[0] {
+                                } else if let Pattern::Tuple(subs, _) = &pats[0]
+                                {
                                     // Enum payload is tuple e.g., `MyVariant((a,b))` where payload is one tuple
                                     if let Ty::Enum(ref ename) = scrut_ty {
-                                        if let Some(payload_tys) = self.enums.get(ename).and_then(|einfo| einfo.variant_map.get(variant.rsplit("::").next().unwrap_or(variant)).map(|(_, v)| v.clone())) {
-                                            if let Some(Ty::Tuple(tys)) = payload_tys.first() {
-                                                for (spat, ty) in subs.iter().zip(tys.iter()) {
-                                                    if let Pattern::Var(n, s) = spat { self.declare_var(n, ty.clone(), *s); }
+                                        if let Some(payload_tys) = self
+                                            .enums
+                                            .get(ename)
+                                            .and_then(|einfo| {
+                                                einfo
+                                                    .variant_map
+                                                    .get(
+                                                        variant
+                                                            .rsplit("::")
+                                                            .next()
+                                                            .unwrap_or(variant),
+                                                    )
+                                                    .map(|(_, v)| v.clone())
+                                            })
+                                        {
+                                            if let Some(Ty::Tuple(tys)) =
+                                                payload_tys.first()
+                                            {
+                                                for (spat, ty) in
+                                                    subs.iter().zip(tys.iter())
+                                                {
+                                                    if let Pattern::Var(n, s) =
+                                                        spat
+                                                    {
+                                                        self.declare_var(
+                                                            n,
+                                                            ty.clone(),
+                                                            *s,
+                                                        );
+                                                    }
                                                 }
                                             }
                                         }
@@ -4251,14 +6282,53 @@ impl Checker {
                                 }
                             } else {
                                 if let Ty::Enum(ref ename) = scrut_ty {
-                                    if let Some(payload_tys) = self.enums.get(ename).and_then(|einfo| einfo.variant_map.get(variant.rsplit("::").next().unwrap_or(variant)).map(|(_, v)| v.clone())) {
-                                        for (pat, ty) in pats.iter().zip(payload_tys.iter()) {
-                                            if let Pattern::Var(vname, vspan) = pat {
-                                                self.declare_var(vname, ty.clone(), *vspan);
-                                            } else if let Pattern::Tuple(subs, _) = pat {
+                                    if let Some(payload_tys) = self
+                                        .enums
+                                        .get(ename)
+                                        .and_then(|einfo| {
+                                            einfo
+                                                .variant_map
+                                                .get(
+                                                    variant
+                                                        .rsplit("::")
+                                                        .next()
+                                                        .unwrap_or(variant),
+                                                )
+                                                .map(|(_, v)| v.clone())
+                                        })
+                                    {
+                                        for (pat, ty) in
+                                            pats.iter().zip(payload_tys.iter())
+                                        {
+                                            if let Pattern::Var(vname, vspan) =
+                                                pat
+                                            {
+                                                self.declare_var(
+                                                    vname,
+                                                    ty.clone(),
+                                                    *vspan,
+                                                );
+                                            } else if let Pattern::Tuple(
+                                                subs,
+                                                _,
+                                            ) = pat
+                                            {
                                                 if let Ty::Tuple(tys) = ty {
-                                                    for (spat, sty) in subs.iter().zip(tys.iter()) {
-                                                        if let Pattern::Var(n, s) = spat { self.declare_var(n, sty.clone(), *s); }
+                                                    for (spat, sty) in subs
+                                                        .iter()
+                                                        .zip(tys.iter())
+                                                    {
+                                                        if let Pattern::Var(
+                                                            n,
+                                                            s,
+                                                        ) = spat
+                                                        {
+                                                            self.declare_var(
+                                                                n,
+                                                                sty.clone(),
+                                                                *s,
+                                                            );
+                                                        }
                                                     }
                                                 }
                                             }
@@ -4323,18 +6393,40 @@ impl Checker {
                             let mut covered: HashSet<String> = HashSet::new();
                             for arm in &m.arms {
                                 match &arm.pattern {
-                                    Pattern::Enum{variant, ..} => { covered.insert(variant.rsplit("::").next().unwrap_or(variant).to_string()); }
+                                    Pattern::Enum { variant, .. } => {
+                                        covered.insert(
+                                            variant
+                                                .rsplit("::")
+                                                .next()
+                                                .unwrap_or(variant)
+                                                .to_string(),
+                                        );
+                                    }
                                     Pattern::Alternative(pats, _) => {
                                         for p in pats {
-                                            if let Pattern::Enum{variant, ..} = p { covered.insert(variant.rsplit("::").next().unwrap_or(variant).to_string()); }
+                                            if let Pattern::Enum {
+                                                variant,
+                                                ..
+                                            } = p
+                                            {
+                                                covered.insert(
+                                                    variant
+                                                        .rsplit("::")
+                                                        .next()
+                                                        .unwrap_or(variant)
+                                                        .to_string(),
+                                                );
+                                            }
                                         }
                                     }
                                     _ => {}
                                 }
                             }
-                            let all: HashSet<String> = einfo.variant_map.keys().cloned().collect();
+                            let all: HashSet<String> =
+                                einfo.variant_map.keys().cloned().collect();
                             if covered != all {
-                                let mut missing: Vec<String> = all.difference(&covered).cloned().collect();
+                                let mut missing: Vec<String> =
+                                    all.difference(&covered).cloned().collect();
                                 missing.sort();
                                 self.errors.push(SemError{message: format!("non-exhaustive match on enum `{ename}`: missing `{}` (add wildcard `_` or the missing variants)", missing.join("`, `")), span: m.span});
                             }
@@ -4345,14 +6437,22 @@ impl Checker {
             }
             ExprKind::Super => {
                 if let Some(cls) = &self.cur_class {
-                    if let Some(parent) = self.classes.get(cls).and_then(|c| c.extends.clone()) {
+                    if let Some(parent) =
+                        self.classes.get(cls).and_then(|c| c.extends.clone())
+                    {
                         Ty::Struct(parent)
                     } else {
-                        self.errors.push(SemError{message: "`super` without parent".into(), span: expr.span});
+                        self.errors.push(SemError {
+                            message: "`super` without parent".into(),
+                            span: expr.span,
+                        });
                         Ty::Int
                     }
                 } else {
-                    self.errors.push(SemError{message: "`super` outside class".into(), span: expr.span});
+                    self.errors.push(SemError {
+                        message: "`super` outside class".into(),
+                        span: expr.span,
+                    });
                     Ty::Int
                 }
             }
@@ -4360,15 +6460,21 @@ impl Checker {
             ExprKind::New { ty, args, .. } => {
                 let inner = self.resolve_type(ty);
                 match &inner {
-                    Ty::Struct(n) if self.structs.contains_key(n) || self.classes.contains_key(n) => {},
+                    Ty::Struct(n)
+                        if self.structs.contains_key(n)
+                            || self.classes.contains_key(n) => {}
                     Ty::Struct(n) if self.traits.contains_key(n) => {
                         self.errors.push(SemError{message: format!("cannot `new` trait `{n}` (traits have no constructor; construct a concrete class instead)"), span: expr.span});
-                        for a in args { let _ = self.check_call_arg(a); }
+                        for a in args {
+                            let _ = self.check_call_arg(a);
+                        }
                         return Ty::Own(Box::new(inner));
                     }
                     other => {
                         self.errors.push(SemError{message: format!("`new` requires a class, struct, or trait type, found `{other}`"), span: expr.span});
-                        for a in args { let _ = self.check_call_arg(a); }
+                        for a in args {
+                            let _ = self.check_call_arg(a);
+                        }
                         return Ty::Own(Box::new(inner));
                     }
                 }
@@ -4377,10 +6483,13 @@ impl Checker {
                 if let Ty::Struct(n) = &inner {
                     if let Some(cls) = self.classes.get(n).cloned() {
                         if !cls.constructors.is_empty() {
-                            let mut matched: Option<(crate::sema::Ty, usize)> = None;
+                            let mut matched: Option<(crate::sema::Ty, usize)> =
+                                None;
                             for (sig, _) in &cls.constructors {
                                 let min = Self::min_args_for_sig(sig);
-                                if args.len() >= min && args.len() <= sig.params.len() {
+                                if args.len() >= min
+                                    && args.len() <= sig.params.len()
+                                {
                                     matched = Some((Ty::Struct(n.clone()), 0));
                                     break;
                                 }
@@ -4390,30 +6499,51 @@ impl Checker {
                                 let mut found = false;
                                 for (sig, _) in &cls.constructors {
                                     let min = Self::min_args_for_sig(sig);
-                                    if args.len() >= min && args.len() <= sig.params.len() { found = true; break; }
+                                    if args.len() >= min
+                                        && args.len() <= sig.params.len()
+                                    {
+                                        found = true;
+                                        break;
+                                    }
                                 }
                                 if !found {
                                     self.errors.push(SemError{message: format!("no matching constructor for `{n}` with {} args", args.len()), span: expr.span});
                                 }
                             }
                             // type-check args against the first matching ctor
-                            if let Some((sig, _)) = cls.constructors.iter().find(|(s,_)| { let min = Self::min_args_for_sig(s); args.len() >= min && args.len() <= s.params.len() }) {
+                            if let Some((sig, _)) =
+                                cls.constructors.iter().find(|(s, _)| {
+                                    let min = Self::min_args_for_sig(s);
+                                    args.len() >= min
+                                        && args.len() <= s.params.len()
+                                })
+                            {
                                 for (i, arg) in args.iter().enumerate() {
                                     let aty = self.check_call_arg(arg);
                                     if let Some(pt) = sig.params.get(i) {
                                         if !self.ty_assignable(&aty, pt) {
                                             self.errors.push(SemError{message: format!("new {} arg {}: expected `{}`, found `{}`", n, i+1, pt, aty), span: arg.span()});
                                         }
-                                        self.check_arg_mode(arg, sig, i, n, i+1);
+                                        self.check_arg_mode(
+                                            arg,
+                                            sig,
+                                            i,
+                                            n,
+                                            i + 1,
+                                        );
                                     }
                                 }
                             } else {
-                                for a in args { let _ = self.check_call_arg(a); }
+                                for a in args {
+                                    let _ = self.check_call_arg(a);
+                                }
                             }
                         } else {
                             // No explicit ctor: check against fields (struct literal via call)
                             if let Some(sinfo) = self.structs.get(n).cloned() {
-                                if !sinfo.fields.is_empty() && args.len() == sinfo.fields.len() {
+                                if !sinfo.fields.is_empty()
+                                    && args.len() == sinfo.fields.len()
+                                {
                                     for (i, arg) in args.iter().enumerate() {
                                         let aty = self.check_call_arg(arg);
                                         let fty = &sinfo.fields[i].1;
@@ -4422,14 +6552,20 @@ impl Checker {
                                         }
                                     }
                                 } else {
-                                    for a in args { let _ = self.check_call_arg(a); }
+                                    for a in args {
+                                        let _ = self.check_call_arg(a);
+                                    }
                                 }
                             } else {
-                                for a in args { let _ = self.check_call_arg(a); }
+                                for a in args {
+                                    let _ = self.check_call_arg(a);
+                                }
                             }
                         }
                     } else if let Some(sinfo) = self.structs.get(n).cloned() {
-                        if !sinfo.fields.is_empty() && args.len() == sinfo.fields.len() {
+                        if !sinfo.fields.is_empty()
+                            && args.len() == sinfo.fields.len()
+                        {
                             for (i, arg) in args.iter().enumerate() {
                                 let aty = self.check_call_arg(arg);
                                 let fty = &sinfo.fields[i].1;
@@ -4438,13 +6574,19 @@ impl Checker {
                                 }
                             }
                         } else {
-                            for a in args { let _ = self.check_call_arg(a); }
+                            for a in args {
+                                let _ = self.check_call_arg(a);
+                            }
                         }
                     } else {
-                        for a in args { let _ = self.check_call_arg(a); }
+                        for a in args {
+                            let _ = self.check_call_arg(a);
+                        }
                     }
                 } else {
-                    for a in args { let _ = self.check_call_arg(a); }
+                    for a in args {
+                        let _ = self.check_call_arg(a);
+                    }
                 }
                 Ty::Own(Box::new(inner))
             }
@@ -4455,7 +6597,8 @@ impl Checker {
             ExprKind::Await { task, span } => {
                 if !self.in_async {
                     self.errors.push(SemError {
-                        message: "`await` requires an `async` function body".into(),
+                        message: "`await` requires an `async` function body"
+                            .into(),
                         span: *span,
                     });
                 }
@@ -4466,8 +6609,11 @@ impl Checker {
                         // error. Only `Ident` handles are tracked (complex
                         // expressions return fresh temporaries each time).
                         if let ExprKind::Ident(name) = &task.kind {
-                            let lookup = name.rsplit("::").next().unwrap_or(name);
-                            if self.is_task_pending(name) || self.is_task_pending(lookup) {
+                            let lookup =
+                                name.rsplit("::").next().unwrap_or(name);
+                            if self.is_task_pending(name)
+                                || self.is_task_pending(lookup)
+                            {
                                 self.clear_task_pending(name);
                                 self.clear_task_pending(lookup);
                             } else {
@@ -4495,7 +6641,8 @@ impl Checker {
             ExprKind::Spawn { task, span } => {
                 if !self.in_async {
                     self.errors.push(SemError {
-                        message: "`spawn` requires an `async` function body".into(),
+                        message: "`spawn` requires an `async` function body"
+                            .into(),
                         span: *span,
                     });
                 } else if self.scope_depth == 0 {
@@ -4518,7 +6665,8 @@ impl Checker {
                 }
             }
             ExprKind::Tuple(exprs) => {
-                let tys: Vec<Ty> = exprs.iter().map(|e| self.check_expr(e)).collect();
+                let tys: Vec<Ty> =
+                    exprs.iter().map(|e| self.check_expr(e)).collect();
                 Ty::Tuple(tys)
             }
             ExprKind::ArrayLit(elems) => {
@@ -4526,7 +6674,10 @@ impl Checker {
                 // every element must be assignable to it (types skill §8:
                 // all initializer elements compatible with element type).
                 if elems.is_empty() {
-                    Ty::FixedArray { elem: Box::new(Ty::Any), size: Some(0) }
+                    Ty::FixedArray {
+                        elem: Box::new(Ty::Any),
+                        size: Some(0),
+                    }
                 } else {
                     let first = self.check_expr(&elems[0]);
                     for e in elems.iter().skip(1) {
@@ -4540,7 +6691,10 @@ impl Checker {
                             });
                         }
                     }
-                    Ty::FixedArray { elem: Box::new(first), size: Some(elems.len()) }
+                    Ty::FixedArray {
+                        elem: Box::new(first),
+                        size: Some(elems.len()),
+                    }
                 }
             }
             ExprKind::VecEmpty(_) => {
@@ -4560,13 +6714,22 @@ impl Checker {
             }
             ExprKind::Closure { params, body, .. } => {
                 self.push_scope();
-                for p in params { let ty = self.resolve_type(&p.ty); self.declare_var(&p.name, ty, p.name_span); }
+                for p in params {
+                    let ty = self.resolve_type(&p.ty);
+                    self.declare_var(&p.name, ty, p.name_span);
+                }
                 let ret_ty = match body.as_ref() {
                     crate::ast::ClosureBody::Expr(e) => self.check_expr(e),
-                    crate::ast::ClosureBody::Block(b) => { let _ = self.check_block(b, &Ty::Void); Ty::Void },
+                    crate::ast::ClosureBody::Block(b) => {
+                        let _ = self.check_block(b, &Ty::Void);
+                        Ty::Void
+                    }
                 };
                 self.pop_scope();
-                Ty::Function(Box::new(ret_ty), params.iter().map(|p| self.resolve_type(&p.ty)).collect())
+                Ty::Function(
+                    Box::new(ret_ty),
+                    params.iter().map(|p| self.resolve_type(&p.ty)).collect(),
+                )
             }
             ExprKind::Paren(inner) => self.check_expr(inner),
         }
@@ -4618,7 +6781,10 @@ impl Checker {
     /// win; otherwise the callee's declared parameter type (or `any` when
     /// unknown). Existing variables are reused untouched.
     fn declare_out_arg(&mut self, arg: &CallArg, expected: Option<&Ty>) {
-        let CallArg::Out { name, ty: opt_ty, .. } = arg else {
+        let CallArg::Out {
+            name, ty: opt_ty, ..
+        } = arg
+        else {
             return;
         };
         if self.lookup_var(name).is_some() {
@@ -4637,7 +6803,12 @@ impl Checker {
         match arg {
             CallArg::Expr(e) => self.check_expr(e),
             CallArg::Named { value, .. } => self.check_expr(value),
-            CallArg::Out { name, name_span, ty: opt_ty, .. } => {
+            CallArg::Out {
+                name,
+                name_span,
+                ty: opt_ty,
+                ..
+            } => {
                 if let Some(var_ty) = self.lookup_var(name) {
                     if let Some(t) = opt_ty {
                         let declared = self.resolve_type(t);
@@ -4659,8 +6830,14 @@ impl Checker {
             CallArg::Ref { expr, .. } => {
                 let ty = self.check_expr(expr);
                 match &expr.kind {
-                    ExprKind::Ident(_) | ExprKind::MemberAccess { .. } | ExprKind::Index { .. } | ExprKind::Paren(_) => {},
-                    _ => self.errors.push(SemError { message: "ref argument must be lvalue".into(), span: expr.span }),
+                    ExprKind::Ident(_)
+                    | ExprKind::MemberAccess { .. }
+                    | ExprKind::Index { .. }
+                    | ExprKind::Paren(_) => {}
+                    _ => self.errors.push(SemError {
+                        message: "ref argument must be lvalue".into(),
+                        span: expr.span,
+                    }),
                 }
                 ty
             }
@@ -4674,8 +6851,8 @@ impl Checker {
     ///
     /// Supported methods:
     /// - vectors: `len`, `is_empty`, `pop`, `clear`, `contains`, `first`,
-    ///   `last` (`push` is handled separately for type establishment);
-    /// - arrays: `len`, `is_empty`, `contains`, `first`, `last`;
+    ///   `last`, `at_or` (`push` is handled separately for type establishment);
+    /// - arrays: `len`, `is_empty`, `contains`, `first`, `last`, `at_or`;
     /// - maps: `len`, `is_empty`, `contains`, `remove`, `clear`, `get_or`
     ///   (`get` is a reserved property keyword);
     /// - strings: `len`, `is_empty`.
@@ -4693,9 +6870,18 @@ impl Checker {
             Str,
         }
         let family = match obj_ty {
-            Ty::Vec(elem) => Family::Seq { elem, dynamic: true },
-            Ty::Array(elem) => Family::Seq { elem, dynamic: false },
-            Ty::FixedArray { elem, .. } => Family::Seq { elem, dynamic: false },
+            Ty::Vec(elem) => Family::Seq {
+                elem,
+                dynamic: true,
+            },
+            Ty::Array(elem) => Family::Seq {
+                elem,
+                dynamic: false,
+            },
+            Ty::FixedArray { elem, .. } => Family::Seq {
+                elem,
+                dynamic: false,
+            },
             Ty::Map { key, value } => Family::Map { key, value },
             Ty::String => Family::Str,
             _ => return None,
@@ -4721,20 +6907,25 @@ impl Checker {
             true
         };
         let arity_ok = match method {
-            "len" | "is_empty" | "pop" | "clear" | "first" | "last" => expect_arity(0),
+            "len" | "is_empty" | "pop" | "clear" | "first" | "last" => {
+                expect_arity(0)
+            }
             "contains" | "remove" => expect_arity(1),
-            "get_or" => expect_arity(2),
+            "get_or" | "at_or" => expect_arity(2),
             _ => true,
         };
         if !arity_ok {
             let want = match method {
                 "len" | "is_empty" | "pop" | "clear" | "first" | "last" => 0,
                 "contains" | "remove" => 1,
-                "get_or" => 2,
+                "get_or" | "at_or" => 2,
                 _ => 0,
             };
             self.errors.push(SemError {
-                message: format!("`{method}` expects {want} arg(s), found {}", args.len()),
+                message: format!(
+                    "`{method}` expects {want} arg(s), found {}",
+                    args.len()
+                ),
                 span: *method_span,
             });
             for a in args {
@@ -4765,7 +6956,10 @@ impl Checker {
                 let aty = self.check_call_arg(&args[0]);
                 if !Ty::assignable(&aty, elem) {
                     self.errors.push(SemError {
-                        message: format!("`contains` expects `{}`, found `{}`", elem, aty),
+                        message: format!(
+                            "`contains` expects `{}`, found `{}`",
+                            elem, aty
+                        ),
                         span: args[0].span(),
                     });
                 }
@@ -4775,20 +6969,48 @@ impl Checker {
                 let aty = self.check_call_arg(&args[0]);
                 if !Ty::assignable(&aty, key) {
                     self.errors.push(SemError {
-                        message: format!("`contains` expects key `{}`, found `{}`", key, aty),
+                        message: format!(
+                            "`contains` expects key `{}`, found `{}`",
+                            key, aty
+                        ),
                         span: args[0].span(),
                     });
                 }
                 Some(Ty::Bool)
             }
-            (Family::Seq { elem, .. }, "first") | (Family::Seq { elem, .. }, "last") => {
+            (Family::Seq { elem, .. }, "first")
+            | (Family::Seq { elem, .. }, "last") => Some(elem.clone()),
+            (Family::Seq { elem, .. }, "at_or") => {
+                let index_ty = self.check_call_arg(&args[0]);
+                if !Ty::assignable(&index_ty, &Ty::Int) {
+                    self.errors.push(SemError {
+                        message: format!(
+                            "`at_or` expects an int index, found `{}`",
+                            index_ty
+                        ),
+                        span: args[0].span(),
+                    });
+                }
+                let fallback_ty = self.check_call_arg(&args[1]);
+                if !Ty::assignable(&fallback_ty, elem) {
+                    self.errors.push(SemError {
+                        message: format!(
+                            "`at_or` expects fallback `{}`, found `{}`",
+                            elem, fallback_ty
+                        ),
+                        span: args[1].span(),
+                    });
+                }
                 Some(elem.clone())
             }
             (Family::Map { key, .. }, "remove") => {
                 let aty = self.check_call_arg(&args[0]);
                 if !Ty::assignable(&aty, key) {
                     self.errors.push(SemError {
-                        message: format!("`remove` expects key `{}`, found `{}`", key, aty),
+                        message: format!(
+                            "`remove` expects key `{}`, found `{}`",
+                            key, aty
+                        ),
                         span: args[0].span(),
                     });
                 }
@@ -4798,14 +7020,20 @@ impl Checker {
                 let kty = self.check_call_arg(&args[0]);
                 if !Ty::assignable(&kty, key) {
                     self.errors.push(SemError {
-                        message: format!("`get_or` expects key `{}`, found `{}`", key, kty),
+                        message: format!(
+                            "`get_or` expects key `{}`, found `{}`",
+                            key, kty
+                        ),
                         span: args[0].span(),
                     });
                 }
                 let dty = self.check_call_arg(&args[1]);
                 if !Ty::assignable(&dty, value) {
                     self.errors.push(SemError {
-                        message: format!("`get_or` expects default `{}`, found `{}`", value, dty),
+                        message: format!(
+                            "`get_or` expects default `{}`, found `{}`",
+                            value, dty
+                        ),
                         span: args[1].span(),
                     });
                 }
@@ -4816,7 +7044,9 @@ impl Checker {
             | (Family::Seq { dynamic: false, .. }, "remove")
             | (Family::Seq { dynamic: false, .. }, "get_or") => {
                 self.errors.push(SemError {
-                    message: format!("`{method}` is not available on fixed arrays"),
+                    message: format!(
+                        "`{method}` is not available on fixed arrays"
+                    ),
                     span: *method_span,
                 });
                 for a in args {
@@ -4824,11 +7054,19 @@ impl Checker {
                 }
                 Some(Ty::Int)
             }
-            (Family::Seq { .. }, _) | (Family::Map { .. }, _) | (Family::Str, _) => {
+            (Family::Seq { .. }, _)
+            | (Family::Map { .. }, _)
+            | (Family::Str, _) => {
                 let supported = match obj_ty {
-                    Ty::Vec(_) => "`len`, `is_empty`, `push`, `pop`, `clear`, `contains`, `first`, `last`",
-                    Ty::Array(_) | Ty::FixedArray { .. } => "`len`, `is_empty`, `contains`, `first`, `last`",
-                    Ty::Map { .. } => "`len`, `is_empty`, `contains`, `remove`, `clear`, `get_or`",
+                    Ty::Vec(_) => {
+                        "`len`, `is_empty`, `push`, `pop`, `clear`, `contains`, `first`, `last`, `at_or`"
+                    }
+                    Ty::Array(_) | Ty::FixedArray { .. } => {
+                        "`len`, `is_empty`, `contains`, `first`, `last`, `at_or`"
+                    }
+                    Ty::Map { .. } => {
+                        "`len`, `is_empty`, `contains`, `remove`, `clear`, `get_or`"
+                    }
                     Ty::String => "`len`, `is_empty`",
                     _ => "",
                 };
@@ -4844,19 +7082,35 @@ impl Checker {
         }
     }
 
-    fn check_call_with_sig(&mut self, args: &[CallArg], sig: &FuncSig, callee_span: Span, callee: &str) {
+    fn check_call_with_sig(
+        &mut self,
+        args: &[CallArg],
+        sig: &FuncSig,
+        callee_span: Span,
+        callee: &str,
+    ) {
         let variadic_idx = sig.param_is_variadic.iter().position(|&v| v);
         if let Some(vidx) = variadic_idx {
             // Variadic `...T vda` where `vda` is `T[]`, or `...` alone for C varargs
             let fixed = vidx; // number of fixed params before variadic
             if args.len() < fixed {
-                self.errors.push(SemError { message: format!("`{}` expects at least {} args, found {}", callee, fixed, args.len()), span: callee_span });
+                self.errors.push(SemError {
+                    message: format!(
+                        "`{}` expects at least {} args, found {}",
+                        callee,
+                        fixed,
+                        args.len()
+                    ),
+                    span: callee_span,
+                });
             }
             // Check fixed params
             for (i, arg) in args.iter().take(fixed).enumerate() {
                 let pidx = if let CallArg::Named { name, .. } = arg {
                     sig.param_names.iter().position(|n| n == name).unwrap_or(i)
-                } else { i };
+                } else {
+                    i
+                };
                 self.declare_out_arg(arg, sig.params.get(pidx));
                 let aty = self.check_call_arg(arg);
                 if let Some(param_ty) = sig.params.get(pidx) {
@@ -4879,17 +7133,23 @@ impl Checker {
                 } else {
                     args.len() - sig.params.len() + 1
                 };
-                for (i, arg) in args.iter().skip(fixed).take(vda_count).enumerate() {
+                for (i, arg) in
+                    args.iter().skip(fixed).take(vda_count).enumerate()
+                {
                     self.declare_out_arg(arg, Some(elem_ty));
                     let aty = self.check_call_arg(arg);
                     let is_generic_elem = matches!(elem_ty, Ty::Generic(n, _) if n.len() == 1 && n.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false));
                     let is_any_elem = *elem_ty == Ty::Any;
-                    if !Ty::assignable(&aty, elem_ty) && !is_generic_elem && !is_any_elem {
+                    if !Ty::assignable(&aty, elem_ty)
+                        && !is_generic_elem
+                        && !is_any_elem
+                    {
                         self.errors.push(SemError { message: format!("variadic argument {} of `{}`: expected `{}`, found `{}`", fixed + i + 1, callee, elem_ty, aty), span: arg.span() });
                     }
                 }
                 // Check remaining fixed params after variadic
-                for (j, arg) in args.iter().skip(fixed + vda_count).enumerate() {
+                for (j, arg) in args.iter().skip(fixed + vda_count).enumerate()
+                {
                     let pidx = vidx + 1 + j;
                     self.declare_out_arg(arg, sig.params.get(pidx));
                     if let Some(param_ty) = sig.params.get(pidx) {
@@ -4901,7 +7161,13 @@ impl Checker {
                             }
                         }
                     }
-                    self.check_arg_mode(arg, &sig, pidx, callee, fixed + vda_count + j + 1);
+                    self.check_arg_mode(
+                        arg,
+                        &sig,
+                        pidx,
+                        callee,
+                        fixed + vda_count + j + 1,
+                    );
                 }
             }
             // Also check where bounds for variadic generic
@@ -4915,15 +7181,35 @@ impl Checker {
         let min_required = Self::min_args_for_sig(sig);
         if args.len() < min_required || args.len() > sig.params.len() {
             if min_required == sig.params.len() {
-                self.errors.push(SemError { message: format!("`{}` expects {} args, found {}", callee, sig.params.len(), args.len()), span: callee_span });
+                self.errors.push(SemError {
+                    message: format!(
+                        "`{}` expects {} args, found {}",
+                        callee,
+                        sig.params.len(),
+                        args.len()
+                    ),
+                    span: callee_span,
+                });
             } else {
-                self.errors.push(SemError { message: format!("`{}` expects {}-{} args, found {}", callee, min_required, sig.params.len(), args.len()), span: callee_span });
+                self.errors.push(SemError {
+                    message: format!(
+                        "`{}` expects {}-{} args, found {}",
+                        callee,
+                        min_required,
+                        sig.params.len(),
+                        args.len()
+                    ),
+                    span: callee_span,
+                });
             }
         }
-        let has_named = args.iter().any(|a| matches!(a, CallArg::Named{..}));
+        let has_named = args.iter().any(|a| matches!(a, CallArg::Named { .. }));
         if has_named {
             // Build param name -> index map
-            let mut param_name_to_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let mut param_name_to_idx: std::collections::HashMap<
+                String,
+                usize,
+            > = std::collections::HashMap::new();
             for (idx, pname) in sig.param_names.iter().enumerate() {
                 param_name_to_idx.insert(pname.clone(), idx);
             }
@@ -4932,7 +7218,13 @@ impl Checker {
                 if let CallArg::Named { name, .. } = arg {
                     if let Some(&pidx) = param_name_to_idx.get(name) {
                         if !seen.insert(pidx) {
-                            self.errors.push(SemError { message: format!("duplicate named argument `{}` for `{}`", name, callee), span: arg.span() });
+                            self.errors.push(SemError {
+                                message: format!(
+                                    "duplicate named argument `{}` for `{}`",
+                                    name, callee
+                                ),
+                                span: arg.span(),
+                            });
                         }
                         let aty = self.check_call_arg(arg);
                         let expected = &sig.params[pidx];
@@ -4940,19 +7232,32 @@ impl Checker {
                             self.errors.push(SemError { message: format!("named argument `{}` of `{}`: expected `{}`, found `{}`", name, callee, expected, aty), span: arg.span() });
                         }
                         if let Some(mode) = sig.param_modes.get(pidx) {
-                            let is_out = matches!(arg, CallArg::Out{..});
-                            let is_ref = matches!(arg, CallArg::Ref{..});
+                            let is_out = matches!(arg, CallArg::Out { .. });
+                            let is_ref = matches!(arg, CallArg::Ref { .. });
                             match mode {
-                                ParamMode::Out if !matches!(arg, CallArg::Out{..}) && !matches!(arg, CallArg::Named{..}) => {},
+                                ParamMode::Out
+                                    if !matches!(arg, CallArg::Out { .. })
+                                        && !matches!(
+                                            arg,
+                                            CallArg::Named { .. }
+                                        ) => {}
                                 _ => {}
                             }
                             // For Named, mode check still relevant if Named was used for out/ref param? But Named is by-value, so if param is Out/Ref, Named should be error
-                            if *mode == ParamMode::Out || *mode == ParamMode::Ref {
+                            if *mode == ParamMode::Out
+                                || *mode == ParamMode::Ref
+                            {
                                 self.errors.push(SemError { message: format!("named argument `{}` of `{}` corresponds to `out`/`ref` param, use `out`/`ref` syntax", name, callee), span: arg.span() });
                             }
                         }
                     } else {
-                        self.errors.push(SemError { message: format!("unknown named argument `{}` for `{}`", name, callee), span: arg.span() });
+                        self.errors.push(SemError {
+                            message: format!(
+                                "unknown named argument `{}` for `{}`",
+                                name, callee
+                            ),
+                            span: arg.span(),
+                        });
                         let _ = self.check_call_arg(arg);
                     }
                 } else {
@@ -4961,13 +7266,27 @@ impl Checker {
                 }
             }
             // Missing arguments must have defaults (filled at codegen).
-            let n_positional = args.iter().filter(|a| !matches!(a, CallArg::Named{..})).count();
+            let n_positional = args
+                .iter()
+                .filter(|a| !matches!(a, CallArg::Named { .. }))
+                .count();
             for (pidx, pname) in sig.param_names.iter().enumerate() {
                 if pidx < n_positional || seen.contains(&pidx) {
                     continue;
                 }
-                if sig.param_defaults.get(pidx).and_then(|d| d.as_ref()).is_none() {
-                    self.errors.push(SemError { message: format!("missing argument `{}` for `{}` (no default value)", pname, callee), span: callee_span });
+                if sig
+                    .param_defaults
+                    .get(pidx)
+                    .and_then(|d| d.as_ref())
+                    .is_none()
+                {
+                    self.errors.push(SemError {
+                        message: format!(
+                            "missing argument `{}` for `{}` (no default value)",
+                            pname, callee
+                        ),
+                        span: callee_span,
+                    });
                 }
             }
             // Also check positional args that are not named: they must match remaining params
@@ -4978,12 +7297,21 @@ impl Checker {
             let aty = self.check_call_arg(arg);
             if let Some(param_ty) = sig.params.get(i) {
                 if !self.ty_assignable(&aty, param_ty) {
-                    self.errors.push(SemError { message: format!("argument {} of `{}`: expected `{}`, found `{}`", i + 1, callee, param_ty, aty), span: arg.span() });
+                    self.errors.push(SemError {
+                        message: format!(
+                            "argument {} of `{}`: expected `{}`, found `{}`",
+                            i + 1,
+                            callee,
+                            param_ty,
+                            aty
+                        ),
+                        span: arg.span(),
+                    });
                 }
             }
             if let Some(mode) = sig.param_modes.get(i) {
-                let is_out = matches!(arg, CallArg::Out{..});
-                let is_ref = matches!(arg, CallArg::Ref{..});
+                let is_out = matches!(arg, CallArg::Out { .. });
+                let is_ref = matches!(arg, CallArg::Ref { .. });
                 match mode {
                     ParamMode::Out if !is_out => self.errors.push(SemError { message: format!("argument {} of `{}` is `out` param but call uses non-out", i+1, callee), span: arg.span() }),
                     ParamMode::Ref if !is_ref => self.errors.push(SemError { message: format!("argument {} of `{}` is `ref` param but call uses non-ref", i+1, callee), span: arg.span() }),
@@ -5001,7 +7329,10 @@ impl Checker {
                 if args.is_empty() {
                     map[n].clone()
                 } else {
-                    let subst_args: Vec<Ty> = args.iter().map(|a| Self::subst_generic_ty(a, map)).collect();
+                    let subst_args: Vec<Ty> = args
+                        .iter()
+                        .map(|a| Self::subst_generic_ty(a, map))
+                        .collect();
                     // if the mapped ty is generic container, keep args? For MVP just return mapped
                     if map[n] != Ty::Generic(n.clone(), vec![]) {
                         map[n].clone()
@@ -5012,18 +7343,40 @@ impl Checker {
             }
             Ty::Struct(n) if map.contains_key(n) => map[n].clone(),
             Ty::Generic(n, args) => {
-                let na: Vec<Ty> = args.iter().map(|a| Self::subst_generic_ty(a, map)).collect();
+                let na: Vec<Ty> = args
+                    .iter()
+                    .map(|a| Self::subst_generic_ty(a, map))
+                    .collect();
                 Ty::Generic(n.clone(), na)
             }
-            Ty::Array(el) => Ty::Array(Box::new(Self::subst_generic_ty(el, map))),
-            Ty::FixedArray { elem, size } => Ty::FixedArray { elem: Box::new(Self::subst_generic_ty(elem, map)), size: *size },
+            Ty::Array(el) => {
+                Ty::Array(Box::new(Self::subst_generic_ty(el, map)))
+            }
+            Ty::FixedArray { elem, size } => Ty::FixedArray {
+                elem: Box::new(Self::subst_generic_ty(elem, map)),
+                size: *size,
+            },
             Ty::Vec(el) => Ty::Vec(Box::new(Self::subst_generic_ty(el, map))),
-            Ty::Map { key, value } => Ty::Map { key: Box::new(Self::subst_generic_ty(key, map)), value: Box::new(Self::subst_generic_ty(value, map)) },
-            Ty::Pointer(el) => Ty::Pointer(Box::new(Self::subst_generic_ty(el, map))),
-            Ty::Optional(el) => Ty::Optional(Box::new(Self::subst_generic_ty(el, map))),
+            Ty::Map { key, value } => Ty::Map {
+                key: Box::new(Self::subst_generic_ty(key, map)),
+                value: Box::new(Self::subst_generic_ty(value, map)),
+            },
+            Ty::Pointer(el) => {
+                Ty::Pointer(Box::new(Self::subst_generic_ty(el, map)))
+            }
+            Ty::Optional(el) => {
+                Ty::Optional(Box::new(Self::subst_generic_ty(el, map)))
+            }
             Ty::Own(el) => Ty::Own(Box::new(Self::subst_generic_ty(el, map))),
-            Ty::Tuple(tys) => Ty::Tuple(tys.iter().map(|t| Self::subst_generic_ty(t, map)).collect()),
-            Ty::Function(ret, args) => Ty::Function(Box::new(Self::subst_generic_ty(ret, map)), args.iter().map(|a| Self::subst_generic_ty(a, map)).collect()),
+            Ty::Tuple(tys) => Ty::Tuple(
+                tys.iter().map(|t| Self::subst_generic_ty(t, map)).collect(),
+            ),
+            Ty::Function(ret, args) => Ty::Function(
+                Box::new(Self::subst_generic_ty(ret, map)),
+                args.iter()
+                    .map(|a| Self::subst_generic_ty(a, map))
+                    .collect(),
+            ),
             other => other.clone(),
         }
     }
@@ -5039,7 +7392,15 @@ impl Checker {
                     map.insert(name.clone(), actual.clone());
                 }
             }
-            Ty::Struct(name) if map.contains_key(name) || (name.len()==1 && name.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)) => {
+            Ty::Struct(name)
+                if map.contains_key(name)
+                    || (name.len() == 1
+                        && name
+                            .chars()
+                            .next()
+                            .map(|c| c.is_ascii_uppercase())
+                            .unwrap_or(false)) =>
+            {
                 // Single-letter struct used as generic param (fallback)
                 if !map.contains_key(name) {
                     map.insert(name.clone(), actual.clone());
@@ -5054,35 +7415,53 @@ impl Checker {
                     }
                 }
             }
-            Ty::Array(pe) => {
-                match actual {
-                    Ty::Array(ae) | Ty::Vec(ae) | Ty::FixedArray { elem: ae, .. } => Self::unify_generic(pe, ae, map),
-                    _ => {}
+            Ty::Array(pe) => match actual {
+                Ty::Array(ae)
+                | Ty::Vec(ae)
+                | Ty::FixedArray { elem: ae, .. } => {
+                    Self::unify_generic(pe, ae, map)
                 }
-            }
-            Ty::FixedArray { elem: pe, .. } => {
-                match actual {
-                    Ty::Array(ae) | Ty::Vec(ae) | Ty::FixedArray { elem: ae, .. } => Self::unify_generic(pe, ae, map),
-                    _ => {}
+                _ => {}
+            },
+            Ty::FixedArray { elem: pe, .. } => match actual {
+                Ty::Array(ae)
+                | Ty::Vec(ae)
+                | Ty::FixedArray { elem: ae, .. } => {
+                    Self::unify_generic(pe, ae, map)
                 }
-            }
+                _ => {}
+            },
             Ty::Vec(pe) => {
-                if let Ty::Vec(ae) | Ty::Array(ae) | Ty::FixedArray { elem: ae, .. } = actual {
+                if let Ty::Vec(ae)
+                | Ty::Array(ae)
+                | Ty::FixedArray { elem: ae, .. } = actual
+                {
                     Self::unify_generic(pe, ae, map);
                 }
             }
-            Ty::Pointer(pe) => if let Ty::Pointer(ae) = actual { Self::unify_generic(pe, ae, map); },
-            Ty::Optional(pe) => if let Ty::Optional(ae) = actual { Self::unify_generic(pe, ae, map); },
+            Ty::Pointer(pe) => {
+                if let Ty::Pointer(ae) = actual {
+                    Self::unify_generic(pe, ae, map);
+                }
+            }
+            Ty::Optional(pe) => {
+                if let Ty::Optional(ae) = actual {
+                    Self::unify_generic(pe, ae, map);
+                }
+            }
             _ => {}
         }
     }
 
     fn ty_to_type(ty: &Ty) -> Type {
-        let sp = Span::new(0,0);
+        let sp = Span::new(0, 0);
         match ty {
             Ty::Int => Type::Int(sp),
             Ty::UInt => Type::Named("uint".into(), sp),
-            Ty::SizedInt { bits, signed } => { let n = format!("{}{}", if *signed {"i"} else {"u"}, bits); Type::Named(n, sp) },
+            Ty::SizedInt { bits, signed } => {
+                let n = format!("{}{}", if *signed { "i" } else { "u" }, bits);
+                Type::Named(n, sp)
+            }
             Ty::Bool => Type::Bool(sp),
             Ty::Void => Type::Void(sp),
             Ty::Char => Type::Char(sp),
@@ -5091,17 +7470,43 @@ impl Checker {
             Ty::Double => Type::Double(sp),
             Ty::Any => Type::Any(sp),
             Ty::Struct(n) | Ty::Enum(n) => Type::Named(n.clone(), sp),
-            Ty::Generic(n, args) => Type::Generic(n.clone(), args.iter().map(|a| Self::ty_to_type(a)).collect(), sp),
+            Ty::Generic(n, args) => Type::Generic(
+                n.clone(),
+                args.iter().map(|a| Self::ty_to_type(a)).collect(),
+                sp,
+            ),
             Ty::Array(el) => Type::Array(Box::new(Self::ty_to_type(el)), sp),
-            Ty::FixedArray { elem, size } => Type::FixedArray { elem: Box::new(Self::ty_to_type(elem)), size: size.map(|v| v as u64), span: sp },
-            Ty::Vec(elem) => Type::Vec { elem: Box::new(Self::ty_to_type(elem)), span: sp },
-            Ty::Map { key, value } => Type::Map { key: Box::new(Self::ty_to_type(key)), value: Box::new(Self::ty_to_type(value)), span: sp },
-            Ty::Pointer(el) => Type::Pointer(Box::new(Self::ty_to_type(el)), sp),
-            Ty::Optional(el) => Type::Optional(Box::new(Self::ty_to_type(el)), sp),
+            Ty::FixedArray { elem, size } => Type::FixedArray {
+                elem: Box::new(Self::ty_to_type(elem)),
+                size: size.map(|v| v as u64),
+                span: sp,
+            },
+            Ty::Vec(elem) => Type::Vec {
+                elem: Box::new(Self::ty_to_type(elem)),
+                span: sp,
+            },
+            Ty::Map { key, value } => Type::Map {
+                key: Box::new(Self::ty_to_type(key)),
+                value: Box::new(Self::ty_to_type(value)),
+                span: sp,
+            },
+            Ty::Pointer(el) => {
+                Type::Pointer(Box::new(Self::ty_to_type(el)), sp)
+            }
+            Ty::Optional(el) => {
+                Type::Optional(Box::new(Self::ty_to_type(el)), sp)
+            }
             Ty::Own(el) => Type::Own(Box::new(Self::ty_to_type(el)), sp),
             Ty::Task(el) => Type::Task(Box::new(Self::ty_to_type(el)), sp),
-            Ty::Tuple(tys) => Type::Tuple(tys.iter().map(|t| Self::ty_to_type(t)).collect(), sp),
-            Ty::Function(ret, args) => Type::FunctionType(Box::new(Self::ty_to_type(ret)), args.iter().map(|a| Self::ty_to_type(a)).collect(), sp),
+            Ty::Tuple(tys) => Type::Tuple(
+                tys.iter().map(|t| Self::ty_to_type(t)).collect(),
+                sp,
+            ),
+            Ty::Function(ret, args) => Type::FunctionType(
+                Box::new(Self::ty_to_type(ret)),
+                args.iter().map(|a| Self::ty_to_type(a)).collect(),
+                sp,
+            ),
         }
     }
 
@@ -5109,24 +7514,60 @@ impl Checker {
     /// (`Box<int>` in any type position, `implements Comparable<T>`).
     /// Unknown bases are reported by `resolve_type`; non-generic bases given
     /// arguments are an error here.
-    fn check_type_application(&mut self, base: &str, args: &[Type], span: Span) {
+    fn check_type_application(
+        &mut self,
+        base: &str,
+        args: &[Type],
+        span: Span,
+    ) {
         let lookup = base.rsplit("::").next().unwrap_or(base);
         // Classes mirror into the structs map; prefer the class entry so
         // class bounds apply (struct and class entries agree otherwise).
         if let Some(cinfo) = self.classes.get(lookup).cloned() {
-            self.check_type_args(&cinfo.generic_params, &cinfo.where_clause, lookup, args, span);
+            self.check_type_args(
+                &cinfo.generic_params,
+                &cinfo.where_clause,
+                lookup,
+                args,
+                span,
+            );
         } else if let Some(sinfo) = self.structs.get(lookup).cloned() {
-            self.check_type_args(&sinfo.generic_params, &sinfo.where_clause, lookup, args, span);
+            self.check_type_args(
+                &sinfo.generic_params,
+                &sinfo.where_clause,
+                lookup,
+                args,
+                span,
+            );
         } else if let Some(einfo) = self.enums.get(lookup).cloned() {
-            self.check_type_args(&einfo.generic_params, &einfo.where_clause, lookup, args, span);
+            self.check_type_args(
+                &einfo.generic_params,
+                &einfo.where_clause,
+                lookup,
+                args,
+                span,
+            );
         } else if let Some(tinfo) = self.traits.get(lookup).cloned() {
-            self.check_type_args(&tinfo.generic_params, &tinfo.where_clause, lookup, args, span);
+            self.check_type_args(
+                &tinfo.generic_params,
+                &tinfo.where_clause,
+                lookup,
+                args,
+                span,
+            );
         }
     }
 
     /// Bounds check for one instantiation; type-flavored arity message when
     /// the base declares no generics at all.
-    fn check_type_args(&mut self, generic_params: &[GenericParam], where_clause: &Option<WhereClause>, base: &str, args: &[Type], span: Span) {
+    fn check_type_args(
+        &mut self,
+        generic_params: &[GenericParam],
+        where_clause: &Option<WhereClause>,
+        base: &str,
+        args: &[Type],
+        span: Span,
+    ) {
         if generic_params.is_empty() && where_clause.is_none() {
             if !args.is_empty() {
                 self.errors.push(SemError { message: format!("type `{base}` is not generic but {} type argument(s) provided", args.len()), span });
@@ -5140,16 +7581,32 @@ impl Checker {
     /// the declaration's generic parameters (no type resolution, so no
     /// forward-declaration hazard; bound existence is enforced at
     /// instantiation sites, which run after all declarations are collected).
-    fn check_where_clause_def(&mut self, kind: &str, name: &str, generic_params: &[GenericParam], where_clause: &Option<WhereClause>, span: Span) {
+    fn check_where_clause_def(
+        &mut self,
+        kind: &str,
+        name: &str,
+        generic_params: &[GenericParam],
+        where_clause: &Option<WhereClause>,
+        span: Span,
+    ) {
         let Some(wc) = where_clause else { return };
         if generic_params.is_empty() {
-            self.errors.push(SemError { message: format!("`where` clause on non-generic {kind} `{name}`"), span });
+            self.errors.push(SemError {
+                message: format!(
+                    "`where` clause on non-generic {kind} `{name}`"
+                ),
+                span,
+            });
             return;
         }
         for constr in &wc.constraints {
             let subj = match &constr.ty {
-                Type::Named(n, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
-                Type::Generic(n, _, _) => n.rsplit("::").next().unwrap_or(n).to_string(),
+                Type::Named(n, _) => {
+                    n.rsplit("::").next().unwrap_or(n).to_string()
+                }
+                Type::Generic(n, _, _) => {
+                    n.rsplit("::").next().unwrap_or(n).to_string()
+                }
                 other => other.name(),
             };
             if !generic_params.iter().any(|gp| gp.name == subj) {
@@ -5163,7 +7620,12 @@ impl Checker {
     /// positional omission always drops the tail. Conservative when the
     /// defaults vector is short (missing entries count as required).
     fn min_args_for_sig(sig: &FuncSig) -> usize {
-        let trailing = sig.param_defaults.iter().rev().take_while(|d| d.is_some()).count();
+        let trailing = sig
+            .param_defaults
+            .iter()
+            .rev()
+            .take_while(|d| d.is_some())
+            .count();
         sig.params.len().saturating_sub(trailing)
     }
 
@@ -5176,7 +7638,13 @@ impl Checker {
         let mut seen_default = false;
         for (p, ty) in params.iter().zip(resolved.iter()) {
             if p.default.is_some() && p.is_variadic {
-                self.errors.push(SemError { message: format!("variadic parameter `{}` cannot have a default value", p.name), span: p.name_span });
+                self.errors.push(SemError {
+                    message: format!(
+                        "variadic parameter `{}` cannot have a default value",
+                        p.name
+                    ),
+                    span: p.name_span,
+                });
                 continue;
             }
             if p.default.is_some() && p.mode != ParamMode::None {
@@ -5189,7 +7657,13 @@ impl Checker {
                 let dt = self.check_expr(d);
                 self.pop_scope();
                 if !self.ty_assignable(&dt, ty) {
-                    self.errors.push(SemError { message: format!("default for `{}`: expected `{}`, found `{}`", p.name, ty, dt), span: d.span });
+                    self.errors.push(SemError {
+                        message: format!(
+                            "default for `{}`: expected `{}`, found `{}`",
+                            p.name, ty, dt
+                        ),
+                        span: d.span,
+                    });
                 }
             } else if seen_default && !p.is_variadic {
                 self.errors.push(SemError { message: format!("parameter `{}` without default follows a defaulted parameter", p.name), span: p.name_span });
@@ -5197,7 +7671,13 @@ impl Checker {
         }
     }
 
-    fn check_generic_bounds(&mut self, generic_params: &[GenericParam], where_clause: &Option<WhereClause>, type_args: &[Type], span: Span) {
+    fn check_generic_bounds(
+        &mut self,
+        generic_params: &[GenericParam],
+        where_clause: &Option<WhereClause>,
+        type_args: &[Type],
+        span: Span,
+    ) {
         if generic_params.is_empty() && where_clause.is_none() {
             if !type_args.is_empty() {
                 self.errors.push(SemError { message: format!("function is not generic but {} type arguments provided", type_args.len()), span });
@@ -5206,35 +7686,66 @@ impl Checker {
         }
         if generic_params.len() != type_args.len() {
             if !type_args.is_empty() {
-                self.errors.push(SemError { message: format!("generic arg count mismatch: expected {}, found {}", generic_params.len(), type_args.len()), span });
+                self.errors.push(SemError {
+                    message: format!(
+                        "generic arg count mismatch: expected {}, found {}",
+                        generic_params.len(),
+                        type_args.len()
+                    ),
+                    span,
+                });
             }
             return;
         }
-        let mut subst: std::collections::HashMap<String, Ty> = std::collections::HashMap::new();
+        let mut subst: std::collections::HashMap<String, Ty> =
+            std::collections::HashMap::new();
         for (gp, ta) in generic_params.iter().zip(type_args.iter()) {
             let concrete = self.resolve_type(ta);
             subst.insert(gp.name.clone(), concrete.clone());
             for bound in &gp.bounds {
                 let bound_ty = self.resolve_type(bound);
-                if let Ty::Struct(ref trait_name) | Ty::Generic(ref trait_name, _) = bound_ty {
+                if let Ty::Struct(ref trait_name)
+                | Ty::Generic(ref trait_name, _) = bound_ty
+                {
                     let concrete_str = match &concrete {
-                        Ty::Struct(n) | Ty::Enum(n) | Ty::Generic(n, _) => n.clone(),
+                        Ty::Struct(n) | Ty::Enum(n) | Ty::Generic(n, _) => {
+                            n.clone()
+                        }
                         _ => concrete.to_string(),
                     };
                     if let Some(_trait_info) = self.traits.get(trait_name) {
-                        let implements = if let Some(cls) = self.classes.get(&concrete_str) {
+                        let implements = if let Some(cls) =
+                            self.classes.get(&concrete_str)
+                        {
                             &cls.implements
                         } else {
                             &Vec::new()
                         };
-                        if !implements.contains(trait_name) && concrete_str != *trait_name {
+                        if !implements.contains(trait_name)
+                            && concrete_str != *trait_name
+                        {
                             self.errors.push(SemError { message: format!("type `{}` does not satisfy bound `{}` for `{}`", concrete, bound_ty, gp.name), span });
                         }
-                    } else if !self.structs.contains_key(trait_name) && !self.classes.contains_key(trait_name) && !self.enums.contains_key(trait_name) {
-                        self.errors.push(SemError { message: format!("unknown bound `{}` for `{}`", bound_ty, gp.name), span });
+                    } else if !self.structs.contains_key(trait_name)
+                        && !self.classes.contains_key(trait_name)
+                        && !self.enums.contains_key(trait_name)
+                    {
+                        self.errors.push(SemError {
+                            message: format!(
+                                "unknown bound `{}` for `{}`",
+                                bound_ty, gp.name
+                            ),
+                            span,
+                        });
                     }
                 } else if bound_ty != concrete {
-                    self.errors.push(SemError { message: format!("type `{}` does not satisfy bound `{}` for `{}`", concrete, bound_ty, gp.name), span });
+                    self.errors.push(SemError {
+                        message: format!(
+                            "type `{}` does not satisfy bound `{}` for `{}`",
+                            concrete, bound_ty, gp.name
+                        ),
+                        span,
+                    });
                 }
             }
         }
@@ -5244,23 +7755,35 @@ impl Checker {
                 let subject_ty = self.resolve_type(&constr.ty);
                 // Resolve subject to concrete if it's a generic param
                 let subject_concrete = match &subject_ty {
-                    Ty::Generic(n, _) | Ty::Struct(n) if subst.contains_key(n) => subst[n].clone(),
+                    Ty::Generic(n, _) | Ty::Struct(n)
+                        if subst.contains_key(n) =>
+                    {
+                        subst[n].clone()
+                    }
                     other => other.clone(),
                 };
                 for bound in &constr.bounds {
                     let bound_ty = self.resolve_type(bound);
-                    if let Ty::Struct(ref trait_name) | Ty::Generic(ref trait_name, _) = bound_ty {
+                    if let Ty::Struct(ref trait_name)
+                    | Ty::Generic(ref trait_name, _) = bound_ty
+                    {
                         if let Some(trait_info) = self.traits.get(trait_name) {
                             let subject_str = match &subject_concrete {
-                                Ty::Struct(n) | Ty::Enum(n) | Ty::Generic(n, _) => n.clone(),
+                                Ty::Struct(n)
+                                | Ty::Enum(n)
+                                | Ty::Generic(n, _) => n.clone(),
                                 _ => subject_concrete.to_string(),
                             };
-                            let implements = if let Some(cls) = self.classes.get(&subject_str) {
+                            let implements = if let Some(cls) =
+                                self.classes.get(&subject_str)
+                            {
                                 &cls.implements
                             } else {
                                 &Vec::new()
                             };
-                            if !implements.contains(trait_name) && subject_str != *trait_name {
+                            if !implements.contains(trait_name)
+                                && subject_str != *trait_name
+                            {
                                 self.errors.push(SemError { message: format!("where bound failed: `{}` does not satisfy `{}: {}`", subject_concrete, constr.ty.name(), bound_ty), span: constr.span });
                             }
                         } else if bound_ty != subject_concrete {
@@ -5278,7 +7801,9 @@ impl Checker {
         match &expr.kind {
             ExprKind::Ident(name) => {
                 let lookup = name.rsplit("::").next().unwrap_or(name);
-                if let Some(ty) = self.lookup_var(name).or_else(|| self.lookup_var(lookup)) {
+                if let Some(ty) =
+                    self.lookup_var(name).or_else(|| self.lookup_var(lookup))
+                {
                     ty
                 } else {
                     self.errors.push(SemError {
@@ -5301,27 +7826,63 @@ impl Checker {
                         if let Some((_, fty)) = sinfo.field_map.get(field) {
                             if let Some(cinfo) = self.classes.get(sname) {
                                 if let Some(vis) = cinfo.field_vis.get(field) {
-                                    if *vis != crate::ast::Visibility::Public && self.cur_class.as_deref() != Some(sname.as_str()) {
-                                        self.errors.push(SemError{message: format!("field `{field}` is private"), span: *field_span});
+                                    if *vis != crate::ast::Visibility::Public
+                                        && self.cur_class.as_deref()
+                                            != Some(sname.as_str())
+                                    {
+                                        self.errors.push(SemError {
+                                            message: format!(
+                                                "field `{field}` is private"
+                                            ),
+                                            span: *field_span,
+                                        });
                                     }
-                                } else if self.cur_class.as_deref() != Some(sname.as_str()) {
-                                    self.errors.push(SemError{message: format!("field `{field}` is private"), span: *field_span});
+                                } else if self.cur_class.as_deref()
+                                    != Some(sname.as_str())
+                                {
+                                    self.errors.push(SemError {
+                                        message: format!(
+                                            "field `{field}` is private"
+                                        ),
+                                        span: *field_span,
+                                    });
                                 }
                             } else {
                                 if let Some(vis) = sinfo.field_vis.get(field) {
                                     if *vis == crate::ast::Visibility::Private {
-                                        self.errors.push(SemError{message: format!("field `{field}` is private"), span: *field_span});
+                                        self.errors.push(SemError {
+                                            message: format!(
+                                                "field `{field}` is private"
+                                            ),
+                                            span: *field_span,
+                                        });
                                     }
                                 }
                             }
                             fty.clone()
                         } else if let Some(cinfo) = self.classes.get(sname) {
                             if let Some(prop) = cinfo.properties.get(field) {
-                                if prop.visibility != crate::ast::Visibility::Public && self.cur_class.as_deref() != Some(sname.as_str()) {
-                                    self.errors.push(SemError{message: format!("property `{field}` is private"), span: *field_span});
+                                if prop.visibility
+                                    != crate::ast::Visibility::Public
+                                    && self.cur_class.as_deref()
+                                        != Some(sname.as_str())
+                                {
+                                    self.errors.push(SemError {
+                                        message: format!(
+                                            "property `{field}` is private"
+                                        ),
+                                        span: *field_span,
+                                    });
                                 }
-                                if prop.has_set { prop.ty.clone() } else {
-                                    self.errors.push(SemError{message: format!("property `{field}` has no setter"), span: *field_span});
+                                if prop.has_set {
+                                    prop.ty.clone()
+                                } else {
+                                    self.errors.push(SemError {
+                                        message: format!(
+                                            "property `{field}` has no setter"
+                                        ),
+                                        span: *field_span,
+                                    });
                                     Ty::Int
                                 }
                             } else {
@@ -5415,9 +7976,10 @@ impl Checker {
                     }
                 }
             }
-            ExprKind::Unary { op: UnaryOp::Deref, expr: inner } => {
-                self.check_deref_lvalue(inner, expr.span)
-            }
+            ExprKind::Unary {
+                op: UnaryOp::Deref,
+                expr: inner,
+            } => self.check_deref_lvalue(inner, expr.span),
             _ => {
                 self.errors.push(SemError {
                     message: "invalid assignment target".into(),
@@ -5436,7 +7998,9 @@ impl Checker {
             Ty::Own(pointee) => *pointee,
             other => {
                 self.errors.push(SemError {
-                    message: format!("cannot assign through `{other}` (need `T*`)"),
+                    message: format!(
+                        "cannot assign through `{other}` (need `T*`)"
+                    ),
                     span,
                 });
                 Ty::Int
@@ -5509,7 +8073,11 @@ mod tests {
 
     fn assert_clean(src: &str) {
         let errors = check_src(src);
-        assert!(errors.is_empty(), "expected no errors, got: {:?}", errors.iter().map(|e| &e.message).collect::<Vec<_>>());
+        assert!(
+            errors.is_empty(),
+            "expected no errors, got: {:?}",
+            errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
     }
 
     fn assert_error_contains(src: &str, needle: &str) {
@@ -5524,7 +8092,9 @@ mod tests {
     /// T-16: generic bounds enforced at struct instantiation.
     #[test]
     fn generic_struct_where_enforced() {
-        assert_clean("struct Box<T> where T: int has\nT value\nend\nvoid show(Box<int> b) do\nend\nvoid main() do\nend\n");
+        assert_clean(
+            "struct Box<T> where T: int has\nT value\nend\nvoid show(Box<int> b) do\nend\nvoid main() do\nend\n",
+        );
         assert_error_contains(
             "struct Box<T> where T: int has\nT value\nend\nvoid show(Box<string> b) do\nend\nvoid main() do\nend\n",
             "where bound failed",
@@ -5552,7 +8122,9 @@ mod tests {
     /// T-12: generic trait bounds enforced on `implements Trait<Args>`.
     #[test]
     fn generic_trait_implements_enforced() {
-        assert_clean("trait Box<T> where T: int has\nT fetch()\nend\nclass IntBox implements Box<int> has\nint v\nIntBox(int v) initialize\nint fetch() do\nreturn this.v\nend\nend\nvoid main() do\nend\n");
+        assert_clean(
+            "trait Box<T> where T: int has\nT fetch()\nend\nclass IntBox implements Box<int> has\nint v\nIntBox(int v) initialize\nint fetch() do\nreturn this.v\nend\nend\nvoid main() do\nend\n",
+        );
         assert_error_contains(
             "trait Box<T> where T: int has\nT fetch()\nend\nclass StrBox implements Box<string> has\nstring v\nStrBox(string v) initialize\nstring fetch() do\nreturn this.v\nend\nend\nvoid main() do\nend\n",
             "where bound failed",
@@ -5562,7 +8134,9 @@ mod tests {
     /// T-11: defaulted params must be trailing; defaults type-checked.
     #[test]
     fn param_default_definition_checks() {
-        assert_clean("int add(int a, int b = 10) do\nreturn a + b\nend\nvoid main() do\nend\n");
+        assert_clean(
+            "int add(int a, int b = 10) do\nreturn a + b\nend\nvoid main() do\nend\n",
+        );
         assert_error_contains(
             "int add(int a = 1, int b) do\nreturn a + b\nend\nvoid main() do\nend\n",
             "follows a defaulted parameter",
@@ -5576,7 +8150,9 @@ mod tests {
     /// T-11: omitted trailing defaulted args accepted; missing required args rejected.
     #[test]
     fn param_default_call_arity() {
-        assert_clean("int add(int a, int b = 10) do\nreturn a + b\nend\nvoid main() do\nint x = add(1)\nend\n");
+        assert_clean(
+            "int add(int a, int b = 10) do\nreturn a + b\nend\nvoid main() do\nint x = add(1)\nend\n",
+        );
         assert_error_contains(
             "int add(int a, int b) do\nreturn a + b\nend\nvoid main() do\nint x = add(1)\nend\n",
             "expects 2 args, found 1",
@@ -5586,7 +8162,9 @@ mod tests {
     /// T-17: exhaustive enum match; qualified variants resolve.
     #[test]
     fn enum_match_exhaustive() {
-        assert_clean("enum E has\nA\nB\nend\nvoid use(E e) do\nmatch e do\nE.A -> 1\nE.B -> 2\n_ -> 3\nend\nend\nvoid main() do\nend\n");
+        assert_clean(
+            "enum E has\nA\nB\nend\nvoid use(E e) do\nmatch e do\nE.A -> 1\nE.B -> 2\n_ -> 3\nend\nend\nvoid main() do\nend\n",
+        );
         assert_error_contains(
             "enum Color has\nRed\nGreen\nBlue\nend\nvoid use(Color c) do\nmatch c do\nColor.Red -> 1\nColor.Green -> 2\nend\nend\nvoid main() do\nend\n",
             "non-exhaustive match on enum `Color`",
@@ -5623,13 +8201,17 @@ mod tests {
     /// T-13: multi-param enum payloads check and bind per position.
     #[test]
     fn multi_payload_enum_supported() {
-        assert_clean("enum P has\nPair(int a, int b)\nSingle(int x)\nend\nint sum(P p) do\nreturn match p do\n.Pair(a, b) -> a + b\n.Single(x) -> x\nend\nend\nvoid main() do\nP p = .Pair(3, 4)\nend\n");
+        assert_clean(
+            "enum P has\nPair(int a, int b)\nSingle(int x)\nend\nint sum(P p) do\nreturn match p do\n.Pair(a, b) -> a + b\n.Single(x) -> x\nend\nend\nvoid main() do\nP p = .Pair(3, 4)\nend\n",
+        );
     }
 
     /// T-4: values lift into `Optional`; `??` needs an Optional left side.
     #[test]
     fn optional_lift_and_coalesce() {
-        assert_clean("int orElse(int? n, int fallback) do\nreturn n ?? fallback\nend\nvoid main() do\nint? a = 5\nint x = orElse(a, 99)\nend\n");
+        assert_clean(
+            "int orElse(int? n, int fallback) do\nreturn n ?? fallback\nend\nvoid main() do\nint? a = 5\nint x = orElse(a, 99)\nend\n",
+        );
         assert_error_contains(
             "void main() do\nint x = 1 ?? 2\nend\n",
             "requires an Optional left side",
@@ -5640,7 +8222,9 @@ mod tests {
     /// reads-after-move are diagnosed.
     #[test]
     fn own_fields_moves_checked() {
-        assert_clean("struct Pet has\nstring name\nend\nstruct Owner has\nown Pet pet\nint level\nend\nvoid take(Owner o) do\nend\nvoid main() do\nOwner a = Owner has\npet = new Pet(\"r\")\nlevel = 1\nend\ntake(a)\nend\n");
+        assert_clean(
+            "struct Pet has\nstring name\nend\nstruct Owner has\nown Pet pet\nint level\nend\nvoid take(Owner o) do\nend\nvoid main() do\nOwner a = Owner has\npet = new Pet(\"r\")\nlevel = 1\nend\ntake(a)\nend\n",
+        );
         assert_error_contains(
             "struct Pet has\nstring name\nend\nstruct Owner has\nown Pet pet\nend\nvoid main() do\nOwner a = Owner has\npet = new Pet(\"r\")\nend\nOwner b = a\nstring s = a.pet.name\nend\n",
             "use of moved or deleted value `a`",
@@ -5655,8 +8239,12 @@ mod tests {
     /// globals stay rejected (const must be constant-foldable, not runtime).
     #[test]
     fn own_containers_and_globals_rejected() {
-        assert_clean("struct Pet has\nstring name\nend\nstruct Owner has\nown Pet pet\nend\nvoid main() do\nOwner vec v = vec[]\nend\n");
-        assert_clean("struct Pet has\nstring name\nend\nstruct Owner has\nown Pet pet\nend\nOwner g = Owner has\npet = new Pet(\"r\")\nend\nvoid main() do\nend\n");
+        assert_clean(
+            "struct Pet has\nstring name\nend\nstruct Owner has\nown Pet pet\nend\nvoid main() do\nOwner vec v = vec[]\nend\n",
+        );
+        assert_clean(
+            "struct Pet has\nstring name\nend\nstruct Owner has\nown Pet pet\nend\nOwner g = Owner has\npet = new Pet(\"r\")\nend\nvoid main() do\nend\n",
+        );
         assert_error_contains(
             "struct Pet has\nstring name\nend\nstruct Owner has\nown Pet pet\nend\nconst Owner c = Owner has\npet = new Pet(\"x\")\nend\nvoid main() do\nend\n",
             "need structural destruction",
@@ -5684,7 +8272,9 @@ mod tests {
     fn byte_conversions_widen_at_bindings_truncate_in_slots() {
         assert_clean("void main() do\nstring s = \"AB\"\nint b = s[0]\nend\n");
         assert_clean("void main() do\nstring r = \"xy\"\nr[0] = 65\nend\n");
-        assert_clean("int f(int x) do\nreturn x\nend\nvoid main() do\nstring s = \"AB\"\nint b = f(s[0])\nend\n");
+        assert_clean(
+            "int f(int x) do\nreturn x\nend\nvoid main() do\nstring s = \"AB\"\nint b = f(s[0])\nend\n",
+        );
         assert_error_contains(
             "void main() do\nchar c = 65\nend\n",
             "expected `char`, found `int`",

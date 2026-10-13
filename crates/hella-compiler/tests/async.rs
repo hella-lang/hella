@@ -51,7 +51,8 @@ impl Scratch {
         let object = self.0.join("test.o");
         codegen::compile_to_object(&program, &object, opt).unwrap();
         let exe = self.0.join(if cfg!(windows) { "test.exe" } else { "test" });
-        let linker = std::env::var_os("HELLA_LINKER").unwrap_or_else(|| "clang".into());
+        let linker =
+            std::env::var_os("HELLA_LINKER").unwrap_or_else(|| "clang".into());
         let mut command = Command::new(&linker);
         command.arg(&object).arg("-o").arg(&exe);
         if cfg!(windows) {
@@ -71,7 +72,9 @@ impl Scratch {
                 command.arg("-pthread");
             }
         }
-        let linked = command.output().expect("C linker required (clang or HELLA_LINKER)");
+        let linked = command
+            .output()
+            .expect("C linker required (clang or HELLA_LINKER)");
         assert!(
             linked.status.success(),
             "link failed: {}",
@@ -120,7 +123,10 @@ fn sema_errors(src: &str) -> Vec<String> {
     let lexed = lexer::lex(src);
     assert!(lexed.errors.is_empty(), "lex: {:?}", lexed.errors);
     let parsed = parse::parse(lexed.tokens, src.to_owned()).expect("parse");
-    sema::check(&parsed).into_iter().map(|e| e.message).collect()
+    sema::check(&parsed)
+        .into_iter()
+        .map(|e| e.message)
+        .collect()
 }
 
 #[test]
@@ -279,7 +285,8 @@ end
 #[test]
 fn sync_program_does_not_link_or_reference_the_runtime() {
     let scratch = Scratch::new("sync");
-    let src = "import std::io\nvoid main() do\n    println(\"sync only\")\nend\n";
+    let src =
+        "import std::io\nvoid main() do\n    println(\"sync only\")\nend\n";
     let (exe, needs_async) = scratch.compile(src, codegen::OptLevel::Debug);
     assert!(!needs_async, "sync program must not require the runtime");
     let (out, err, ok) = scratch.run(&exe);
@@ -289,10 +296,7 @@ fn sync_program_does_not_link_or_reference_the_runtime() {
     let bytes = fs::read(&exe).unwrap();
     let text = String::from_utf8_lossy(&bytes);
     for sym in ["hella_task_spawn", "hella_task_join", "pthread_create"] {
-        assert!(
-            !text.contains(sym),
-            "sync binary references `{sym}`"
-        );
+        assert!(!text.contains(sym), "sync binary references `{sym}`");
     }
 }
 
@@ -353,7 +357,10 @@ void main() async do
 end
 "#,
     );
-    assert!(errs.iter().any(|e| e.contains("escapes its `scope`")), "{errs:?}");
+    assert!(
+        errs.iter().any(|e| e.contains("escapes its `scope`")),
+        "{errs:?}"
+    );
 }
 
 #[test]
@@ -371,9 +378,20 @@ void main() do
 end
 "#,
     );
-    assert!(errs.iter().any(|e| e.contains("`scope` requires an `async`")), "{errs:?}");
-    assert!(errs.iter().any(|e| e.contains("`await` requires an `async`")), "{errs:?}");
-    assert!(errs.iter().any(|e| e.contains("only be called")), "{errs:?}");
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("`scope` requires an `async`")),
+        "{errs:?}"
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("`await` requires an `async`")),
+        "{errs:?}"
+    );
+    assert!(
+        errs.iter().any(|e| e.contains("only be called")),
+        "{errs:?}"
+    );
 }
 
 #[test]
@@ -389,11 +407,18 @@ void main() async do
 end
 "#,
     );
-    assert!(errs.iter().any(|e| e.contains("enclosing `scope")), "{errs:?}");
+    assert!(
+        errs.iter().any(|e| e.contains("enclosing `scope")),
+        "{errs:?}"
+    );
 }
 
 #[test]
 fn yield_outside_async_is_rejected() {
     let errs = sema_errors("void main() do\n    yield\nend\n");
-    assert!(errs.iter().any(|e| e.contains("`yield` requires an `async`")), "{errs:?}");
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("`yield` requires an `async`")),
+        "{errs:?}"
+    );
 }

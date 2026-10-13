@@ -67,7 +67,9 @@ impl<'a> Reach<'a> {
     fn visit(&mut self, e: &Expr) {
         match &e.kind {
             // Only legal inside async bodies; both require the runtime.
-            ExprKind::Await { .. } | ExprKind::Spawn { .. } => self.needed = true,
+            ExprKind::Await { .. } | ExprKind::Spawn { .. } => {
+                self.needed = true
+            }
             ExprKind::Call { callee, .. } => {
                 self.mark_fn(callee);
             }
@@ -163,7 +165,10 @@ pub fn analyze(prog: &Program) -> AsyncReach {
             .any(|n| st.funcs.get(n).map(|f| f.is_async).unwrap_or(false));
     }
 
-    AsyncReach { needed: st.needed, reachable: st.reachable }
+    AsyncReach {
+        needed: st.needed,
+        reachable: st.reachable,
+    }
 }
 
 /// True when `prog` must link the async runtime (Async-8).

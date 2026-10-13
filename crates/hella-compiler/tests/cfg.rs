@@ -22,7 +22,11 @@ fn expand(src: &str, debug_mode: bool) -> hella_compiler::ast::Program {
     assert!(lexed.errors.is_empty(), "lex: {:?}", lexed.errors);
     let parsed = parse::parse(lexed.tokens, src.to_string()).expect("parse");
     let expanded = modules::expand_imports_with_cfg(parsed, &entry, debug_mode);
-    assert!(expanded.errors.is_empty(), "expansion: {:?}", expanded.errors);
+    assert!(
+        expanded.errors.is_empty(),
+        "expansion: {:?}",
+        expanded.errors
+    );
     expanded.program
 }
 
@@ -168,10 +172,7 @@ end
 "#
     );
     assert_eq!(fn_names(&expand(&src, true)), vec!["both".to_string()]);
-    assert_eq!(
-        fn_names(&expand(&src, false)),
-        vec!["os_only".to_string()]
-    );
+    assert_eq!(fn_names(&expand(&src, false)), vec!["os_only".to_string()]);
 }
 
 #[test]
@@ -181,7 +182,9 @@ fn non_cfg_attributes_are_untouched() {
     assert_eq!(fn_names(&prog), vec!["kept".to_string()]);
     // The item stays attributed (attributes are not consumed by cfg).
     match &prog.items[0] {
-        hella_compiler::ast::Item::Attributed { attrs, .. } => assert_eq!(attrs.len(), 2),
+        hella_compiler::ast::Item::Attributed { attrs, .. } => {
+            assert_eq!(attrs.len(), 2)
+        }
         other => panic!("expected attributed item, got {other:?}"),
     }
 }
@@ -205,7 +208,8 @@ end
     let prog = expand(&src, true);
     let errors = sema::check(&prog);
     assert!(
-        errors.iter().any(|e| e.message.contains("missing_name") || e.message.contains("undefined")),
+        errors.iter().any(|e| e.message.contains("missing_name")
+            || e.message.contains("undefined")),
         "{errors:?}"
     );
 }

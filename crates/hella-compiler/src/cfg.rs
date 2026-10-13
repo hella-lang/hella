@@ -64,7 +64,11 @@ pub fn is_cfg(attr: &Attribute) -> bool {
 /// Evaluate a single `@cfg(...)` condition. `debug_mode` is true only for
 /// the CLI debug link profile (see module docs); `target_override` lets a
 /// caller (the LSP, tests) substitute a different triple, `None` = host.
-pub fn eval_cfg(attr: &Attribute, debug_mode: bool, target_override: Option<&str>) -> bool {
+pub fn eval_cfg(
+    attr: &Attribute,
+    debug_mode: bool,
+    target_override: Option<&str>,
+) -> bool {
     if !is_cfg(attr) {
         return true;
     }
@@ -87,7 +91,13 @@ pub fn eval_cfg(attr: &Attribute, debug_mode: bool, target_override: Option<&str
 
 /// `key = value` inside `@cfg(...)`: `Assign { lhs: Ident, value }` is how
 /// the attribute-arg grammar delivers it (it accepts general expressions).
-fn eval_named(key: &str, value: &Expr, debug_mode: bool, triple: &str, os: &str) -> bool {
+fn eval_named(
+    key: &str,
+    value: &Expr,
+    debug_mode: bool,
+    triple: &str,
+    os: &str,
+) -> bool {
     match key {
         "os" => match &value.kind {
             ExprKind::StringLit(s) => s.as_str() == os,
@@ -105,7 +115,12 @@ fn eval_named(key: &str, value: &Expr, debug_mode: bool, triple: &str, os: &str)
     }
 }
 
-fn eval_arg(arg: &AttributeArg, debug_mode: bool, triple: &str, os: &str) -> bool {
+fn eval_arg(
+    arg: &AttributeArg,
+    debug_mode: bool,
+    triple: &str,
+    os: &str,
+) -> bool {
     match arg {
         AttributeArg::Expr(e) => {
             // Named form (`os = "macos"`) parses as `Assign` (general exprs).
@@ -131,7 +146,8 @@ fn eval_arg(arg: &AttributeArg, debug_mode: bool, triple: &str, os: &str) -> boo
                 _ => false,
             }
         }
-        AttributeArg::Named(key, _, value) | AttributeArg::Assign(key, _, value) => {
+        AttributeArg::Named(key, _, value)
+        | AttributeArg::Assign(key, _, value) => {
             eval_named(key, value, debug_mode, triple, os)
         }
     }
@@ -145,7 +161,9 @@ pub fn apply_cfg(items: &mut Vec<crate::ast::Item>, debug_mode: bool) {
         let crate::ast::Item::Attributed { attrs, .. } = item else {
             return true;
         };
-        attrs.iter().all(|a| !is_cfg(a) || eval_cfg(a, debug_mode, None))
+        attrs
+            .iter()
+            .all(|a| !is_cfg(a) || eval_cfg(a, debug_mode, None))
     });
 }
 
@@ -159,7 +177,9 @@ mod tests {
         assert!(lexed.errors.is_empty(), "lex: {:?}", lexed.errors);
         let prog = crate::parse::parse(lexed.tokens, full).unwrap();
         match prog.items.into_iter().next().unwrap() {
-            crate::ast::Item::Attributed { attrs, .. } => attrs.into_iter().next().unwrap(),
+            crate::ast::Item::Attributed { attrs, .. } => {
+                attrs.into_iter().next().unwrap()
+            }
             other => panic!("expected attributed item, got {other:?}"),
         }
     }
@@ -236,7 +256,8 @@ end
 "#;
         let lexed = crate::lexer::lex(src);
         assert!(lexed.errors.is_empty());
-        let mut prog = crate::parse::parse(lexed.tokens, src.to_string()).unwrap();
+        let mut prog =
+            crate::parse::parse(lexed.tokens, src.to_string()).unwrap();
         apply_cfg(&mut prog.items, true);
         assert_eq!(prog.items.len(), 1);
         match &prog.items[0] {

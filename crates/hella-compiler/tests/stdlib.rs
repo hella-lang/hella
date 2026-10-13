@@ -35,7 +35,11 @@ impl Scratch {
         assert!(lexed.errors.is_empty(), "{:?}", lexed.errors);
         let parsed = parse::parse(lexed.tokens, source.to_owned()).unwrap();
         let expanded = modules::expand_imports(parsed, &entry);
-        assert!(expanded.errors.is_empty(), "import expansion failed");
+        assert!(
+            expanded.errors.is_empty(),
+            "import expansion failed: {:?}",
+            expanded.errors
+        );
         let errors = sema::check(&expanded.program);
         assert!(errors.is_empty(), "{errors:?}");
         // Modules over `runtime/hella_sync.c` (`std::time`/`sync`/`chan`/`net`,
@@ -59,7 +63,8 @@ impl Scratch {
         }
         if needs_sync {
             command.arg(
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/hella_sync.c"),
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../runtime/hella_sync.c"),
             );
             if !cfg!(windows) {
                 command.arg("-pthread");
@@ -127,15 +132,21 @@ fn stdlib_compiles_links_and_runs_debug_and_release() {
             ("num", "num ok\n"),
             ("math", "doubles ok\nmath ok\n"),
             ("collections", "collections ok\n"),
+            ("array", "array ok\n"),
             ("env", "env ok\n"),
+            ("os", "os ok\n"),
             ("fs", "fs ok\n"),
             ("path", "path ok\n"),
             ("io", "io: ok\n42\nA\nname? hello Ada\nage? 42\n"),
             ("encoding", "encoding ok\n"),
+            ("bytes", "bytes ok\n"),
+            ("utf8", "utf8 ok\n"),
             ("hash", "hash ok\n"),
             ("url", "url ok\n"),
             ("terminal", "stdout is not a terminal\nterminal ok\n"),
             ("time", "time ok\n"),
+            ("json", "json ok\n"),
+            ("csv", "csv ok\n"),
         ] {
             let source = fs::read_to_string(
                 root.join(format!("examples/stdlib_{name}.hll")),
@@ -172,6 +183,35 @@ end
             "x".repeat(256)
         );
         assert_eq!(scratch.run(&exe, &input, true).0, "lines ok\n");
+        let exe = scratch.compile(
+            r#"
+import std::io
+import std::str
+int main() do
+    string line = "stale"
+    assert tryReadLine(ref line)
+    assert isEmpty(line)
+    assert tryReadLine(ref line)
+    assert equals(line, "Ada")
+    assert tryReadLine(ref line)
+    assert equals(line, "cr\r")
+    assert tryReadLine(ref line) is false
+    assert isEmpty(line)
+    assert tryReadLine(ref line)
+    assert equals(line, "after")
+    assert tryReadLine(ref line)
+    assert equals(line, "tail")
+    assert tryReadLine(ref line) is false
+    println("line status ok")
+    return 0
+end
+"#,
+            opt,
+        );
+        assert_eq!(
+            scratch.run(&exe, "\nAda\ncr\r\na\0b\nafter\ntail", true).0,
+            "line status ok\n"
+        );
         // Check overflow before multiplication/allocation, also in optimized builds.
         for call in [
             "repeat(\"xx\", 9223372036854775807)",
@@ -186,7 +226,8 @@ end
         // Log lines carry wall-clock millis (nondeterministic), so match
         // level tags + messages rather than whole lines. Filtering must
         // hide debug/info/warn at LOG_ERROR while errors still show.
-        let source = fs::read_to_string(root.join("examples/stdlib_log.hll")).unwrap();
+        let source =
+            fs::read_to_string(root.join("examples/stdlib_log.hll")).unwrap();
         let exe = scratch.compile(&source, opt);
         let (out, err) = scratch.run(&exe, "", true);
         assert_eq!(out, "log ok\n");
@@ -198,7 +239,10 @@ end
             "CUSTOM custom visible",
             "ERROR error still visible",
         ] {
-            assert!(err.contains(visible), "stderr missing `{visible}`:\n{err}");
+            assert!(
+                err.contains(visible),
+                "stderr missing `{visible}`:\n{err}"
+            );
         }
         for hidden in ["debug hidden", "info hidden", "warn hidden"] {
             assert!(!err.contains(hidden), "stderr leaked `{hidden}`:\n{err}");
@@ -212,8 +256,9 @@ fn stdlib_selective_imports_keep_transitive_helpers() {
     // reference — values AND types: `trim` needs `substring`/`allocateString`,
     // `toString` needs its nested `std::str` deps, `join` needs nested
     // `std::vector` deps, `RED` is a const (previously kept nothing),
-    // `flip` needs the module-level generator globals, and `count` needs
-    // `indexOf`/`indexOfFrom` transitively. (`dateUtc`'s `struct Tm`
+    // `flip` needs the module-level generator globals, `count` needs
+    // `indexOf`/`indexOfFrom`, and JSON validation uses recursive helpers.
+    // (`dateUtc`'s `struct Tm`
     // closure has its own small test below: this giant main already
     // nears a pre-existing debug codegen frame-size crash.)
     let scratch = Scratch::new("selective");
@@ -221,11 +266,15 @@ fn stdlib_selective_imports_keep_transitive_helpers() {
         let exe = scratch.compile(
             r#"
 import std::io
-import std::str::{trim, equals, len, count, equalsIgnoreCase, trimPrefix, splitNextSpace}
+import std::str::{trim, equals, len, count, equalsIgnoreCase, trimPrefix, splitNextSpace, concat, freeString}
 import std::terminal::ansi::{RED, RESET}
 import std::rand::{seed, flip}
 import std::num::{toString}
 import std::fmt::{join}
+import std::utf8::{runeCount}
+import std::bytes::{fromString, tryToString}
+import std::json::{isValid, tryUnquoteString, tryGetRawField}
+import std::csv::{tryNextField}
 int main() do
     assert equals(trim("  hi  "), "hi")
     assert len(RED) is 5
@@ -238,8 +287,29 @@ int main() do
     string vec parts = ["a", "b"]
     assert equals(join(",", parts), "a,b")
     assert count("aaaaa", "aa") is 2
+    assert runeCount("A¢") is 2
     assert equalsIgnoreCase("HeLLo", "hello") is true
     assert equals(trimPrefix("hello", "hell"), "o")
+    u8 vec raw = fromString("bytes")
+    string restored = ""
+    assert tryToString(raw, ref restored)
+    assert equals(restored, "bytes")
+    assert isValid("[1, true, null]")
+    string decodedJson = ""
+    assert tryUnquoteString("\"hi\\nthere\"", ref decodedJson)
+    assert equals(decodedJson, "hi\nthere")
+    freeString(ref decodedJson)
+    string rawJson = ""
+    assert tryGetRawField(concat("{", "\"key\":42}"), "key", ref rawJson)
+    assert equals(rawJson, "42")
+    freeString(ref rawJson)
+    int csvCursor = 0
+    int csvSeparator = -1
+    string csvField = ""
+    assert tryNextField("\"a,b\",c", ref csvCursor, ref csvField, ref csvSeparator)
+    assert equals(csvField, "a,b")
+    assert csvSeparator is 44
+    freeString(ref csvField)
     int cursor = 0
     assert equals(splitNextSpace("  a b ", ref cursor), "a")
     assert equals(splitNextSpace("  a b ", ref cursor), "b")
@@ -282,5 +352,63 @@ end
             opt,
         );
         assert_eq!(scratch.run(&exe, "", true).0, "selective types ok\n");
+    }
+}
+
+#[test]
+fn stdlib_encoding_selective_imports_keep_binary_helpers() {
+    let scratch = Scratch::new("encoding-selective");
+    for opt in [codegen::OptLevel::Debug, codegen::OptLevel::Release] {
+        let exe = scratch.compile(
+            r#"
+import std::io
+import std::str::{equals}
+import std::encoding::{hexDecodeBytes, base64EncodeBytes, base64DecodeBytes}
+int main() do
+    u8 vec bytes = vec[]
+    assert hexDecodeBytes("0001ff", ref bytes)
+    assert equals(base64EncodeBytes(bytes), "AAH/")
+    assert base64DecodeBytes("AAH/", ref bytes)
+    assert bytes.len() is 3
+    println("encoding selective ok")
+    return 0
+end
+"#,
+            opt,
+        );
+        assert_eq!(
+            scratch.run(&exe, "", true).0,
+            "encoding selective ok\n"
+        );
+    }
+}
+
+#[test]
+fn stdlib_map_mutators_work_with_selective_imports() {
+    let scratch = Scratch::new("map-mutators-selective");
+    for opt in [codegen::OptLevel::Debug, codegen::OptLevel::Release] {
+        let exe = scratch.compile(
+            r#"
+    import std::io
+    import std::map::{siPut, siRemove, siTryGet, siClear, siIsEmpty}
+    int main() do
+        string:int values = has "x": 1 end
+        siPut(ref values, "y", 2)
+        siPut(ref values, "x", 3)
+        int value = 0
+        assert siTryGet(values, "x", ref value)
+        assert value is 3
+        assert siRemove(ref values, "y")
+        assert siRemove(ref values, "y") is false
+        siPut(ref values, "z", 4)
+        siClear(ref values)
+        assert siIsEmpty(values)
+        println("map mutators ok")
+        return 0
+    end
+    "#,
+            opt,
+        );
+        assert_eq!(scratch.run(&exe, "", true).0, "map mutators ok\n");
     }
 }
